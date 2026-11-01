@@ -95,6 +95,12 @@ export interface LogEntry {
   text: string
 }
 
+export interface AppliedProxy {
+  endpoint: string
+  backend: string
+  applied_at_ms: number
+}
+
 export interface Settings {
   theme: 'light' | 'dark' | 'system'
   core_preference: CoreKind | null
@@ -102,6 +108,8 @@ export interface Settings {
   rule_set: boolean
   proxy_groups: boolean
   allow_lan: boolean
+  /** Install the system proxy automatically when a core starts. */
+  system_proxy: boolean
   log_level: string
 }
 

@@ -67,6 +67,7 @@ export function Dashboard() {
   const library = useApp((state) => state.library)
   const selection = useApp((state) => state.selection)
   const settings = useApp((state) => state.settings)
+  const proxy = useApp((state) => state.proxy)
   const busy = useApp((state) => state.busy)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
@@ -156,8 +157,7 @@ export function Dashboard() {
           <div className="space-y-1.5 text-[13px]">
             <Row
               label="系统代理"
-              value="未启用"
-              hint="Phase 6"
+              value={proxy ? proxy.endpoint : "未启用"}
             />
             <Row label="TUN" value={settings?.tun ? '已启用' : '未启用'} hint="Phase 7" />
             <Row label="分流规则" value={settings?.rule_set ? '已启用' : '未启用'} />

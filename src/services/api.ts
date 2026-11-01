@@ -16,6 +16,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import type {
+  AppliedProxy,
   CoreKind,
   LogEntry,
   ManagerStatus,
@@ -70,4 +71,9 @@ export const api = {
   saveSettings: (settings: Settings) => call<void>('save_settings', { settings }),
 
   previewSelection: () => call<Selection | null>('preview_selection'),
+
+  systemProxyStatus: () => call<AppliedProxy | null>('system_proxy_status'),
+
+  setSystemProxy: (enabled: boolean) =>
+    call<AppliedProxy | null>('set_system_proxy', { enabled }),
 }

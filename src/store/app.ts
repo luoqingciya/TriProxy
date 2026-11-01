@@ -17,6 +17,7 @@ import { create } from 'zustand'
 
 import { api } from '../services/api'
 import type {
+  AppliedProxy,
   CoreKind,
   ManagerStatus,
   NodeSummary,
@@ -49,6 +50,7 @@ interface AppState {
   nodes: NodeSummary[]
   selection: Selection | null
   settings: Settings | null
+  proxy: AppliedProxy | null
   busy: boolean
   error: string | null
 
@@ -64,6 +66,7 @@ interface AppState {
   useProfile: (id: string) => Promise<void>
   removeProfile: (id: string) => Promise<void>
 
+  setSystemProxy: (enabled: boolean) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   clearError: () => void
 }
@@ -77,6 +80,7 @@ export const useApp = create<AppState>((set, get) => ({
   nodes: [],
   selection: null,
   settings: null,
+  proxy: null,
   busy: false,
   error: null,
 
@@ -93,13 +97,14 @@ export const useApp = create<AppState>((set, get) => ({
    */
   refresh: async () => {
     try {
-      const [status, library, nodes, selection] = await Promise.all([
+      const [status, library, nodes, selection, proxy] = await Promise.all([
         api.status(),
         api.profiles(),
         api.activeNodes(),
         api.previewSelection(),
+        api.systemProxyStatus(),
       ])
-      set({ status, library, nodes, selection, error: null })
+      set({ status, library, nodes, selection, proxy, error: null })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -179,6 +184,17 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       await api.deleteProfile(id)
       await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  setSystemProxy: async (enabled) => {
+    try {
+      const proxy = await api.setSystemProxy(enabled)
+      set({ proxy })
+      // Remember the choice so starting a core re-applies it.
+      await get().updateSettings({ system_proxy: enabled })
     } catch (error) {
       set({ error: describe(error) })
     }

@@ -24,7 +24,7 @@ use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, parse_payload, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport,
     Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile,
-    ProfileStore, Selector, StoredProfile, SwitchReport,
+    ProfileStore, Selector, StoredProfile, SwitchReport, SystemProxyManager,
 };
 
 #[derive(Parser)]
@@ -67,6 +67,9 @@ enum Command {
         /// Compile this profile for the core instead of using the bootstrap config
         #[arg(long, value_name = "PATH")]
         profile: Option<PathBuf>,
+        /// Also point the system proxy at the core once it is running
+        #[arg(long)]
+        proxy: bool,
     },
     /// Stop whatever core is running
     Stop,
@@ -79,6 +82,9 @@ enum Command {
         /// Compile this profile for the core instead of using the bootstrap config
         #[arg(long, value_name = "PATH")]
         profile: Option<PathBuf>,
+        /// Also point the system proxy at the core once it is running
+        #[arg(long)]
+        proxy: bool,
     },
     /// Show captured core logs
     Logs {
@@ -97,6 +103,11 @@ enum Command {
         #[command(subcommand)]
         command: CoreCommand,
     },
+    /// Manage the system proxy
+    Proxy {
+        #[command(subcommand)]
+        command: ProxyCommand,
+    },
     /// Inspect a profile (Phase 2: URI lists and base64 subscriptions)
     Profile {
         #[command(subcommand)]
@@ -104,6 +115,20 @@ enum Command {
     },
     /// Check the environment: binaries, versions, ports, data directory
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum ProxyCommand {
+    /// Point the system proxy at a core's local inbound
+    On {
+        /// Endpoint to use (default: the running core's port on 127.0.0.1)
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// Restore the proxy settings captured before TriProxy changed them
+    Off,
+    /// Show whether TriProxy has the system proxy enabled
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -273,15 +298,34 @@ async fn run(cli: Cli) -> Result<i32> {
     // every single invocation, because every invocation adopts the running core.
     manager.recover().await?;
 
+    // A leftover proxy snapshot with no running core means a previous session
+    // died before restoring it. Undo that before doing anything else — leaving
+    // the machine pointing at a dead port is the worst outcome of a crash.
+    let system_proxy = SystemProxyManager::new(manager.layout());
+    if system_proxy.status().is_some() && manager.status().await.active_core.is_none() {
+        if let Some(applied) = system_proxy.recover()? {
+            eprintln!(
+                "note: restored the system proxy left behind by a previous session ({})",
+                applied.endpoint
+            );
+        }
+    }
+
     match cli.command {
         Command::Status => cmd_status(&manager, cli.json).await,
         Command::Cores => cmd_cores(&manager, cli.json).await,
-        Command::Start { core, profile } => {
-            cmd_start(&manager, core.as_deref(), profile.as_deref()).await
-        }
+        Command::Start {
+            core,
+            profile,
+            proxy,
+        } => cmd_start(&manager, core.as_deref(), profile.as_deref(), proxy).await,
         Command::Stop => cmd_stop(&manager).await,
         Command::Restart => cmd_restart(&manager).await,
-        Command::Switch { core, profile } => cmd_switch(&manager, &core, profile.as_deref()).await,
+        Command::Switch {
+            core,
+            profile,
+            proxy,
+        } => cmd_switch(&manager, &core, profile.as_deref(), proxy).await,
         Command::Logs {
             lines,
             core,
@@ -309,6 +353,11 @@ async fn run(cli: Cli) -> Result<i32> {
             }
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
             CoreCommand::Select { source, tun, json } => cmd_core_select(&source, tun, json),
+        },
+        Command::Proxy { command } => match command {
+            ProxyCommand::On { endpoint } => cmd_proxy_on(&manager, endpoint.as_deref()).await,
+            ProxyCommand::Off => cmd_proxy_off(&manager),
+            ProxyCommand::Status => cmd_proxy_status(&manager),
         },
         Command::Profile { command } => match command {
             ProfileCommand::Parse { source, json } => cmd_profile_parse(&source, json),
@@ -363,6 +412,7 @@ async fn cmd_start(
     manager: &CoreManager,
     core: Option<&str>,
     profile: Option<&Path>,
+    proxy: bool,
 ) -> Result<i32> {
     let choice = match core {
         Some(name) => parse_core_choice(name)?,
@@ -394,6 +444,9 @@ async fn cmd_start(
     );
     println!("  config  {}", report.config.display());
     println!("  listen  127.0.0.1:{}", kind.default_listen_port());
+    if proxy {
+        enable_system_proxy(manager)?;
+    }
     Ok(0)
 }
 
@@ -405,6 +458,12 @@ async fn cmd_stop(manager: &CoreManager) -> Result<i32> {
         for kind in stopped {
             println!("{kind} stopped");
         }
+    }
+
+    // The proxy is useless without a core, and leaving it on would break the
+    // machine's connectivity. Restore before returning.
+    if SystemProxyManager::new(manager.layout()).disable()? {
+        println!("system proxy restored");
     }
     Ok(0)
 }
@@ -422,7 +481,12 @@ async fn cmd_restart(manager: &CoreManager) -> Result<i32> {
     Ok(0)
 }
 
-async fn cmd_switch(manager: &CoreManager, core: &str, profile: Option<&Path>) -> Result<i32> {
+async fn cmd_switch(
+    manager: &CoreManager,
+    core: &str,
+    profile: Option<&Path>,
+    proxy: bool,
+) -> Result<i32> {
     let choice = parse_core_choice(core)?;
     let (kind, compiled) = resolve_target(manager, choice, profile)?;
 
@@ -435,6 +499,9 @@ async fn cmd_switch(manager: &CoreManager, core: &str, profile: Option<&Path>) -
         None => manager.switch(kind).await?,
     };
     print_switch_report(&report);
+    if proxy {
+        enable_system_proxy(manager)?;
+    }
     Ok(0)
 }
 
@@ -1070,6 +1137,80 @@ fn cmd_profile_current(manager: &CoreManager, json: bool) -> Result<i32> {
     println!("nodes     {}", profile.nodes.len());
     println!();
     print_profile_nodes(&profile);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// system proxy (Phase 6)
+// ---------------------------------------------------------------------------
+
+/// Enable the system proxy for whichever core is currently listening.
+fn enable_system_proxy(manager: &CoreManager) -> Result<()> {
+    let proxy = SystemProxyManager::new(manager.layout());
+    if !proxy.supported() {
+        bail!(
+            "system proxy is not supported on this platform (backend `{}`)",
+            proxy.backend_name()
+        );
+    }
+    let port = running_port(manager).ok_or_else(|| anyhow!("no core is running"))?;
+    let applied = proxy.enable(&format!("127.0.0.1:{port}"))?;
+    println!("  system proxy → {}", applied.endpoint);
+    Ok(())
+}
+
+fn running_port(manager: &CoreManager) -> Option<u16> {
+    // `status()` is async; the CLI calls this from a sync helper, so use the
+    // persisted listen port recorded when the core was started.
+    manager.persisted_listen_port()
+}
+
+async fn cmd_proxy_on(manager: &CoreManager, endpoint: Option<&str>) -> Result<i32> {
+    let proxy = SystemProxyManager::new(manager.layout());
+    if !proxy.supported() {
+        bail!(
+            "system proxy is not supported on this platform (backend `{}`)",
+            proxy.backend_name()
+        );
+    }
+
+    let endpoint = match endpoint {
+        Some(endpoint) => endpoint.to_string(),
+        None => {
+            let port = running_port(manager).ok_or_else(|| {
+                anyhow!("no core is running; pass --endpoint or start a core first")
+            })?;
+            format!("127.0.0.1:{port}")
+        }
+    };
+
+    let applied = proxy.enable(&endpoint)?;
+    println!("system proxy enabled → {}", applied.endpoint);
+    println!("  backend  {}", applied.backend);
+    println!("  previous settings saved; `triproxy proxy off` restores them");
+    Ok(0)
+}
+
+fn cmd_proxy_off(manager: &CoreManager) -> Result<i32> {
+    let proxy = SystemProxyManager::new(manager.layout());
+    if proxy.disable()? {
+        println!("system proxy restored");
+    } else {
+        println!("system proxy was not enabled by TriProxy");
+    }
+    Ok(0)
+}
+
+fn cmd_proxy_status(manager: &CoreManager) -> Result<i32> {
+    let proxy = SystemProxyManager::new(manager.layout());
+    match proxy.status() {
+        Some(applied) => {
+            println!("system proxy  enabled → {}", applied.endpoint);
+            println!("  backend      {}", applied.backend);
+            println!("  applied at   {}", format_datetime(applied.applied_at_ms));
+        }
+        None => println!("system proxy  not managed by TriProxy"),
+    }
     Ok(0)
 }
 

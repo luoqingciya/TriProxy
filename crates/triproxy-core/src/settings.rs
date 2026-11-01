@@ -50,6 +50,9 @@ pub struct AppSettings {
     pub proxy_groups: bool,
     #[serde(default)]
     pub allow_lan: bool,
+    /// Install the system proxy automatically when a core starts.
+    #[serde(default)]
+    pub system_proxy: bool,
     #[serde(default = "default_log_level")]
     pub log_level: String,
 }
@@ -67,6 +70,7 @@ impl Default for AppSettings {
             rule_set: false,
             proxy_groups: false,
             allow_lan: false,
+            system_proxy: false,
             log_level: default_log_level(),
         }
     }
@@ -166,6 +170,7 @@ mod tests {
             rule_set: true,
             proxy_groups: false,
             allow_lan: true,
+            system_proxy: true,
             log_level: "debug".to_string(),
         };
         settings.save(&layout).unwrap();
