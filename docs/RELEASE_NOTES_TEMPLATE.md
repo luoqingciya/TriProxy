@@ -4,9 +4,24 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
-## 本次更新（v0.2.1）
+## 本次更新（v0.2.2）
 
-**修复：v0.2.0 的发布包里没有安装程序。** 当时流水线只打包了命令行工具，图形界面客户端从未进入发布流程——下载页上只有压缩包，没有可安装的程序。这一版补上了 Windows 安装包，并把发布说明改成先讲安装程序、再讲命令行工具。
+**修复：程序根本启动不了。** 安装后双击没有任何窗口，只弹一个错误：
+
+```
+无法定位程序输入点 TaskDialogIndirect 于动态链接库 ...\triproxy-app.exe 上
+```
+
+原因是上一版为了让程序以管理员身份运行，替换了 Tauri 的默认应用清单，**丢掉了 Common
+Controls v6 的依赖声明**。没有它，Windows 加载的是旧版 comctl32，里面根本没有这个函数，
+程序在进入 main 之前就死了。清单已补全。
+
+同时修掉的：
+
+- **图标换成了正式设计**（此前是占位图）
+- **数据目录改到安装目录下**（`<安装目录>\data`），不再写 `%APPDATA%`。首次启动会把旧数据自动迁移过来
+- **不再单独提供命令行压缩包**：Windows 的安装包里同时包含图形界面和 `triproxy.exe`，一个包解决两种用法
+- **lite / full 两个变体**：lite 不带核心（首次运行时下载），full 直接带三个已校验的核心
 
 ### v0.2.0 起的功能
 
@@ -42,37 +57,41 @@
 
 ## 下载哪一个？
 
-发布里有两类东西，用途完全不同：
+每个平台都提供桌面安装包，两个变体：
 
-### 桌面客户端（推荐普通用户）
-
-`TriProxy_<版本>_x64-setup.exe` —— Windows 安装程序，双击安装，装完在开始菜单里。
-
-- 这是完整的图形界面客户端：仪表盘、节点、连接、配置、日志、设置
-- 安装到 `Program Files`，启动时请求管理员权限（TUN 模式需要）
-
-> 安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」。
-> 点「更多信息 → 仍要运行」即可；校验方式见下方「校验」。
-
-### 命令行工具（脚本、服务器、进阶用户）
-
-每个平台提供两种压缩包：
-
-| 包 | 内容 | 适用 |
+| 变体 | 内容 | 适用 |
 |---|---|---|
-| `*-lite` | 仅 `triproxy` 可执行文件 | 想自行管理核心、或需要自行指定镜像/代理下载的用户 |
-| `*-full` | `triproxy` + `cores/` 内已校验的三个核心 | 开箱即用，首次运行无需联网下载 |
+| `*-lite` | 图形界面 + 命令行，不含核心 | 首次运行会联网下载核心 |
+| `*-full` | 同上 + `cores/` 内三个已校验的核心 | 开箱即用，首次运行无需联网 |
 
-压缩包**不含图形界面**，解压后得到的是 `triproxy.exe` 命令行程序。
+| 平台 | 文件 | 安装方式 |
+|---|---|---|
+| Windows | `TriProxy_<版本>_x64-{lite,full}.exe` | 双击安装到 `C:\Program Files\TriProxy` |
+| macOS (Apple Silicon) | `TriProxy_<版本>_aarch64-{lite,full}.dmg` | 打开后拖进「应用程序」 |
+| Linux | `TriProxy_<版本>_amd64-{lite,full}.AppImage` / `.deb` | AppImage 加执行权限直接运行；deb 用包管理器安装 |
+
+**命令行都在同一个包里**，与图形界面共用同一份数据，不需要单独下载。
+
+### 数据放在哪里
+
+| 平台 | 位置 | 说明 |
+|---|---|---|
+| Windows | `<安装目录>\data` | 整个应用一个文件夹；卸载会一并删除 |
+| macOS | `~/Library/Application Support/TriProxy` | `.app` 是密封包，不应写入 |
+| Linux | `~/.local/share/TriProxy` | 遵循 XDG 约定 |
+
+Windows 上首次启动会把旧版 `%APPDATA%\TriProxy` 的数据自动迁移过来。
+
+> 安装包未做代码签名：
+> - Windows SmartScreen 提示「未知发布者」→ 点「更多信息 → 仍要运行」
+> - macOS 首次打开提示「无法验证开发者」→ 右键点图标选「打开」
 
 `full` 版的核心由 CI 通过 TriProxy 自身的下载与校验流程获取，SHA256 与上游 Release
 一致，未经修改。程序优先使用用户自行安装的更新版本（`triproxy core install`），
 其次才用随包的 `cores/`。
 
-`full` 版同时附带完整的许可材料：顶层 `LICENSE` 与 `ADDITIONAL-TERMS.md`（TriProxy 自身），
-`cores/LICENSE-<core>.txt`（各核心的许可文本，取自与二进制相同的 tag），
-`cores/LICENSE-GPL-3.0.txt`（GPLv3 正文），以及 `cores/THIRD-PARTY-NOTICES.txt`
-（版本、来源、对应源码地址、sha256）。
+随包核心是独立作品，许可文本在 `cores/LICENSE-<core>.txt`，版本、来源与对应源码地址
+见 `cores/THIRD-PARTY-NOTICES.txt`。
 
 ## 首次运行
 

@@ -38,7 +38,14 @@ pub fn run() {
         .manage(AppState {
             manager: manager.clone(),
         })
-        .setup(move |_app| {
+        .setup(move |app| {
+            // Bundled cores do not sit beside the executable on every platform:
+            // macOS keeps them in TriProxy.app/Contents/Resources/cores, and a
+            // Linux .deb installs them under /usr/lib/triproxy/cores. The shell
+            // knows the real path, the core crate cannot derive it, so it is
+            // resolved here — before any command asks for a core.
+            resolve_bundled_cores(app);
+
             // Adopt a core left running by a previous session before the window
             // draws, so the first status query reports the truth.
             let manager = manager.clone();
@@ -99,4 +106,35 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
+}
+
+/// Point the core crate at the bundled cores.
+///
+/// Windows keeps them beside the executable (`<install>\cores`), macOS inside
+/// the bundle (`Contents/Resources/cores`), and a Linux `.deb` under
+/// `/usr/lib/triproxy/cores`. Only the shell knows which; the core crate cannot
+/// derive it from `current_exe()` on the latter two.
+fn resolve_bundled_cores<R: tauri::Runtime>(app: &tauri::App<R>) {
+    use tauri::Manager;
+
+    let mut candidates = Vec::new();
+
+    if let Ok(resources) = app.path().resource_dir() {
+        candidates.push(resources.join("cores"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("cores"));
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.is_dir() {
+            tracing::info!(dir = %candidate.display(), "using bundled cores");
+            std::env::set_var("TRIPROXY_BUNDLED_CORES", &candidate);
+            return;
+        }
+    }
+
+    tracing::debug!("no bundled cores; the manager will fall back to PATH");
 }

@@ -42,18 +42,43 @@ impl Layout {
 
     /// Resolve the default layout.
     ///
-    /// Precedence: `TRIPROXY_HOME` env var, then the platform data directory
-    /// (`%APPDATA%\TriProxy` on Windows, `~/Library/Application Support/TriProxy`
-    /// on macOS, `~/.local/share/TriProxy` on Linux).
+    /// Precedence:
+    /// 1. `TRIPROXY_HOME`, for tests and for pointing several builds at one root.
+    /// 2. `<directory of the executable>/data` — the portable layout.
+    /// 3. The platform data directory (`%APPDATA%\TriProxy`, `~/Library/...`).
+    ///
+    /// Portable by default because that is what an installed Windows application
+    /// is expected to do here: everything in one folder, so uninstalling or
+    /// moving the program moves its state too. The data directory has to be
+    /// writable — the installer grants the Users group modify rights on it, and
+    /// the app itself always runs elevated.
+    ///
+    /// Step 3 exists for the cases where the portable layout cannot work: a
+    /// binary in a read-only location, or one installed before this changed.
     pub fn discover() -> Result<Self> {
         if let Some(custom) = std::env::var_os("TRIPROXY_HOME") {
             if !custom.is_empty() {
                 return Ok(Self::new(PathBuf::from(custom)));
             }
         }
+
+        if let Some(root) = portable_root() {
+            return Ok(Self::new(root));
+        }
+
         let base = dirs::data_dir()
             .ok_or_else(|| Error::Other("cannot determine platform data directory".to_string()))?;
         Ok(Self::new(base.join(APP_DIR_NAME)))
+    }
+
+    /// The old platform data directory, if it exists.
+    ///
+    /// Used once, on first run after the portable change, to bring existing
+    /// profiles across instead of presenting the user with an empty library.
+    pub fn legacy_root() -> Option<PathBuf> {
+        let base = dirs::data_dir()?;
+        let root = base.join(APP_DIR_NAME);
+        root.is_dir().then_some(root)
     }
 
     pub fn root(&self) -> &Path {
@@ -128,9 +153,96 @@ pub fn binary_in(dir: &Path, stem: &str) -> PathBuf {
 ///
 /// The "with cores" release archive places verified cores (plus their install
 /// records) in `cores/` beside the binary, so that build works offline with no
+/// Adopt `<exe dir>/data` if it exists or can be created.
+///
+/// **Windows only.** An installed Windows application is expected to keep
+/// everything in one folder, and the installer grants the Users group write
+/// access so the bundled CLI can use it from an ordinary terminal.
+///
+/// macOS and Linux deliberately do not do this. A `.app` is a sealed bundle and
+/// an AppImage is a read-only mount; writing application state inside either is
+/// wrong on those platforms, and the platform data directory is what users and
+/// backup tools expect.
+fn portable_root() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let root = dir.join("data");
+
+    if root.is_dir() {
+        return Some(root);
+    }
+
+    match std::fs::create_dir_all(&root) {
+        Ok(()) => {
+            migrate_from_legacy(&root);
+            Some(root)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Bring the previous platform data directory across, once.
+///
+/// Without this the first launch after switching to the portable layout would
+/// look like a fresh install: an empty profile library and no active profile,
+/// for no reason the user can see.
+fn migrate_from_legacy(root: &Path) {
+    let Some(legacy) = Layout::legacy_root() else {
+        return;
+    };
+    if legacy == root {
+        return;
+    }
+
+    match copy_tree(&legacy, root) {
+        Ok(()) => tracing::info!(
+            from = %legacy.display(),
+            to = %root.display(),
+            "migrated the previous data directory"
+        ),
+        // Not fatal: the app works with an empty root, and the old data is still
+        // where it was.
+        Err(error) => {
+            tracing::warn!(error = %error, "could not migrate the previous data directory")
+        }
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if !target.exists() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// first-run download. Nothing is ever written here at runtime — updates always
 /// go to the managed `bin/` directory, which takes precedence.
 pub fn bundled_core_dir() -> Option<PathBuf> {
+    // Set by the desktop shell from its own resource directory. Needed because
+    // the location differs per platform and cannot be derived from the
+    // executable path alone: on macOS the cores live in
+    // `TriProxy.app/Contents/Resources/cores`, and a Linux `.deb` installs them
+    // under `/usr/lib/triproxy/cores`.
+    if let Some(explicit) = std::env::var_os("TRIPROXY_BUNDLED_CORES") {
+        if !explicit.is_empty() {
+            let dir = PathBuf::from(explicit);
+            if dir.is_dir() {
+                return Some(dir);
+            }
+        }
+    }
+
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("cores"))
 }
