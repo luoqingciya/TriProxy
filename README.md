@@ -34,6 +34,7 @@
 | **Phase 4** | **Smart Core Selector** | **已完成（硬约束淘汰 + 可解释排序）** |
 | **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 配置 / 日志 / 设置）** |
 | **Phase 6** | **系统代理** | **已完成（Windows 实测，macOS/Linux 待验证）** |
+| **Phase 7** | **TUN 模式** | **部分完成（配置生成已验证；实机连通性需管理员权限，未测试）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -141,6 +142,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy proxy on [--endpoint E]` | 把系统代理指向当前核心 |
 | `triproxy proxy off` | 还原 TriProxy 改动前的系统代理设置 |
 | `triproxy proxy status` | 查看系统代理是否由 TriProxy 托管 |
+| `triproxy tun status` | 查看 TUN 权限与残留网卡 |
 | `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
 
 全局参数：`--data-dir <DIR>`（等价于环境变量 `TRIPROXY_HOME`）、`--json`。

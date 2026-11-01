@@ -22,9 +22,10 @@ use triproxy_core::binaries::InstallOptions;
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
-    compile, parse_payload, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport,
-    Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile,
-    ProfileStore, Selector, StoredProfile, SwitchReport, SystemProxyManager,
+    compile, is_elevated, leftovers, parse_payload, CompileOptions, CompiledConfig, CoreKind,
+    CoreManager, CoreReport, Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node,
+    ParsedProfile, Profile, ProfileStore, Selector, StoredProfile, SwitchReport,
+    SystemProxyManager,
 };
 
 #[derive(Parser)]
@@ -70,6 +71,9 @@ enum Command {
         /// Also point the system proxy at the core once it is running
         #[arg(long)]
         proxy: bool,
+        /// Run in TUN mode (requires administrator privileges)
+        #[arg(long)]
+        tun: bool,
     },
     /// Stop whatever core is running
     Stop,
@@ -85,6 +89,9 @@ enum Command {
         /// Also point the system proxy at the core once it is running
         #[arg(long)]
         proxy: bool,
+        /// Run in TUN mode (requires administrator privileges)
+        #[arg(long)]
+        tun: bool,
     },
     /// Show captured core logs
     Logs {
@@ -103,6 +110,11 @@ enum Command {
         #[command(subcommand)]
         command: CoreCommand,
     },
+    /// Inspect TUN mode prerequisites and leftovers
+    Tun {
+        #[command(subcommand)]
+        command: TunCommand,
+    },
     /// Manage the system proxy
     Proxy {
         #[command(subcommand)]
@@ -115,6 +127,12 @@ enum Command {
     },
     /// Check the environment: binaries, versions, ports, data directory
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum TunCommand {
+    /// Show whether TUN can run here and whether an adapter was left behind
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -151,6 +169,9 @@ enum ProfileCommand {
         /// Write the config to this file instead of stdout
         #[arg(short = 'o', long, value_name = "PATH")]
         output: Option<PathBuf>,
+        /// Generate a TUN config instead of a local mixed port
+        #[arg(long)]
+        tun: bool,
         /// Let the core validate the generated config before returning
         #[arg(long)]
         check: bool,
@@ -318,14 +339,16 @@ async fn run(cli: Cli) -> Result<i32> {
             core,
             profile,
             proxy,
-        } => cmd_start(&manager, core.as_deref(), profile.as_deref(), proxy).await,
+            tun,
+        } => cmd_start(&manager, core.as_deref(), profile.as_deref(), proxy, tun).await,
         Command::Stop => cmd_stop(&manager).await,
         Command::Restart => cmd_restart(&manager).await,
         Command::Switch {
             core,
             profile,
             proxy,
-        } => cmd_switch(&manager, &core, profile.as_deref(), proxy).await,
+            tun,
+        } => cmd_switch(&manager, &core, profile.as_deref(), proxy, tun).await,
         Command::Logs {
             lines,
             core,
@@ -354,6 +377,9 @@ async fn run(cli: Cli) -> Result<i32> {
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
             CoreCommand::Select { source, tun, json } => cmd_core_select(&source, tun, json),
         },
+        Command::Tun { command } => match command {
+            TunCommand::Status => cmd_tun_status(&manager),
+        },
         Command::Proxy { command } => match command {
             ProxyCommand::On { endpoint } => cmd_proxy_on(&manager, endpoint.as_deref()).await,
             ProxyCommand::Off => cmd_proxy_off(&manager),
@@ -365,9 +391,10 @@ async fn run(cli: Cli) -> Result<i32> {
                 source,
                 core,
                 output,
+                tun,
                 check,
                 json,
-            } => cmd_profile_compile(&manager, &source, &core, output, check, json).await,
+            } => cmd_profile_compile(&manager, &source, &core, output, tun, check, json).await,
             ProfileCommand::Check { source, json } => cmd_profile_check(&source, json),
             ProfileCommand::Add {
                 source,
@@ -413,12 +440,17 @@ async fn cmd_start(
     core: Option<&str>,
     profile: Option<&Path>,
     proxy: bool,
+    tun: bool,
 ) -> Result<i32> {
+    if tun && !is_elevated() {
+        bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
+    }
+
     let choice = match core {
         Some(name) => parse_core_choice(name)?,
         None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
-    let (kind, compiled) = resolve_target(manager, choice, profile)?;
+    let (kind, compiled) = resolve_target(manager, choice, profile, tun)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -444,7 +476,9 @@ async fn cmd_start(
     );
     println!("  config  {}", report.config.display());
     println!("  listen  127.0.0.1:{}", kind.default_listen_port());
-    if proxy {
+    if proxy && tun {
+        eprintln!("note: TUN 模式已接管全部流量，跳过系统代理");
+    } else if proxy {
         enable_system_proxy(manager)?;
     }
     Ok(0)
@@ -486,9 +520,14 @@ async fn cmd_switch(
     core: &str,
     profile: Option<&Path>,
     proxy: bool,
+    tun: bool,
 ) -> Result<i32> {
+    if tun && !is_elevated() {
+        bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
+    }
+
     let choice = parse_core_choice(core)?;
-    let (kind, compiled) = resolve_target(manager, choice, profile)?;
+    let (kind, compiled) = resolve_target(manager, choice, profile, tun)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -499,7 +538,9 @@ async fn cmd_switch(
         None => manager.switch(kind).await?,
     };
     print_switch_report(&report);
-    if proxy {
+    if proxy && tun {
+        eprintln!("note: TUN 模式已接管全部流量，跳过系统代理");
+    } else if proxy {
         enable_system_proxy(manager)?;
     }
     Ok(0)
@@ -712,14 +753,18 @@ async fn cmd_profile_compile(
     source: &str,
     core: &str,
     output: Option<PathBuf>,
+    tun: bool,
     check: bool,
     json: bool,
 ) -> Result<i32> {
     let kind = parse_core(core)?;
     let (text, label) = read_profile_source(source)?;
     let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
-    let compiled = compile(kind, &parsed.profile, &CompileOptions::default())
-        .map_err(|error| anyhow!("{error}"))?;
+    let options = CompileOptions {
+        tun,
+        ..Default::default()
+    };
+    let compiled = compile(kind, &parsed.profile, &options).map_err(|error| anyhow!("{error}"))?;
 
     if check {
         manager
@@ -778,9 +823,12 @@ fn load_profile(path: &Path) -> Result<ParsedProfile> {
 }
 
 /// Compile for one core, reporting skipped nodes on stderr.
-fn compile_for(kind: CoreKind, profile: &Profile) -> Result<CompiledConfig> {
-    let compiled =
-        compile(kind, profile, &CompileOptions::default()).map_err(|error| anyhow!("{error}"))?;
+fn compile_for(kind: CoreKind, profile: &Profile, tun: bool) -> Result<CompiledConfig> {
+    let options = CompileOptions {
+        tun,
+        ..Default::default()
+    };
+    let compiled = compile(kind, profile, &options).map_err(|error| anyhow!("{error}"))?;
     for skipped in &compiled.skipped {
         eprintln!("skipped `{}`: {}", skipped.name, skipped.reason);
     }
@@ -810,10 +858,11 @@ fn resolve_target(
     manager: &CoreManager,
     choice: CoreChoice,
     profile: Option<&Path>,
+    tun: bool,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
     if let Some(path) = profile {
         let parsed = load_profile(path)?;
-        return finish_target(choice, parsed.profile);
+        return finish_target(choice, parsed.profile, tun);
     }
 
     let store = ProfileStore::new(manager.layout());
@@ -823,7 +872,7 @@ fn resolve_target(
             stored.name,
             active.nodes.len()
         );
-        return finish_target(choice, active);
+        return finish_target(choice, active, tun);
     }
 
     match choice {
@@ -837,6 +886,7 @@ fn resolve_target(
 fn finish_target(
     choice: CoreChoice,
     profile: Profile,
+    tun: bool,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
     match choice {
         CoreChoice::Smart => {
@@ -847,11 +897,11 @@ fn finish_target(
                 "smart: selected `{}` — {}",
                 selection.selected, selection.reason
             );
-            let compiled = compile_for(selection.selected, &profile)?;
+            let compiled = compile_for(selection.selected, &profile, tun)?;
             Ok((selection.selected, Some(compiled)))
         }
         CoreChoice::Fixed(kind) => {
-            let compiled = compile_for(kind, &profile)?;
+            let compiled = compile_for(kind, &profile, tun)?;
             Ok((kind, Some(compiled)))
         }
     }
@@ -1163,6 +1213,32 @@ fn running_port(manager: &CoreManager) -> Option<u16> {
     // `status()` is async; the CLI calls this from a sync helper, so use the
     // persisted listen port recorded when the core was started.
     manager.persisted_listen_port()
+}
+
+fn cmd_tun_status(manager: &CoreManager) -> Result<i32> {
+    println!("TUN 模式");
+    if is_elevated() {
+        println!("  权限      管理员");
+    } else {
+        println!("  权限      普通用户 — TUN 需要以管理员身份运行");
+    }
+
+    match manager.persisted_listen_port() {
+        Some(port) => println!("  当前核心  127.0.0.1:{port}"),
+        None => println!("  当前核心  未运行"),
+    }
+
+    let found = leftovers()?;
+    if found.is_empty() {
+        println!("  残留网卡  无");
+    } else {
+        println!("  残留网卡  {} 个（可能是上次异常退出留下的）", found.len());
+        for adapter in &found {
+            println!("    {}  [{}]", adapter.name, adapter.id);
+            println!("      {}", adapter.cleanup_hint());
+        }
+    }
+    Ok(0)
 }
 
 async fn cmd_proxy_on(manager: &CoreManager, endpoint: Option<&str>) -> Result<i32> {
