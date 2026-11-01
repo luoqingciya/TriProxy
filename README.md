@@ -29,7 +29,7 @@
 |---|---|---|
 | Phase 0 | 产品与架构设计 | 已完成（规划书） |
 | **Phase 1** | **Rust 多核心管理器 MVP + CLI** | **已完成并通过三核心真机验证** |
-| Phase 2 | Unified Profile / Parser | 未开始 |
+| **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks）** |
 | Phase 3 | Config Compiler | 未开始 |
 | Phase 4 | Smart Core Selector | 未开始 |
 | Phase 5 | Tauri GUI | 未开始 |
@@ -125,6 +125,8 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy restart` | 重启当前核心 |
 | `triproxy switch <core>` | 停旧起新，输出可解释的切换步骤 |
 | `triproxy logs [-n N] [--core X] [-f]` | 查看/跟踪核心日志 |
+| `triproxy profile parse <file\|-> [--json]` | 解析订阅/分享链接，列出节点 |
+| `triproxy profile check <file\|-> [--json]` | 校验并报告问题（有错误时退出码 1） |
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
 | `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
@@ -132,6 +134,32 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 全局参数：`--data-dir <DIR>`（等价于环境变量 `TRIPROXY_HOME`）、`--json`。
 
 数据目录默认为 `%APPDATA%\TriProxy`（Windows）/ `~/Library/Application Support/TriProxy`（macOS）/ `~/.local/share/TriProxy`（Linux）。
+
+## 配置导入（Phase 2）
+
+支持分享链接列表与 base64 订阅（服务商最常见的两种下发方式），协议覆盖 VLESS / VMess / Trojan / Shadowsocks：
+
+```bash
+triproxy profile parse ./sub.txt        # 列出解析出的节点
+triproxy profile check ./sub.txt        # 只报告问题，有错误时退出码 1
+curl -s "$SUB_URL" | triproxy profile parse - --json
+```
+
+单行解析失败不会中断整份订阅——它变成一条带行号的诊断，其余节点照常导入：
+
+```text
+  #  NAME       PROTOCOL     ENDPOINT             TRANSPORT  SECURITY
+  1  Tokyo 01   vless        jp.example.com:443   ws         reality
+  2  HK 01      vmess        hk.example.com:443   ws         tls
+  3  Singapore  trojan       sg.example.com:443   grpc       tls
+  4  US West    shadowsocks  us.example.com:8388  tcp        -
+
+1 errors, 0 warnings
+  error   line.unsupported_scheme     line 5: unsupported scheme `hysteria2://`
+```
+
+节点身份由连接参数（协议、地址、端口、凭据、传输）派生，与显示名称无关，
+因此服务商改名不会影响收藏与延迟记录。解析结果只是中间产物，真正的配置生成属于 Phase 3。
 
 ---
 
@@ -159,6 +187,7 @@ TriProxy/
 │   ├── triproxy-core/          # UI 无关的核心层（未来被 Tauri 后端复用）
 │   │   └── src/
 │   │       ├── core/           # CoreKind / ProxyCore trait / CoreManager
+│   │       ├── profile/        # Unified Profile：节点模型、URI 解析、校验
 │   │       ├── adapters/       # mihomo / singbox / xray 三个方言
 │   │       ├── binaries/       # 定位、下载、校验、解包
 │   │       ├── process.rs      # 进程监督器（启动/就绪探测/停止/日志捕获）

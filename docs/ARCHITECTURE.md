@@ -224,16 +224,78 @@ GitHub 的 Intel runner 也长期排队，维护一条几乎无人使用的构�
 release 任务汇总所有 artifact，`gh release create` 发布，说明取自
 `docs/RELEASE_NOTES_TEMPLATE.md`（两种包的取舍、lite 版安装指引、授权与随包核心的合规说明）。
 
-## 6. 尚未实现（明确的边界）
+## 6. Phase 2 — Unified Profile
 
-Phase 1 刻意不做，避免半成品：
+```text
+订阅文本 / 分享链接
+      ↓  profile::parse_payload
+Profile { id, name, metadata, nodes, groups }
+      ↓  （Phase 3）
+mihomo.yaml / sing-box.json / xray.json
+```
+
+### 6.1 模型
+
+`Node` 由「协议 + 地址 + 端口 + 凭据 + 传输 + TLS」组成，`Credentials` 用枚举区分四种协议，
+`Transport` 覆盖 tcp / ws / grpc / h2，`TlsConfig` 里 `reality: Option<RealityConfig>`
+表示 Reality。VLESS 的 `flow` 单独建模为 `VlessFlow::{None, Vision}`，而不是塞进 `Transport`，
+因为它是凭据层语义（对应能力矩阵里的 `supports_vision`）。
+
+**`rules` / `dns` / `network` 没有建模**，尽管规划书的 `Profile` 结构里列了它们。
+理由：这三者只有在消费它们的编译器存在（Phase 3）之后才有确定形状——
+Clash 的 rule-provider 与 sing-box 的 rule-set 不是同一个概念，提前拍一个统一模型必然返工。
+`groups` 已定义（形状简单且确定），Phase 3 填充。
+
+### 6.2 节点身份与显示名解耦
+
+`Node::id` 是连接参数的哈希（协议、地址小写化、端口、凭据、传输），**不含显示名**。
+服务商给节点改名不会产生新节点，收藏和延迟历史因此不会丢。
+`Profile::id` 是排序后节点 id 的哈希，同一份订阅重复导入得到同一个 id（Phase 9 去重的基础）。
+
+名称唯一性在解析阶段强制：Clash 与 sing-box 都以名称作为代理的键，重名会互相覆盖，
+所以重名节点自动加 ` (2)` 后缀，而不是让导入失败。
+
+### 6.3 分享链接的历史包袱
+
+四种协议没有统一的 URI 规范，解析器是手写的（没有用通用 URL 库，因为 `ss://` 的
+legacy 形态根本不是合法 URL）：
+
+- **`ss://` 两种格式**：SIP002（`base64(method:password)@host:port`）与 legacy
+  （整个 body 是 `base64(method:password@host:port)`）。用「有没有 `@`」区分；
+  userinfo 里有没有 `:` 再决定要不要 base64 解码——base64 字母表不含 `:`，这个判定无歧义。
+- **`vmess://` 是 base64 的 JSON**，且 `port` / `aid` 在不同客户端里可能是字符串或数字，
+  所以用 `serde_json::Value` 再强制转换，而不是直接声明成 `u16`。
+- **query 键名不统一**：`serviceName` / `path`、`security` / `tls`、`allowInsecure` 大小写不一。
+  键统一转小写后按别名匹配。
+- **不支持的传输/加密/flow 直接报错**，不静默降级。例如 `net=kcp` 的 VMess 节点会被拒绝并
+  说明原因，而不是编译成一个跑不通的配置。
+
+### 6.4 诊断而非失败
+
+`parse_payload` 永不 panic，也永不因为单行失败而丢弃整份订阅：坏行变成带行号的 `Diagnostic`，
+其余节点照常导入。校验同样返回诊断列表，分 `Error`（节点不可用）与 `Warning`
+（能连但大概率不是用户想要的，如 `allowInsecure`、Reality 公钥长度异常、Vision 无 TLS）。
+
+`profile check` 在有 `Error` 时退出码为 1，便于脚本化。
+
+### 6.5 与 Phase 4 的接口
+
+`Profile::requirement()` 直接产出 `ProfileRequirement`，供 Smart Core Selector 使用。
+只报告节点层面可见的需求（协议、Reality、Vision、WireGuard）；TUN / DNS / rule-set
+属于网络与规则配置，Phase 3 才有。
+
+## 7. 尚未实现（明确的边界）
+
+刻意不做，避免半成品：
 
 - 系统代理、TUN、DNS、路由（Phase 6–8）
-- Unified Profile / Parser / Config Compiler（Phase 2–3）
-- 订阅系统（Phase 9）
-- 节点模型与延迟测试（Phase 2/4 依赖 Unified Profile）
-- 控制器 API 健康检查（当前用 TCP 探活，Phase 4 再接 Mihomo/Clash API）
+- Config Compiler（Phase 3）——当前解析结果没有消费方，`bootstrap.rs` 仍是占位配置
+- Clash YAML 导入与订阅下载（Phase 3 / Phase 9）
+- Hysteria2 / TUIC / SOCKS / HTTP 节点（Phase 10 扩展）
+- 延迟测试（Phase 4 依赖真实节点与控制器 API）
+- 控制器 API 健康检查（当前用 TCP 探活）
 - GUI（Phase 5）
 
-因此 `triproxy` 目前**不是一个可用的翻墙客户端**，而是一个可运行的、经真机验证的
-多核心生命周期管理器。这是规划书 38 章规定的开发顺序。
+因此 `triproxy` 目前**还不是一个可用的翻墙客户端**：它能管理三个核心的生命周期，
+也能解析订阅并校验节点，但还不会把节点编译成任何核心能吃的配置。
+这是规划书 38 章规定的开发顺序。
