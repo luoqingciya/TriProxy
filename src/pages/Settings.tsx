@@ -104,7 +104,10 @@ export function Settings() {
         >
           <Toggle checked={proxy !== null} onChange={setSystemProxy} />
         </SettingRow>
-        <SettingRow title="TUN 模式" hint="接管全局流量，需要管理员权限（Phase 7）">
+        <SettingRow
+          title="TUN 模式"
+          hint="接管全局流量，需要以管理员身份运行；启用后 Xray 会被排除"
+        >
           <Toggle checked={settings.tun} onChange={(tun) => update({ tun })} />
         </SettingRow>
         <SettingRow title="原生 rule-set" hint="仅 sing-box 原生支持；开启后 mihomo/xray 会被淘汰">

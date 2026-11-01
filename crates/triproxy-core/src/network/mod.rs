@@ -14,5 +14,7 @@
 //! Operating-system integration.
 
 pub mod system_proxy;
+pub mod tun;
 
 pub use system_proxy::{AppliedProxy, ProxyBackend, SystemProxyManager};
+pub use tun::{is_elevated, leftovers, TunAdapter, INTERFACE_NAME};

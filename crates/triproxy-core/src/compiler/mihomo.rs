@@ -78,6 +78,19 @@ impl ConfigCompiler for MihomoCompiler {
             document = document.with("bind-address", Yaml::str("127.0.0.1"));
         }
 
+        if options.tun {
+            // `device` names the wintun/utun adapter so a leftover can be
+            // recognised after a crash.
+            let tun = Yaml::map()
+                .with("enable", Yaml::bool(true))
+                .with("stack", Yaml::str("mixed"))
+                .with("device", Yaml::str(crate::network::tun::INTERFACE_NAME))
+                .with("auto-route", Yaml::bool(true))
+                .with("auto-detect-interface", Yaml::bool(true))
+                .with("dns-hijack", Yaml::strings(["any:53"]));
+            document = document.with("tun", tun);
+        }
+
         document = document
             .with("proxies", Yaml::List(proxies))
             .with("proxy-groups", Yaml::list().push(group))
@@ -389,6 +402,32 @@ mod tests {
         assert!(text.contains("\"name\": \"PROXY\""), "{text}");
         assert!(text.contains("\"MATCH,PROXY\""), "{text}");
         assert!(text.contains("\"mixed-port\": 7890"), "{text}");
+    }
+
+    #[test]
+    fn tun_option_emits_a_tun_block() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        let options = CompileOptions {
+            tun: true,
+            ..Default::default()
+        };
+        let text = compile_yaml(&Profile::new("p", vec![node]), &options)
+            .unwrap()
+            .text;
+        assert!(text.contains(r#""tun":"#), "{text}");
+        assert!(
+            text.contains(&format!(
+                r#""device": "{}""#,
+                crate::network::tun::INTERFACE_NAME
+            )),
+            "{text}"
+        );
+        assert!(text.contains(r#""auto-route": true"#), "{text}");
     }
 
     #[test]
