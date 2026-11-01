@@ -30,7 +30,7 @@
 | Phase 0 | 产品与架构设计 | 已完成（规划书） |
 | **Phase 1** | **Rust 多核心管理器 MVP + CLI** | **已完成并通过三核心真机验证** |
 | **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks）** |
-| Phase 3 | Config Compiler | 未开始 |
+| **Phase 3** | **Config Compiler** | **已完成（三核心配置均通过各自核心校验）** |
 | Phase 4 | Smart Core Selector | 未开始 |
 | Phase 5 | Tauri GUI | 未开始 |
 
@@ -126,6 +126,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy switch <core>` | 停旧起新，输出可解释的切换步骤 |
 | `triproxy logs [-n N] [--core X] [-f]` | 查看/跟踪核心日志 |
 | `triproxy profile parse <file\|-> [--json]` | 解析订阅/分享链接，列出节点 |
+| `triproxy profile compile <file\|-> --core X [-o PATH] [--check]` | 编译成核心配置；`--check` 交给核心校验 |
 | `triproxy profile check <file\|-> [--json]` | 校验并报告问题（有错误时退出码 1） |
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
@@ -161,6 +162,30 @@ curl -s "$SUB_URL" | triproxy profile parse - --json
 节点身份由连接参数（协议、地址、端口、凭据、传输）派生，与显示名称无关，
 因此服务商改名不会影响收藏与延迟记录。解析结果只是中间产物，真正的配置生成属于 Phase 3。
 
+## 配置编译（Phase 3）
+
+同一份 Unified Profile 可以编译成三个核心各自的配置，并用核心自己校验：
+
+```bash
+triproxy profile compile ./sub.txt --core mihomo   -o config.yaml --check
+triproxy profile compile ./sub.txt --core sing-box -o config.json --check
+triproxy profile compile ./sub.txt --core xray     -o config.json --check
+```
+
+也可以直接带着 Profile 启动或切换核心：
+
+```bash
+triproxy start mihomo --profile ./sub.txt
+triproxy switch xray --profile ./sub.txt
+```
+
+编译的两条原则：
+
+- **无法忠实表达的节点会被跳过并说明原因**，不做近似。例如 Xray 的 REALITY 只支持 TCP/gRPC，
+  于是 Reality over WebSocket 的节点在 Xray 配置里会被略过；mihomo 与 sing-box 则接受该组合。
+- **生成的配置先由核心校验**（`mihomo -t` / `sing-box check` / `xray -test`），
+  编译器有 bug 会表现为「配置被拒绝」，而不是「核心起来了但行为不对」。
+
 ---
 
 ## 设计要点
@@ -188,6 +213,7 @@ TriProxy/
 │   │   └── src/
 │   │       ├── core/           # CoreKind / ProxyCore trait / CoreManager
 │   │       ├── profile/        # Unified Profile：节点模型、URI 解析、校验
+│   │       ├── compiler/       # 配置编译器：Profile → 三个核心的原生配置
 │   │       ├── adapters/       # mihomo / singbox / xray 三个方言
 │   │       ├── binaries/       # 定位、下载、校验、解包
 │   │       ├── process.rs      # 进程监督器（启动/就绪探测/停止/日志捕获）
