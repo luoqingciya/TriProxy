@@ -32,6 +32,7 @@ jobs:
       fail-fast: false
       # Native runners only: `triproxy core install` downloads cores for the
       # host platform, so cross-compiling would bundle the wrong architecture.
+      # macOS Intel is intentionally out of scope (see README).
       matrix:
         include:
           - os: windows-latest
@@ -42,9 +43,6 @@ jobs:
             pack: tar
           - os: macos-latest
             target: aarch64-apple-darwin
-            pack: tar
-          - os: macos-13
-            target: x86_64-apple-darwin
             pack: tar
 
     steps:

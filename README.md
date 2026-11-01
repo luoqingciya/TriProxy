@@ -99,6 +99,9 @@ triproxy logs -f           # 跟踪日志
 `cores/LICENSE-<core>.txt`（取自与二进制相同的 tag 的许可全文）。两种包都包含 TriProxy
 自身的 `LICENSE` 与 `ADDITIONAL-TERMS.md`。
 
+当前发布的平台：Windows x86_64、Linux x86_64、macOS Apple Silicon。
+macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译仍可用。
+
 核心解析顺序（`triproxy core path <core>` 可查看实际来源）：
 
 ```text

@@ -204,8 +204,12 @@ Xray 缺少原生 TUN 这一条会直接影响 Smart 模式的选型结果，是
 windows-latest  → x86_64-pc-windows-msvc
 ubuntu-latest   → x86_64-unknown-linux-gnu
 macos-latest    → aarch64-apple-darwin
-macos-13        → x86_64-apple-darwin
 ```
+
+macOS Intel（`x86_64-apple-darwin`）**不在支持范围**：Apple 已停止销售 Intel Mac，
+GitHub 的 Intel runner 也长期排队，维护一条几乎无人使用的构建线不划算。
+`binaries/manifest.rs` 仍保留该目标的资产匹配规则，用户自行编译时可以正常使用，
+只是不发布官方包。
 
 每个任务产出两个包：
 
