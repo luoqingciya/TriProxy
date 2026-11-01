@@ -31,7 +31,7 @@
 | **Phase 1** | **Rust 多核心管理器 MVP + CLI** | **已完成并通过三核心真机验证** |
 | **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks）** |
 | **Phase 3** | **Config Compiler** | **已完成（三核心配置均通过各自核心校验）** |
-| Phase 4 | Smart Core Selector | 未开始 |
+| **Phase 4** | **Smart Core Selector** | **已完成（硬约束淘汰 + 可解释排序）** |
 | Phase 5 | Tauri GUI | 未开始 |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
@@ -130,6 +130,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy profile check <file\|-> [--json]` | 校验并报告问题（有错误时退出码 1） |
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
+| `triproxy core select <file\|-> [--tun] [--json]` | 评估哪个核心最适合这份 Profile（Smart Engine） |
 | `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
 
 全局参数：`--data-dir <DIR>`（等价于环境变量 `TRIPROXY_HOME`）、`--json`。
@@ -185,6 +186,28 @@ triproxy switch xray --profile ./sub.txt
   于是 Reality over WebSocket 的节点在 Xray 配置里会被略过；mihomo 与 sing-box 则接受该组合。
 - **生成的配置先由核心校验**（`mihomo -t` / `sing-box check` / `xray -test`），
   编译器有 bug 会表现为「配置被拒绝」，而不是「核心起来了但行为不对」。
+
+## 智能选核（Phase 4）
+
+```bash
+triproxy core select ./sub.txt          # 评估三个核心，给出结论与理由
+triproxy core select ./sub.txt --tun    # 把 TUN 作为硬需求（Xray 会被淘汰）
+triproxy switch smart --profile ./sub.txt
+```
+
+排序采用字典序而非加权评分：**硬约束淘汰 → 原生特性数量 → 文档化的默认顺序**。
+规划书里的 50/25/15/10 权重没有实现——兼容性一旦不满足就该出局（不是"90% 兼容"），
+而性能权重背后没有任何测量数据。详细理由见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 第 8 章。
+
+```text
+  CORE      VERDICT     DETAIL
+  sing-box  selected    -
+  mihomo    eligible    -
+  xray      ineligible  missing TUN
+
+Reason: sing-box is the default general-purpose core; no candidate needed a
+specialisation; eliminated: xray (TUN)
+```
 
 ---
 

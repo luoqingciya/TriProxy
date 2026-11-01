@@ -328,7 +328,7 @@ impl CoreManager {
         }
         if core.state().await.is_running() {
             return Err(Error::Other(format!(
-                "`{kind}` is already running; stop it before starting it with a new config"
+                "`{kind}` is already running; use `switch` to reload it with a new config"
             )));
         }
 
