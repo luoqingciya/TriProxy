@@ -21,6 +21,18 @@ import { CORE_LABEL, STATE_LABEL, type Selection } from '../types'
 import { Badge, Button, Card, SectionTitle, StateDot } from '../components/ui'
 import { PageHeader } from '../components/Sidebar'
 
+function formatRate(bytesPerSecond: number): string {
+  if (bytesPerSecond < 1024) return `${bytesPerSecond} B/s`
+  const units = ['KB/s', 'MB/s', 'GB/s']
+  let value = bytesPerSecond / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(1)} ${units[unit]}`
+}
+
 function formatUptime(seconds: number | null | undefined): string {
   if (!seconds) return '—'
   const h = Math.floor(seconds / 3600)
@@ -68,6 +80,7 @@ export function Dashboard() {
   const selection = useApp((state) => state.selection)
   const settings = useApp((state) => state.settings)
   const proxy = useApp((state) => state.proxy)
+  const traffic = useApp((state) => state.traffic)
   const busy = useApp((state) => state.busy)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
@@ -118,6 +131,14 @@ export function Dashboard() {
                   <span>{running!.latency_ms ?? '—'} ms</span>
                   <span className="text-faint">·</span>
                   <span>已运行 {formatUptime(running!.uptime_secs)}</span>
+                  {traffic && (
+                    <>
+                      <span className="text-faint">·</span>
+                      <span>
+                        ↑ {formatRate(traffic.up)} · ↓ {formatRate(traffic.down)}
+                      </span>
+                    </>
+                  )}
                 </>
               ) : (
                 <span>选择一个配置后即可连接</span>

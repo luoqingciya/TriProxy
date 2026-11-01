@@ -17,6 +17,7 @@ import { X } from 'lucide-react'
 import { useEffect } from 'react'
 
 import { Sidebar } from './components/Sidebar'
+import { Connections } from './pages/Connections'
 import { Dashboard } from './pages/Dashboard'
 import { Logs } from './pages/Logs'
 import { Profiles } from './pages/Profiles'
@@ -74,6 +75,7 @@ export function App() {
           <div className="flex-1 overflow-y-auto px-7 py-6">
             {page === 'dashboard' && <Dashboard />}
             {page === 'proxies' && <Proxies />}
+            {page === 'connections' && <Connections />}
             {page === 'profiles' && <Profiles />}
             {page === 'settings' && <Settings />}
           </div>

@@ -95,6 +95,35 @@ export interface Selection {
   overridden: boolean
 }
 
+export interface TrafficSample {
+  up: number
+  down: number
+}
+
+export interface ConnectionInfo {
+  id: string
+  metadata: {
+    network: string
+    kind: string
+    source_ip: string
+    destination_ip: string
+    destination_port: string
+    host: string
+  }
+  upload: number
+  download: number
+  chains: string[]
+  rule: string
+  rule_payload: string
+  start: string
+}
+
+export interface ConnectionsSnapshot {
+  upload_total: number
+  download_total: number
+  connections: ConnectionInfo[]
+}
+
 export interface LatencySample {
   node_id: string
   name: string

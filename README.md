@@ -37,7 +37,7 @@
 | **Phase 7** | **TUN 模式** | **已完成（管理员实测：网卡与路由在崩溃后均被清理）** |
 | **Phase 8** | **DNS** | **已完成（三核心 × 三模式全部通过校验；未改系统 DNS，理由见文档）** |
 | **Phase 9** | **订阅** | **已完成（URL 导入 / 条件请求缓存 / 错误恢复；无后台定时器）** |
-| **Phase 10** | **分流 / 延迟 / 核心更新** | **部分完成（流量图表、连接管理、节点收藏未做）** |
+| **Phase 10** | **分流 / 延迟 / 连接 / 流量 / 核心更新** | **部分完成（节点收藏、流量历史图表未做）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -142,6 +142,8 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
 | `triproxy core update [core] [--all] [--check]` | 检查并安装核心更新 |
+| `triproxy connections [--json] [--close ID] [--close-all]` | 实时连接列表与关闭 |
+| `triproxy traffic [--json]` | 读一次实时流量采样 |
 | `triproxy core select <file\|-> [--tun] [--json]` | 评估哪个核心最适合这份 Profile（Smart Engine） |
 | `triproxy proxy on [--endpoint E]` | 把系统代理指向当前核心 |
 | `triproxy proxy off` | 还原 TriProxy 改动前的系统代理设置 |
@@ -276,6 +278,17 @@ specialisation; eliminated: xray (TUN)
 **随包核心只读**：`cores/` 目录由发行包提供，程序运行时从不写入；所有安装与更新都进 `bin/`。
 
 ---
+
+## 连接与流量（Phase 10）
+
+```bash
+triproxy connections                 # 实时连接列表
+triproxy connections --close-all     # 全部关闭
+triproxy traffic                     # 读一次流量采样
+```
+
+数据来自核心的 **Clash 兼容控制器 API**，Mihomo 与 sing-box 都有，**Xray 没有**——
+因此这两项在 Xray 下不可用，界面会说明原因而不是显示空面板。
 
 ## 延迟测试（Phase 10）
 

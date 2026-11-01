@@ -207,6 +207,27 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       activeCore = target === 'smart' ? 'sing-box' : (target as CoreReport['kind'])
       return status() as T
     }
+    case 'traffic':
+      return { up: 24_576, down: 512_000 } as T
+    case 'connections':
+      return {
+        upload_total: 1024 * 512,
+        download_total: 1024 * 1024 * 12,
+        connections: [
+          {
+            id: 'a1b2c3d4e5f6',
+            metadata: { network: 'tcp', kind: 'HTTPS', source_ip: '127.0.0.1', destination_ip: '93.184.216.34', destination_port: '443', host: 'www.google.com' },
+            upload: 2048,
+            download: 65536,
+            chains: ['PROXY', 'Tokyo Reality'],
+            rule: 'Match',
+            rule_payload: '',
+            start: '2026-11-01T22:40:00Z',
+          },
+        ],
+      } as T
+    case 'close_connection':
+      return undefined as T
     case 'test_latency':
       return nodes.map((n, i) => ({
         node_id: n.id,

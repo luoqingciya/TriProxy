@@ -37,6 +37,7 @@ pub mod binaries;
 pub mod bootstrap;
 pub mod capability;
 pub mod compiler;
+pub mod controller;
 pub mod core;
 pub mod error;
 pub mod health;
@@ -58,6 +59,7 @@ pub use compiler::{
     compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
     RuleMode, SkippedNode,
 };
+pub use controller::{ConnectionInfo, ConnectionsSnapshot, ControllerClient, TrafficSample};
 pub use core::{
     CoreKind, CoreManager, CoreReport, ManagerStatus, ProxyCore, RecoveryReport, StartReport,
     SwitchReport, SwitchStep,
