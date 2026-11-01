@@ -572,6 +572,12 @@ TriProxy 只负责**生成配置**、**检查前提**、**发现残留**。自�
 命名检测依赖编译器把 `INTERFACE_NAME` 写进配置；这也是为什么 sing-box 用 `interface_name`、
 mihomo 用 `device` 固定成同一个名字。
 
+**踩过的坑**：最初只查注册表 `...Network{4d36e972-...}<guid>ConnectionName`，
+结果每次 TUN 正常退出后都会报「残留网卡 1 个」。原因是 Windows 移除网卡后**保留 Connection 键**
+（用于设备回来时恢复每网卡设置）。注册表不是权威来源，现在每个命中项都会再用
+`netsh interface show interface name=<name>` 的**退出码**确认网卡是否真实存在
+（只看退出码不看输出，因此不受系统语言影响）。
+
 ### 12.4 验证边界（重要）
 
 本机**没有管理员权限**，因此：
@@ -583,11 +589,24 @@ mihomo 用 `device` 固定成同一个名字。
 | Xray + TUN 被能力矩阵拒绝 | ✅ 已验证 |
 | 无管理员权限时给出明确错误 | ✅ 已验证 |
 | 残留网卡检测 | ✅ 已验证（本机有 TAP 网卡，未被误判） |
-| **真正创建 TUN 并跑通流量** | ❌ **未验证**（需要管理员） |
-| **崩溃后路由表是否真的被清理** | ❌ **未验证**（同上） |
+| **真正创建 TUN 设备** | ✅ 管理员实测 |
+| **崩溃后网卡与路由是否被清理** | ✅ 管理员实测 |
 
 验收脚本：`scripts/verify-tun.ps1`（需以管理员身份运行）。它会拉起 TUN、记录网卡与路由、
-硬杀核心模拟崩溃、再检查残留，最后清理。这是 Phase 7 转「完成」的判定依据。
+硬杀核心模拟崩溃、再检查残留，最后清理。
+
+实测结果（Windows 11，sing-box 1.14.4）：
+
+```text
+TUN 运行中：adapter TriProxy  status=Up  ifIndex=70  driver="sing-tun Tunnel"
+           该网卡上 7 条路由，含 0.0.0.0/0 -> 172.19.0.2（默认路由被接管）
+
+硬杀进程后：RESULT: adapter gone
+           RESULT: ipv4 routes now 34 (baseline 34)
+           RESULT: default routes via WLAN
+```
+
+即规划书 Phase 7 的验收项「程序退出后不会遗留错误的系统路由表」成立。
 
 因此 Phase 7 标记为「部分完成」。把「配置能被核心接受」当成「TUN 能用」是这类功能最常见的
 误判，这里不这么算。
