@@ -77,6 +77,7 @@ pub fn run() {
             commands::start_core,
             commands::stop_core,
             commands::switch_core,
+            commands::test_latency,
             commands::recent_logs,
             commands::tun_status,
             commands::system_proxy_status,

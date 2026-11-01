@@ -207,6 +207,16 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       activeCore = target === 'smart' ? 'sing-box' : (target as CoreReport['kind'])
       return status() as T
     }
+    case 'test_latency':
+      return nodes.map((n, i) => ({
+        node_id: n.id,
+        name: n.name,
+        endpoint: n.server + ':' + n.port,
+        kind: 'tcp',
+        latency_ms: 40 + i * 37,
+        error: null,
+        measured_at_ms: now,
+      })) as T
     case 'recent_logs':
       return logs.slice(-Number(args?.limit ?? 200)) as T
     case 'settings':

@@ -13,13 +13,13 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Search } from 'lucide-react'
+import { Activity, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
-import { Badge, Card, Empty } from '../components/ui'
+import { Badge, Button, Card, Empty } from '../components/ui'
 import { useApp } from '../store/app'
-import type { Protocol } from '../types'
+import type { LatencySample, Protocol } from '../types'
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   shadowsocks: 'SS',
@@ -36,6 +36,9 @@ const PROTOCOL_LABEL: Record<Protocol, string> = {
 export function Proxies() {
   const nodes = useApp((state) => state.nodes)
   const library = useApp((state) => state.library)
+  const latency = useApp((state) => state.latency)
+  const testing = useApp((state) => state.testing)
+  const testLatency = useApp((state) => state.testLatency)
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
 
@@ -68,6 +71,12 @@ export function Proxies() {
           activeProfile
             ? `来自配置「${activeProfile.name}」，共 ${nodes.length} 个节点`
             : '还没有活动配置'
+        }
+        actions={
+          <Button onClick={() => testLatency()} disabled={testing || nodes.length === 0}>
+            <Activity size={15} strokeWidth={2.2} />
+            {testing ? '测试中…' : '测试延迟'}
+          </Button>
         }
       />
 
@@ -133,7 +142,9 @@ export function Proxies() {
                     <span className="ml-1 text-faint">/{node.security}</span>
                   )}
                 </div>
-                <div className="text-right text-faint tabular">—</div>
+                <div className="text-right tabular">
+                  <LatencyCell sample={latency[node.id]} />
+                </div>
               </div>
             ))}
           </div>
@@ -141,10 +152,31 @@ export function Proxies() {
       </Card>
 
       <p className="mt-3 text-[12px] text-faint">
-        延迟测试需要控制器 API，属于后续阶段；当前显示为 —。
+        延迟为 TCP 握手时间，只说明端点可达，不代表代理可用（凭据错误也会握手成功）。
       </p>
     </div>
   )
+}
+
+/**
+ * Latency cell.
+ *
+ * The colour thresholds are about distance, not quality: under 200 ms is a
+ * nearby endpoint, over 500 ms is far away. A failed probe says 超时 and keeps
+ * the reason in the tooltip rather than inventing a number.
+ */
+function LatencyCell({ sample }: { sample?: LatencySample }) {
+  if (!sample) return <span className="text-faint">—</span>
+  if (sample.latency_ms === null) {
+    return (
+      <span className="text-danger" title={sample.error ?? undefined}>
+        超时
+      </span>
+    )
+  }
+  const ms = sample.latency_ms
+  const tone = ms < 200 ? 'text-success' : ms < 500 ? 'text-warn' : 'text-danger'
+  return <span className={tone}>{ms} ms</span>
 }
 
 function FilterChip({
