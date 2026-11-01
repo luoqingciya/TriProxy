@@ -32,6 +32,13 @@ pub use manifest::{ReleaseAsset, ReleaseInfo, Target};
 
 const GITHUB_API: &str = "https://api.github.com";
 const USER_AGENT: &str = "TriProxy/0.1 (+https://github.com/luoqingciya/TriProxy)";
+/// Optional token for GitHub API calls.
+///
+/// Unauthenticated API access is limited to 60 requests per hour **per IP**, and
+/// CI runners share egress addresses, so a release pipeline needs a token or it
+/// will start failing with 403 halfway through. `GITHUB_TOKEN` is picked up
+/// automatically so the workflow does not need extra wiring.
+pub const TOKEN_ENV_VARS: [&str; 2] = ["TRIPROXY_GITHUB_TOKEN", "GITHUB_TOKEN"];
 /// Abort a download when the transfer makes no progress for this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Minimum average throughput once the grace period is over.
@@ -138,6 +145,9 @@ pub struct BinaryManager {
     layout: Layout,
     client: reqwest::Client,
     mirror: Option<String>,
+    /// Applied to `api.github.com` only — never to asset downloads, which may be
+    /// routed through a third-party mirror.
+    token: Option<String>,
 }
 
 impl BinaryManager {
@@ -151,10 +161,17 @@ impl BinaryManager {
         let mirror = std::env::var(MIRROR_ENV)
             .ok()
             .and_then(|v| normalize_mirror(&v));
+        let token = TOKEN_ENV_VARS.iter().find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
         Ok(Self {
             layout,
             client,
             mirror,
+            token,
         })
     }
 
@@ -392,11 +409,16 @@ impl BinaryManager {
             None => format!("{GITHUB_API}/repos/{}/releases/latest", kind.repo()),
         };
 
-        let response = self
+        let mut request = self
             .client
             .get(&url)
             .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(token) = &self.token {
+            request = request.bearer_auth(token);
+        }
+
+        let response = request
             .send()
             .await
             .map_err(|e| Error::Network(format!("GET {url}: {e}")))?;
@@ -409,8 +431,14 @@ impl BinaryManager {
 
         if !status.is_success() {
             let snippet: String = body.chars().take(200).collect();
+            let hint = if status == reqwest::StatusCode::FORBIDDEN && self.token.is_none() {
+                " (unauthenticated GitHub API calls are limited to 60/hour per IP; \
+                 set GITHUB_TOKEN or TRIPROXY_GITHUB_TOKEN)"
+            } else {
+                ""
+            };
             return Err(Error::Network(format!(
-                "GitHub API returned {status} for {url}: {snippet}"
+                "GitHub API returned {status} for {url}: {snippet}{hint}"
             )));
         }
 

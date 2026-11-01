@@ -61,6 +61,10 @@ jobs:
 
       - name: Stage both variants
         shell: bash
+        env:
+          # Unauthenticated api.github.com access is 60 req/hour per IP and
+          # runners share egress IPs, so the release pipeline must authenticate.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 

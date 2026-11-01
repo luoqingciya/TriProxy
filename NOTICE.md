@@ -82,6 +82,10 @@ GPLv3 正文，用户才能读到完整条款。TriProxy 以未修改的官方�
 
 发布流水线走的是同一套流程，因此 CI 打包与终端用户下载受同等校验保护。
 
+查询 Release 元数据需要调用 GitHub API，未认证时限制为 60 次/小时（按 IP 计）。
+设置 `GITHUB_TOKEN` 或 `TRIPROXY_GITHUB_TOKEN` 可提升到 5000 次/小时；发布流水线自动使用
+工作流自带 token。该 token **只**用于 `api.github.com`，不会随资源下载发往镜像。
+
 ## 镜像
 
 下载失败时可按 `--mirror` 或环境变量 `TRIPROXY_GITHUB_MIRROR` 使用第三方 GitHub 加速服务。

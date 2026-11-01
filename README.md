@@ -74,6 +74,9 @@ triproxy core install mihomo --mirror https://ghfast.top/
 triproxy core install xray --file ./Xray-windows-64.zip
 ```
 
+若遇到 GitHub API 限流（未认证为 60 次/小时，按 IP 计），设置 `GITHUB_TOKEN` 或
+`TRIPROXY_GITHUB_TOKEN` 即可提升到 5000 次/小时。
+
 然后：
 
 ```bash
