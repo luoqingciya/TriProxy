@@ -13,6 +13,7 @@
 
 pub mod extract;
 pub mod manifest;
+pub mod version;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use crate::paths::{self, find_on_path, Layout};
 use crate::process::run_capture;
 
 pub use manifest::{ReleaseAsset, ReleaseInfo, Target};
+pub use version::{compare_versions, is_newer};
 
 const GITHUB_API: &str = "https://api.github.com";
 const USER_AGENT: &str = "TriProxy/0.1 (+https://github.com/luoqingciya/TriProxy)";
@@ -105,6 +107,32 @@ pub struct BinaryStatus {
     pub source: Option<BinarySource>,
     pub version: Option<String>,
     pub tag: Option<String>,
+}
+
+/// Outcome of comparing the installed version with the latest release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCheck {
+    pub core: CoreKind,
+    pub installed: Option<String>,
+    pub latest: Option<String>,
+    pub status: UpdateStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateStatus {
+    NotInstalled,
+    UpToDate,
+    UpdateAvailable,
+}
+
+impl UpdateStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdateStatus::NotInstalled => "not-installed",
+            UpdateStatus::UpToDate => "up-to-date",
+            UpdateStatus::UpdateAvailable => "update-available",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -236,6 +264,29 @@ impl BinaryManager {
     }
 
     /// Download, verify and install a core binary.
+    /// Compare the installed version against the latest release.
+    ///
+    /// Network failures propagate: reporting "up to date" because GitHub could
+    /// not be reached would be a lie the user acts on.
+    pub async fn check_update(&self, kind: CoreKind) -> Result<UpdateCheck> {
+        let installed = self.read_record(kind).map(|record| record.version);
+        let release = self.fetch_release(kind, None).await?;
+        let latest = release.version();
+
+        let status = match &installed {
+            None => UpdateStatus::NotInstalled,
+            Some(current) if is_newer(&latest, current) => UpdateStatus::UpdateAvailable,
+            Some(_) => UpdateStatus::UpToDate,
+        };
+
+        Ok(UpdateCheck {
+            core: kind,
+            installed,
+            latest: Some(latest),
+            status,
+        })
+    }
+
     pub async fn install(
         &self,
         kind: CoreKind,

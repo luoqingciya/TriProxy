@@ -37,7 +37,7 @@
 | **Phase 7** | **TUN 模式** | **已完成（管理员实测：网卡与路由在崩溃后均被清理）** |
 | **Phase 8** | **DNS** | **已完成（三核心 × 三模式全部通过校验；未改系统 DNS，理由见文档）** |
 | **Phase 9** | **订阅** | **已完成（URL 导入 / 条件请求缓存 / 错误恢复；无后台定时器）** |
-| **Phase 10** | **分流规则 + 延迟测试** | **部分完成（分流与 TCP 延迟已完成；流量图表/连接管理/收藏/核心更新未做）** |
+| **Phase 10** | **分流 / 延迟 / 核心更新** | **部分完成（流量图表、连接管理、节点收藏未做）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -141,6 +141,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy profile remove <id\|name>` | 删除 |
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
+| `triproxy core update [core] [--all] [--check]` | 检查并安装核心更新 |
 | `triproxy core select <file\|-> [--tun] [--json]` | 评估哪个核心最适合这份 Profile（Smart Engine） |
 | `triproxy proxy on [--endpoint E]` | 把系统代理指向当前核心 |
 | `triproxy proxy off` | 还原 TriProxy 改动前的系统代理设置 |
