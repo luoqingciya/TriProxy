@@ -68,6 +68,11 @@ impl Layout {
         self.root.join("configs")
     }
 
+    /// Stored profiles (one JSON file per profile plus an index).
+    pub fn profiles_dir(&self) -> PathBuf {
+        self.root.join("profiles")
+    }
+
     pub fn core_config_dir(&self, core: &str) -> PathBuf {
         self.configs_dir().join(core)
     }
@@ -95,6 +100,7 @@ impl Layout {
             self.root.clone(),
             self.bin_dir(),
             self.configs_dir(),
+            self.profiles_dir(),
             self.logs_dir(),
             self.downloads_dir(),
         ] {
