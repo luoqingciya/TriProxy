@@ -97,6 +97,22 @@ Phase 1 需要真实可用的配置才能验收「三个核心能稳定启停」
 因此 `main` 在刷完 stdout/stderr 后直接 `std::process::exit`，跳过运行时析构。
 这是「CLI 故意留下常驻守护进程」场景的标准做法。
 
+### 2.8 Windows 句柄继承：一个会误导人的坑
+
+`triproxy start | tee log` 这类管道用法最初会「挂死」：命令输出已经完整打印，核心也已启动，
+但管道永不结束。实测确认——杀掉核心进程的瞬间管道立刻结束。
+
+根因不在 CLI 退出，而在 Windows 的句柄继承：子进程创建时继承句柄是开启的，
+TriProxy 自己从父进程（shell 管道 / IDE 终端 / 未来 GUI 的日志面板）继承来的 stdout
+是可继承句柄，于是核心进程在整个生命周期里一直持有那个管道的写端，
+读取方永远等不到 EOF。
+
+修复：在 `spawn` 前对自身的 STD_INPUT/OUTPUT/ERROR 调用 `SetHandleInformation(HANDLE_FLAG_INHERIT, 0)`，
+只清掉「继承来的」可继承标志；TriProxy 为核心创建的 stdout/stderr 管道不受影响，
+它们本来就是为该子进程创建的可继承句柄。
+
+这个坑对脚本化和 GUI 集成都会致命，因此记录在此，避免后续被当成「偶发卡顿」重新排查一遍。
+
 ---
 
 ## 3. 状态机与切换流程

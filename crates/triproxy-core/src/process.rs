@@ -24,6 +24,46 @@ pub const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Stop a long-lived core from inheriting the caller's stdio handles.
+///
+/// On Windows the child is created with handle inheritance enabled, and the
+/// stdio handles TriProxy itself inherited (a shell pipe, an IDE terminal, a GUI
+/// log pane) are inheritable. The core would then hold those handles open for its
+/// entire lifetime, so any pipeline such as `triproxy start | tee log` never sees
+/// EOF — the command appears to hang even though TriProxy already exited.
+///
+/// The pipes TriProxy creates for the core's own stdout/stderr are unaffected:
+/// they are created as inheritable specifically for that child.
+#[cfg(windows)]
+fn detach_inherited_std_handles() {
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        unsafe {
+            let handle = GetStdHandle(which);
+            if handle.is_null() || handle as isize == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn detach_inherited_std_handles() {}
+
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
     pub success: bool,
@@ -64,11 +104,12 @@ pub async fn run_capture(binary: &Path, args: &[OsString]) -> Result<CommandOutp
         cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
     }
 
+    detach_inherited_std_handles();
+
     let output = cmd
         .output()
         .await
         .map_err(|e| Error::io(binary, e))?;
-
     Ok(CommandOutput {
         success: output.status.success(),
         code: output.status.code(),
@@ -250,6 +291,8 @@ impl Supervisor {
             use std::os::windows::process::CommandExt;
             cmd.as_std_mut().creation_flags(CREATE_NO_WINDOW);
         }
+
+        detach_inherited_std_handles();
 
         let mut child = match cmd.spawn() {
             Ok(child) => child,
