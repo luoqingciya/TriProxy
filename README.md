@@ -33,7 +33,7 @@
 | **Phase 3** | **Config Compiler** | **已完成（三核心配置均通过各自核心校验）** |
 | **Phase 4** | **Smart Core Selector** | **已完成（硬约束淘汰 + 可解释排序）** |
 | **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 配置 / 日志 / 设置）** |
-| Phase 6 | 系统代理 | 未开始 |
+| **Phase 6** | **系统代理** | **已完成（Windows 实测，macOS/Linux 待验证）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -138,6 +138,9 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
 | `triproxy core select <file\|-> [--tun] [--json]` | 评估哪个核心最适合这份 Profile（Smart Engine） |
+| `triproxy proxy on [--endpoint E]` | 把系统代理指向当前核心 |
+| `triproxy proxy off` | 还原 TriProxy 改动前的系统代理设置 |
+| `triproxy proxy status` | 查看系统代理是否由 TriProxy 托管 |
 | `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
 
 全局参数：`--data-dir <DIR>`（等价于环境变量 `TRIPROXY_HOME`）、`--json`。
@@ -183,7 +186,7 @@ triproxy profile compile ./sub.txt --core xray     -o config.json --check
 也可以直接带着 Profile 启动或切换核心：
 
 ```bash
-triproxy start mihomo --profile ./sub.txt
+triproxy start mihomo --profile ./sub.txt --proxy
 triproxy switch xray --profile ./sub.txt
 ```
 
@@ -201,6 +204,25 @@ triproxy core select ./sub.txt          # 评估三个核心，给出结论与�
 triproxy core select ./sub.txt --tun    # 把 TUN 作为硬需求（Xray 会被淘汰）
 triproxy switch smart --profile ./sub.txt
 ```
+
+## 系统代理（Phase 6）
+
+```bash
+triproxy start mihomo --proxy     # 启动并接管系统代理
+triproxy proxy status             # 查看当前指向
+triproxy proxy off                # 还原 TriProxy 改动前的设置
+```
+
+启动与停止是联动的：`stop` 会自动还原系统代理，`start --proxy` 会在核心就绪后再改系统设置。
+
+设计上只做一件事：**保证不留下烂摊子**。
+
+- 改系统代理之前先把原值写入 `<data>/system-proxy.json`，崩溃后下一次启动会自愈；
+- 重复启用不会把「自己写的值」当成原始值，否则恢复等于没恢复；
+- 核心没在监听时拒绝启用——把整台机器指向一个死端口比不改更糟。
+
+Windows 已实测（含外部杀进程模拟崩溃后的自动恢复）；macOS 与 Linux 按同一接口实现，
+但尚未在真机验证。
 
 ## Profile 库
 

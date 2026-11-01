@@ -28,6 +28,8 @@ const THEMES = [
 export function Settings() {
   const settings = useApp((state) => state.settings)
   const status = useApp((state) => state.status)
+  const proxy = useApp((state) => state.proxy)
+  const setSystemProxy = useApp((state) => state.setSystemProxy)
   const update = useApp((state) => state.updateSettings)
 
   if (!settings) {
@@ -92,6 +94,16 @@ export function Settings() {
           title="网络"
           hint="这些是应用侧需求：打开后，不具备该能力的核心会在选核时被淘汰"
         />
+        <SettingRow
+          title="系统代理"
+          hint={
+            proxy
+              ? `当前指向 ${proxy.endpoint}（${proxy.backend}）`
+              : '接管系统的 HTTP/HTTPS 代理，关闭核心时自动还原'
+          }
+        >
+          <Toggle checked={proxy !== null} onChange={setSystemProxy} />
+        </SettingRow>
         <SettingRow title="TUN 模式" hint="接管全局流量，需要管理员权限（Phase 7）">
           <Toggle checked={settings.tun} onChange={(tun) => update({ tun })} />
         </SettingRow>

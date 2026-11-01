@@ -493,7 +493,59 @@ triproxy-core                   （与 CLI 完全相同的代码）
 其中 `NetworkRequirements` 就是 Phase 4 特意留出的接口：设置页的 TUN / rule-set 开关
 直接决定选核时淘汰哪些核心。
 
-## 11. 尚未实现（明确的边界）
+## 11. Phase 6 — 系统代理
+
+### 11.1 难点不是设置，而是不留下烂摊子
+
+改系统代理是一行注册表写入。真正的问题是**崩溃**：进程在「已改系统代理」和「恢复」之间
+被杀掉，用户的整台机器就指向了一个已经不存在的端口——浏览器、更新程序、其他应用全部断网，
+而且用户根本不知道是 TriProxy 干的。
+
+三条规则保证这一点：
+
+1. **先落盘，再改系统**。快照写入 `<data>/system-proxy.json` 之后才动注册表。
+   若在两者之间崩溃，快照里的「原始值」与当前系统状态一致，恢复它是无害的（幂等）。
+2. **重复启用不会污染快照**。第二次 `enable` 只更新 endpoint，`previous` 保持第一次捕获的值。
+   否则快照会记成我们自己写的 `127.0.0.1:7890`，之后「恢复」就等于没恢复。
+3. **启动即自愈**。CLI 与 GUI 启动时都会检查：存在快照但没有任何核心在运行 →
+   这是上次崩溃的残留，立即恢复。
+
+第 3 条的判定条件是「快照存在 **且** 核心没在跑」。只看快照会误伤：CLI 每次调用都是独立进程，
+`triproxy proxy on` 之后紧接着的 `triproxy status` 如果无条件恢复，代理就白开了。
+
+### 11.2 拒绝指向死端口
+
+`enable()` 在改注册表之前先做一次 TCP 探活（500ms）。把一个已经不在监听的端口写进系统代理，
+比不改更糟——用户会以为代理生效了，实际是全部断网。
+
+### 11.3 平台实现
+
+| 平台 | 方式 | 验证状态 |
+|---|---|---|
+| Windows | `HKCU\...\Internet Settings` + `InternetSetOption` 刷新 WinINET | **已在本机实测** |
+| macOS | `networksetup` 逐服务设置 | 未验证 |
+| Linux | `gsettings org.gnome.system.proxy` | 未验证 |
+
+Windows 必须调用 `InternetSetOption(INTERNET_OPTION_SETTINGS_CHANGED / REFRESH)`，
+否则已经在运行的应用会继续用旧代理，用户看到的现象是「开关没反应」。
+
+macOS 与 Linux 的实现按同一 trait 编写，但**没有在真实机器上验证过**——这点在 PR 里明确标注，
+不要当成已完成的能力。
+
+### 11.4 实测结果（Windows）
+
+```text
+启用前：ProxyServer = 127.0.0.1:10808   （用户原本的代理）
+proxy on  → 127.0.0.1:7890，快照记录 10808
+proxy off → ProxyServer 回到 127.0.0.1:10808，ProxyOverride 逐字一致，快照删除
+
+崩溃恢复：
+proxy on → 外部杀掉核心进程（模拟崩溃，注册表仍指向 7890）
+下一次任意命令 → "restored the system proxy left behind by a previous session"
+                → 注册表回到 10808
+```
+
+## 12. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 

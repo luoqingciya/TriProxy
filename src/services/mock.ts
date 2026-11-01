@@ -61,6 +61,8 @@ let library: ProfileLibrary = {
   ],
 }
 
+let proxyEnabled = false
+
 let activeCore: CoreReport['kind'] | null = 'sing-box'
 
 let settings: Settings = {
@@ -70,6 +72,7 @@ let settings: Settings = {
   rule_set: false,
   proxy_groups: false,
   allow_lan: false,
+  system_proxy: false,
   log_level: 'info',
 }
 
@@ -203,6 +206,11 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return undefined as T
     case 'preview_selection':
       return selection() as T
+    case 'system_proxy_status':
+      return (proxyEnabled ? { endpoint: '127.0.0.1:7890', backend: 'windows-registry', applied_at_ms: now } : null) as T
+    case 'set_system_proxy':
+      proxyEnabled = Boolean(args?.enabled)
+      return (proxyEnabled ? { endpoint: '127.0.0.1:7890', backend: 'windows-registry', applied_at_ms: now } : null) as T
     default:
       throw new Error(`unknown command: ${command}`)
   }

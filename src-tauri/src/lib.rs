@@ -21,7 +21,7 @@ pub mod commands;
 
 use std::sync::Arc;
 
-use triproxy_core::{CoreManager, Layout};
+use triproxy_core::{CoreManager, Layout, SystemProxyManager};
 
 /// Shared state handed to every command.
 pub struct AppState {
@@ -51,6 +51,15 @@ pub fn run() {
                     }
                     Err(error) => tracing::warn!(%error, "recovery failed"),
                 }
+
+                // A proxy snapshot with no running core means the previous
+                // session died before restoring it; undo that before drawing.
+                let proxy = SystemProxyManager::new(manager.layout());
+                if proxy.status().is_some() && manager.status().await.active_core.is_none() {
+                    if let Err(error) = proxy.recover() {
+                        tracing::warn!(%error, "could not restore the system proxy");
+                    }
+                }
             });
             Ok(())
         })
@@ -68,6 +77,8 @@ pub fn run() {
             commands::stop_core,
             commands::switch_core,
             commands::recent_logs,
+            commands::system_proxy_status,
+            commands::set_system_proxy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running TriProxy");

@@ -558,6 +558,16 @@ impl CoreManager {
         self.persisted.lock().await.active_core
     }
 
+    /// Listen port recorded when the core was last started.
+    ///
+    /// Synchronous on purpose: the system-proxy helper needs it before deciding
+    /// whether to touch the machine, and that decision is not worth an await.
+    pub fn persisted_listen_port(&self) -> Option<u16> {
+        let text = std::fs::read_to_string(self.layout.state_file()).ok()?;
+        let state: PersistedState = serde_json::from_str(&text).ok()?;
+        state.listen_port
+    }
+
     fn prepare_config(&self, kind: CoreKind, core: &Arc<dyn ProxyCore>) -> Result<PathBuf> {
         let text = core.bootstrap_config(self.api_port, &self.log_level);
         self.write_config(kind, bootstrap::config_file_name(kind), &text)
