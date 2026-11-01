@@ -19,7 +19,8 @@ use crate::profile::Profile;
 
 use super::yaml::{emit, Yaml};
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, SkippedNode, PROXY_GROUP,
+    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, RuleMode, SkippedNode,
+    PROXY_GROUP,
 };
 
 pub struct MihomoCompiler;
@@ -99,7 +100,7 @@ impl ConfigCompiler for MihomoCompiler {
         document = document
             .with("proxies", Yaml::List(proxies))
             .with("proxy-groups", Yaml::list().push(group))
-            .with("rules", Yaml::strings([format!("MATCH,{PROXY_GROUP}")]));
+            .with("rules", Yaml::strings(rule_lines(options.rules)));
 
         Ok(CompiledConfig {
             core: CoreKind::Mihomo,
@@ -140,6 +141,26 @@ fn dns_block(mode: DnsMode) -> Yaml {
     }
 
     dns
+}
+
+/// Mihomo rule list.
+///
+/// Split mode keeps the local networks and Chinese destinations off the proxy.
+/// GEOSITE/GEOIP are evaluated against Mihomo own geo database, so no rule-set
+/// download is needed at runtime.
+fn rule_lines(mode: RuleMode) -> Vec<String> {
+    match mode {
+        RuleMode::Global => vec![format!("MATCH,{PROXY_GROUP}")],
+        RuleMode::Split => vec![
+            "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve".to_string(),
+            "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve".to_string(),
+            "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve".to_string(),
+            "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".to_string(),
+            "GEOSITE,cn,DIRECT".to_string(),
+            "GEOIP,CN,DIRECT".to_string(),
+            format!("MATCH,{PROXY_GROUP}"),
+        ],
+    }
 }
 
 fn proxy_entry(node: &Node) -> Result<Yaml, String> {
@@ -464,6 +485,43 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#""auto-route": true"#), "{text}");
+    }
+
+    #[test]
+    fn split_mode_sends_chinese_traffic_direct() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        let options = CompileOptions {
+            rules: RuleMode::Split,
+            ..Default::default()
+        };
+        let text = compile_yaml(&Profile::new("p", vec![node]), &options)
+            .unwrap()
+            .text;
+        assert!(text.contains("GEOSITE,cn,DIRECT"), "{text}");
+        assert!(text.contains("GEOIP,CN,DIRECT"), "{text}");
+        assert!(text.contains("IP-CIDR,192.168.0.0/16,DIRECT"), "{text}");
+        // The catch-all must stay last, otherwise nothing reaches the proxy.
+        assert!(text.contains("MATCH,PROXY"), "{text}");
+    }
+
+    #[test]
+    fn global_mode_is_a_single_catch_all_rule() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        let text = compile_yaml(&Profile::new("p", vec![node]), &CompileOptions::default())
+            .unwrap()
+            .text;
+        assert!(!text.contains("GEOSITE"), "{text}");
+        assert!(text.contains("MATCH,PROXY"), "{text}");
     }
 
     #[test]

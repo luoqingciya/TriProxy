@@ -339,7 +339,8 @@ impl BinaryManager {
             ),
         }
 
-        let binary = extract::extract_binary(&asset_name, &bytes, kind.exe_stem())?;
+        let bundle = extract::extract_bundle(&asset_name, &bytes, kind.exe_stem())?;
+        let binary = bundle.binary;
         if binary.is_empty() {
             return Err(Error::Other(format!(
                 "`{}` produced an empty binary from {asset_name}",
@@ -349,6 +350,16 @@ impl BinaryManager {
 
         let final_path = self.layout.managed_binary(kind.exe_stem());
         self.write_binary(&final_path, &binary)?;
+
+        // Runtime data files (geosite.dat and friends) have to sit beside the
+        // executable, otherwise geo-based routing fails at load time.
+        if let Some(dir) = final_path.parent() {
+            for (name, data) in &bundle.companions {
+                let path = dir.join(name);
+                std::fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
+                tracing::info!(file = %path.display(), bytes = data.len(), "installed companion data file");
+            }
+        }
 
         // Trust but verify: a binary that cannot even report its version is not
         // usable, and must not be left behind for the manager to pick up.

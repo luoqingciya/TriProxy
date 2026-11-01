@@ -104,6 +104,7 @@ export interface LogEntry {
 }
 
 export type DnsMode = 'off' | 'split' | 'fake_ip'
+export type RuleMode = 'global' | 'split'
 
 export interface AppliedProxy {
   endpoint: string
@@ -122,6 +123,8 @@ export interface Settings {
   system_proxy: boolean
   /** DNS strategy baked into the generated config. */
   dns_mode: DnsMode
+  /** Routing strategy baked into the generated config. */
+  rule_mode: RuleMode
   log_level: string
 }
 

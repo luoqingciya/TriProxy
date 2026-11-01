@@ -55,7 +55,7 @@ pub mod subscription_service;
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
     compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
-    SkippedNode,
+    RuleMode, SkippedNode,
 };
 pub use core::{
     CoreKind, CoreManager, CoreReport, ManagerStatus, ProxyCore, RecoveryReport, StartReport,

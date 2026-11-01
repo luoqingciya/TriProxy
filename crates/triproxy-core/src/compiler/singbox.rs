@@ -20,7 +20,8 @@ use crate::profile::node::{Credentials, Node, Transport, VlessFlow};
 use crate::profile::Profile;
 
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, SkippedNode, PROXY_GROUP,
+    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, RuleMode, SkippedNode,
+    PROXY_GROUP,
 };
 
 pub struct SingBoxCompiler;
@@ -107,9 +108,29 @@ impl ConfigCompiler for SingBoxCompiler {
         // Without a hijack rule the core would forward DNS packets as plain UDP
         // to the original resolver: slow, and the query itself still leaves the
         // tunnel. hijack-dns makes the core answer from its own dns section.
-        let mut route = json!({ "final": PROXY_GROUP });
+        let mut rules: Vec<Value> = Vec::new();
         if dns_mode != DnsMode::Off {
-            route["rules"] = json!([{ "protocol": "dns", "action": "hijack-dns" }]);
+            rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
+        }
+        if options.rules == RuleMode::Split {
+            // sing-box 1.12 dropped the built-in geoip/geosite databases, so the
+            // split lists come from remote rule-sets instead. They are fetched
+            // directly: routing them through the proxy would deadlock, since the
+            // rule-set is needed to decide what goes through the proxy.
+            rules.push(json!({ "ip_is_private": true, "action": "route", "outbound": "direct" }));
+            rules
+                .push(json!({ "rule_set": "geosite-cn", "action": "route", "outbound": "direct" }));
+            rules.push(json!({ "rule_set": "geoip-cn", "action": "route", "outbound": "direct" }));
+        }
+
+        let mut route = json!({ "final": PROXY_GROUP });
+        if !rules.is_empty() {
+            route["rules"] = json!(rules);
+        }
+        if options.rules == RuleMode::Split {
+            route["rule_set"] = json!(split_rule_sets());
+        }
+        if dns_mode != DnsMode::Off {
             // sing-box 1.12+ refuses a config with a dns section but no bootstrap
             // resolver: something has to resolve the domain names used by the
             // outbounds themselves, before any rule can apply.
@@ -156,6 +177,26 @@ impl ConfigCompiler for SingBoxCompiler {
 ///
 /// The proxy-dns server carries `detour: PROXY`, so lookups for tunnelled
 /// domains are resolved inside the tunnel rather than beside it.
+/// Remote rule-sets for the split mode.
+fn split_rule_sets() -> Value {
+    json!([
+        {
+            "tag": "geosite-cn",
+            "type": "remote",
+            "format": "binary",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+            "download_detour": "direct",
+        },
+        {
+            "tag": "geoip-cn",
+            "type": "remote",
+            "format": "binary",
+            "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+            "download_detour": "direct",
+        },
+    ])
+}
+
 fn dns_object(mode: DnsMode) -> Value {
     let mut servers = vec![
         json!({
@@ -469,6 +510,48 @@ mod tests {
         assert_eq!(tun["auto_route"], true);
         // The mixed inbound stays: explicit clients still need a port.
         assert_eq!(document["inbounds"][0]["type"], "mixed");
+    }
+
+    #[test]
+    fn split_mode_adds_remote_rule_sets_and_direct_rules() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            rules: RuleMode::Split,
+            ..Default::default()
+        };
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![node]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+
+        let rule_sets = document["route"]["rule_set"].as_array().unwrap();
+        assert_eq!(rule_sets.len(), 2);
+        // Fetched directly: routing them through the proxy would deadlock.
+        assert_eq!(rule_sets[0]["download_detour"], "direct");
+
+        let rules = document["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r["rule_set"] == "geosite-cn"));
+        assert!(rules.iter().any(|r| r["ip_is_private"] == true));
+    }
+
+    #[test]
+    fn global_mode_has_no_rule_sets() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![node]), &CompileOptions::default())
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        assert!(document["route"].get("rule_set").is_none());
     }
 
     #[test]
