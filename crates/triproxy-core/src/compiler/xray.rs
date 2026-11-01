@@ -26,7 +26,8 @@ use crate::profile::node::{Credentials, Node, Transport, VlessFlow};
 use crate::profile::Profile;
 
 use super::{
-    common_skip_reason, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, SkippedNode,
+    common_skip_reason, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
+    SkippedNode,
 };
 
 pub struct XrayCompiler;
@@ -70,6 +71,8 @@ impl ConfigCompiler for XrayCompiler {
             "127.0.0.1"
         };
 
+        let dns_mode = options.dns.effective(options.tun);
+
         let document = json!({
             "log": {
                 "loglevel": xray_log_level(&options.log_level),
@@ -89,7 +92,8 @@ impl ConfigCompiler for XrayCompiler {
                     "protocol": "http"
                 }
             ],
-            "outbounds": outbounds
+            "outbounds": outbounds,
+            "dns": dns_object(dns_mode),
         });
 
         let mut text =
@@ -107,6 +111,22 @@ impl ConfigCompiler for XrayCompiler {
             skipped,
         })
     }
+}
+
+/// DNS section.
+///
+/// Xray resolves through its own DNS service; there is no  equivalent,
+/// so these servers are queried over whatever routing applies to their address.
+/// Emitting the block still helps: it stops the system resolver from being the
+/// only answer source, and it keeps lookups consistent with the proxy rules.
+fn dns_object(mode: DnsMode) -> Value {
+    if mode == DnsMode::Off {
+        return Value::Null;
+    }
+    json!({
+        "servers": ["https://1.1.1.1/dns-query", "223.5.5.5"],
+        "queryStrategy": "UseIPv4",
+    })
 }
 
 /// Xray only accepts debug / info / warning / error / none.

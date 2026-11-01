@@ -16,7 +16,7 @@
 import { PageHeader } from '../components/Sidebar'
 import { Card, SectionTitle, SettingRow, Toggle } from '../components/ui'
 import { useApp } from '../store/app'
-import { CORE_LABEL, type CoreKind } from '../types'
+import { CORE_LABEL, type CoreKind, type Settings as AppSettings } from '../types'
 
 const CORES: (CoreKind | null)[] = [null, 'mihomo', 'sing-box', 'xray']
 const THEMES = [
@@ -132,6 +132,19 @@ export function Settings() {
 
       <Card>
         <SectionTitle title="高级" />
+        <SettingRow title="DNS 模式" hint="split：走代理解析；fake-ip：TUN 下最快，但部分应用不兼容">
+          <select
+            value={settings.dns_mode}
+            onChange={(event) =>
+              update({ dns_mode: event.target.value as AppSettings['dns_mode'] })
+            }
+            className="rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg outline-none"
+          >
+            <option value="off">关闭</option>
+            <option value="split">split</option>
+            <option value="fake_ip">fake-ip</option>
+          </select>
+        </SettingRow>
         <SettingRow title="日志级别">
           <select
             value={settings.log_level}

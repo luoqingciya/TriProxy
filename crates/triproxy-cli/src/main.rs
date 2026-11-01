@@ -23,7 +23,7 @@ use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, is_elevated, leftovers, parse_payload, CompileOptions, CompiledConfig, CoreKind,
-    CoreManager, CoreReport, Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node,
+    CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus, NetworkRequirements, Node,
     ParsedProfile, Profile, ProfileStore, Selector, StoredProfile, SwitchReport,
     SystemProxyManager,
 };
@@ -74,6 +74,9 @@ enum Command {
         /// Run in TUN mode (requires administrator privileges)
         #[arg(long)]
         tun: bool,
+        /// DNS strategy: off | split | fakeip
+        #[arg(long, value_name = "MODE")]
+        dns: Option<String>,
     },
     /// Stop whatever core is running
     Stop,
@@ -92,6 +95,9 @@ enum Command {
         /// Run in TUN mode (requires administrator privileges)
         #[arg(long)]
         tun: bool,
+        /// DNS strategy: off | split | fakeip
+        #[arg(long, value_name = "MODE")]
+        dns: Option<String>,
     },
     /// Show captured core logs
     Logs {
@@ -172,6 +178,9 @@ enum ProfileCommand {
         /// Generate a TUN config instead of a local mixed port
         #[arg(long)]
         tun: bool,
+        /// DNS strategy: off | split | fakeip
+        #[arg(long, value_name = "MODE")]
+        dns: Option<String>,
         /// Let the core validate the generated config before returning
         #[arg(long)]
         check: bool,
@@ -362,7 +371,18 @@ async fn run(cli: Cli) -> Result<i32> {
             profile,
             proxy,
             tun,
-        } => cmd_start(&manager, core.as_deref(), profile.as_deref(), proxy, tun).await,
+            dns,
+        } => {
+            cmd_start(
+                &manager,
+                core.as_deref(),
+                profile.as_deref(),
+                proxy,
+                tun,
+                dns,
+            )
+            .await
+        }
         Command::Stop => cmd_stop(&manager).await,
         Command::Restart => cmd_restart(&manager).await,
         Command::Switch {
@@ -370,7 +390,8 @@ async fn run(cli: Cli) -> Result<i32> {
             profile,
             proxy,
             tun,
-        } => cmd_switch(&manager, &core, profile.as_deref(), proxy, tun).await,
+            dns,
+        } => cmd_switch(&manager, &core, profile.as_deref(), proxy, tun, dns).await,
         Command::Logs {
             lines,
             core,
@@ -414,9 +435,19 @@ async fn run(cli: Cli) -> Result<i32> {
                 core,
                 output,
                 tun,
+                dns,
                 check,
                 json,
-            } => cmd_profile_compile(&manager, &source, &core, output, tun, check, json).await,
+            } => {
+                let args = CompileArgs {
+                    output,
+                    tun,
+                    dns,
+                    check,
+                    json,
+                };
+                cmd_profile_compile(&manager, &source, &core, args).await
+            }
             ProfileCommand::Check { source, json } => cmd_profile_check(&source, json),
             ProfileCommand::Add {
                 source,
@@ -463,6 +494,7 @@ async fn cmd_start(
     profile: Option<&Path>,
     proxy: bool,
     tun: bool,
+    dns: Option<String>,
 ) -> Result<i32> {
     if tun && !is_elevated() {
         bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
@@ -472,7 +504,7 @@ async fn cmd_start(
         Some(name) => parse_core_choice(name)?,
         None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
-    let (kind, compiled) = resolve_target(manager, choice, profile, tun)?;
+    let (kind, compiled) = resolve_target(manager, choice, profile, tun, dns)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -543,13 +575,14 @@ async fn cmd_switch(
     profile: Option<&Path>,
     proxy: bool,
     tun: bool,
+    dns: Option<String>,
 ) -> Result<i32> {
     if tun && !is_elevated() {
         bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
     }
 
     let choice = parse_core_choice(core)?;
-    let (kind, compiled) = resolve_target(manager, choice, profile, tun)?;
+    let (kind, compiled) = resolve_target(manager, choice, profile, tun, dns)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -774,16 +807,21 @@ async fn cmd_profile_compile(
     manager: &CoreManager,
     source: &str,
     core: &str,
-    output: Option<PathBuf>,
-    tun: bool,
-    check: bool,
-    json: bool,
+    args: CompileArgs,
 ) -> Result<i32> {
+    let CompileArgs {
+        output,
+        tun,
+        dns,
+        check,
+        json,
+    } = args;
     let kind = parse_core(core)?;
     let (text, label) = read_profile_source(source)?;
     let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
     let options = CompileOptions {
         tun,
+        dns: parse_dns_mode(dns.as_deref())?,
         ..Default::default()
     };
     let compiled = compile(kind, &parsed.profile, &options).map_err(|error| anyhow!("{error}"))?;
@@ -845,9 +883,15 @@ fn load_profile(path: &Path) -> Result<ParsedProfile> {
 }
 
 /// Compile for one core, reporting skipped nodes on stderr.
-fn compile_for(kind: CoreKind, profile: &Profile, tun: bool) -> Result<CompiledConfig> {
+fn compile_for(
+    kind: CoreKind,
+    profile: &Profile,
+    tun: bool,
+    dns: Option<&str>,
+) -> Result<CompiledConfig> {
     let options = CompileOptions {
         tun,
+        dns: parse_dns_mode(dns)?,
         ..Default::default()
     };
     let compiled = compile(kind, profile, &options).map_err(|error| anyhow!("{error}"))?;
@@ -862,6 +906,15 @@ fn compile_for(kind: CoreKind, profile: &Profile, tun: bool) -> Result<CompiledC
 enum CoreChoice {
     Smart,
     Fixed(CoreKind),
+}
+
+fn parse_dns_mode(value: Option<&str>) -> Result<DnsMode> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("off") => Ok(DnsMode::Off),
+        Some("split") => Ok(DnsMode::Split),
+        Some("fakeip") | Some("fake-ip") => Ok(DnsMode::FakeIp),
+        Some(other) => bail!("unknown DNS mode `{other}` (expected off, split or fakeip)"),
+    }
 }
 
 fn parse_core_choice(value: &str) -> Result<CoreChoice> {
@@ -881,10 +934,11 @@ fn resolve_target(
     choice: CoreChoice,
     profile: Option<&Path>,
     tun: bool,
+    dns: Option<String>,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
     if let Some(path) = profile {
         let parsed = load_profile(path)?;
-        return finish_target(choice, parsed.profile, tun);
+        return finish_target(choice, parsed.profile, tun, dns);
     }
 
     let store = ProfileStore::new(manager.layout());
@@ -894,7 +948,7 @@ fn resolve_target(
             stored.name,
             active.nodes.len()
         );
-        return finish_target(choice, active, tun);
+        return finish_target(choice, active, tun, dns);
     }
 
     match choice {
@@ -909,6 +963,7 @@ fn finish_target(
     choice: CoreChoice,
     profile: Profile,
     tun: bool,
+    dns: Option<String>,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
     match choice {
         CoreChoice::Smart => {
@@ -919,14 +974,23 @@ fn finish_target(
                 "smart: selected `{}` — {}",
                 selection.selected, selection.reason
             );
-            let compiled = compile_for(selection.selected, &profile, tun)?;
+            let compiled = compile_for(selection.selected, &profile, tun, dns.as_deref())?;
             Ok((selection.selected, Some(compiled)))
         }
         CoreChoice::Fixed(kind) => {
-            let compiled = compile_for(kind, &profile, tun)?;
+            let compiled = compile_for(kind, &profile, tun, dns.as_deref())?;
             Ok((kind, Some(compiled)))
         }
     }
+}
+
+/// Flags for `profile compile`. Grouped so call sites cannot swap tun and dns.
+struct CompileArgs {
+    output: Option<PathBuf>,
+    tun: bool,
+    dns: Option<String>,
+    check: bool,
+    json: bool,
 }
 
 fn cmd_core_select(source: &str, tun: bool, json: bool) -> Result<i32> {

@@ -19,7 +19,7 @@ use crate::profile::Profile;
 
 use super::yaml::{emit, Yaml};
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, SkippedNode, PROXY_GROUP,
+    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, SkippedNode, PROXY_GROUP,
 };
 
 pub struct MihomoCompiler;
@@ -78,6 +78,11 @@ impl ConfigCompiler for MihomoCompiler {
             document = document.with("bind-address", Yaml::str("127.0.0.1"));
         }
 
+        let dns_mode = options.dns.effective(options.tun);
+        if dns_mode != DnsMode::Off {
+            document = document.with("dns", dns_block(dns_mode));
+        }
+
         if options.tun {
             // `device` names the wintun/utun adapter so a leftover can be
             // recognised after a crash.
@@ -104,6 +109,37 @@ impl ConfigCompiler for MihomoCompiler {
             skipped,
         })
     }
+}
+
+/// DNS section.
+///
+/// Nameservers carry the  suffix, which is how Mihomo is told to send
+/// the query through the proxy group instead of straight to the resolver. That
+/// suffix is the entire leak-protection story here: without it every lookup
+/// leaves the machine in plain sight of the local network, even when the traffic
+/// itself is tunnelled.
+fn dns_block(mode: DnsMode) -> Yaml {
+    let mut dns = Yaml::map()
+        .with("enable", Yaml::bool(true))
+        .with("ipv6", Yaml::bool(false))
+        .with("default-nameserver", Yaml::strings(["223.5.5.5"]))
+        .with(
+            "nameserver",
+            Yaml::strings([format!("https://1.1.1.1/dns-query#{PROXY_GROUP}")]),
+        )
+        .with("fallback", Yaml::strings(["tls://8.8.8.8:853"]));
+
+    if mode == DnsMode::FakeIp {
+        dns = dns
+            .with("enhanced-mode", Yaml::str("fake-ip"))
+            .with("fake-ip-range", Yaml::str("198.18.0.1/16"))
+            .with(
+                "fake-ip-filter",
+                Yaml::strings(["*.lan", "*.local", "localhost.ptlogin2.qq.com"]),
+            );
+    }
+
+    dns
 }
 
 fn proxy_entry(node: &Node) -> Result<Yaml, String> {
@@ -428,6 +464,64 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#""auto-route": true"#), "{text}");
+    }
+
+    #[test]
+    fn dns_section_routes_nameservers_through_the_proxy() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        let options = CompileOptions {
+            dns: DnsMode::Split,
+            ..Default::default()
+        };
+        let text = compile_yaml(&Profile::new("p", vec![node]), &options)
+            .unwrap()
+            .text;
+        assert!(text.contains(r#""dns":"#), "{text}");
+        assert!(text.contains("#PROXY"), "{text}");
+        assert!(!text.contains("enhanced-mode"), "{text}");
+    }
+
+    #[test]
+    fn fakeip_mode_adds_enhanced_mode_and_range() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        let options = CompileOptions {
+            dns: DnsMode::FakeIp,
+            ..Default::default()
+        };
+        let text = compile_yaml(&Profile::new("p", vec![node]), &options)
+            .unwrap()
+            .text;
+        assert!(text.contains(r#""enhanced-mode": "fake-ip""#), "{text}");
+        assert!(text.contains("fake-ip-range"), "{text}");
+    }
+
+    #[test]
+    fn tun_upgrades_off_dns_to_split() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        // dns is Off, but TUN makes a DNS section necessary.
+        let options = CompileOptions {
+            tun: true,
+            ..Default::default()
+        };
+        let text = compile_yaml(&Profile::new("p", vec![node]), &options)
+            .unwrap()
+            .text;
+        assert!(text.contains(r#""dns":"#), "{text}");
     }
 
     #[test]

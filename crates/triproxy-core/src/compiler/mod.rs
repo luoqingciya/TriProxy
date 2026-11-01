@@ -57,6 +57,43 @@ pub struct CompileOptions {
     pub allow_lan: bool,
     /// Create a TUN interface instead of only a local mixed port.
     pub tun: bool,
+    /// How the core resolves names. See [].
+    pub dns: DnsMode,
+}
+
+/// DNS strategy baked into the generated config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DnsMode {
+    /// Emit no DNS section; the core uses its own defaults.
+    #[default]
+    Off,
+    /// Resolve proxied domains through the proxy, local domains directly.
+    Split,
+    /// Answer proxied domains with fake IPs and resolve the real name inside
+    /// the tunnel. Only meaningful with TUN.
+    FakeIp,
+}
+
+impl DnsMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DnsMode::Off => "off",
+            DnsMode::Split => "split",
+            DnsMode::FakeIp => "fake-ip",
+        }
+    }
+
+    /// TUN cannot work well without the core answering DNS itself: without a
+    /// hijack rule the queries are just tunnelled to the original resolver as
+    /// plain UDP, which is both slow and leaky. So TUN upgrades Off to Split
+    /// unless the caller explicitly asked for something else.
+    pub fn effective(self, tun: bool) -> DnsMode {
+        match (self, tun) {
+            (DnsMode::Off, true) => DnsMode::Split,
+            (mode, _) => mode,
+        }
+    }
 }
 
 impl Default for CompileOptions {
@@ -67,6 +104,7 @@ impl Default for CompileOptions {
             log_level: "info".to_string(),
             allow_lan: false,
             tun: false,
+            dns: DnsMode::Off,
         }
     }
 }
