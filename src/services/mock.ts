@@ -73,6 +73,7 @@ let settings: Settings = {
   proxy_groups: false,
   allow_lan: false,
   system_proxy: false,
+  dns_mode: 'off',
   log_level: 'info',
 }
 

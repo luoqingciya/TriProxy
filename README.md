@@ -35,6 +35,7 @@
 | **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 配置 / 日志 / 设置）** |
 | **Phase 6** | **系统代理** | **已完成（Windows 实测，macOS/Linux 待验证）** |
 | **Phase 7** | **TUN 模式** | **已完成（管理员实测：网卡与路由在崩溃后均被清理）** |
+| **Phase 8** | **DNS** | **已完成（三核心 × 三模式全部通过校验；未改系统 DNS，理由见文档）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -143,6 +144,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy proxy off` | 还原 TriProxy 改动前的系统代理设置 |
 | `triproxy proxy status` | 查看系统代理是否由 TriProxy 托管 |
 | `triproxy tun status` | 查看 TUN 权限与残留网卡 |
+| `--dns <off\|split\|fakeip>` | start / switch / profile compile 的 DNS 模式 |
 | `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
 
 全局参数：`--data-dir <DIR>`（等价于环境变量 `TRIPROXY_HOME`）、`--json`。
@@ -270,6 +272,31 @@ specialisation; eliminated: xray (TUN)
 **随包核心只读**：`cores/` 目录由发行包提供，程序运行时从不写入；所有安装与更新都进 `bin/`。
 
 ---
+
+## DNS（Phase 8）
+
+```bash
+triproxy start mihomo --tun --dns fakeip     # TUN + 假 IP，解析最快
+triproxy start mihomo --dns split            # 只让被代理的域名走隧道内解析
+triproxy profile compile sub.txt --core sing-box --dns split --check
+```
+
+| 模式 | 行为 |
+|---|---|
+| `off` | 不生成 `dns` 段（默认） |
+| `split` | 被代理域名走隧道内解析，其余走本地 |
+| `fakeip` | 被代理域名返回假 IP，真实域名在隧道内解析 |
+
+打开 TUN 时 `off` 会自动提升为 `split`：没有 DNS 段与劫持规则，TUN 只是把发往原解析器的
+UDP 包一起塞进隧道，既慢又不防泄漏。
+
+**防泄漏的做法是让查询本身走隧道**——mihomo 的 nameserver 带 `#PROXY` 后缀，
+sing-box 的 dns server 带 `detour: PROXY` 并启用 `hijack-dns`。
+只把系统 DNS 换成公共解析器不算防泄漏：查询照样从本地网络发出，只是换了个观察者。
+
+因此**没有实现修改系统 DNS**（规划书 Phase 8 的 "Restore System DNS"）。理由写在
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 第 13.3 节：有 TUN 时它多余，没有 TUN 时它无效，
+而一旦核心异常退出会让整台机器 DNS 全挂。
 
 ## 桌面客户端（Phase 5）
 

@@ -52,7 +52,8 @@ pub mod store;
 
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
-    compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, SkippedNode,
+    compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
+    SkippedNode,
 };
 pub use core::{
     CoreKind, CoreManager, CoreReport, ManagerStatus, ProxyCore, RecoveryReport, StartReport,
