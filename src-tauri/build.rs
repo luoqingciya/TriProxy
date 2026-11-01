@@ -12,5 +12,19 @@
 // Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
 
 fn main() {
-    tauri_build::build()
+    #[cfg(windows)]
+    {
+        // Embed app.manifest so the executable requests administrator rights.
+        // TUN mode cannot work without them, and failing at launch with a UAC
+        // prompt beats failing later inside a core process.
+        let attributes = tauri_build::Attributes::new().windows_attributes(
+            tauri_build::WindowsAttributes::new().app_manifest(include_str!("app.manifest")),
+        );
+        tauri_build::try_build(attributes).expect("failed to run tauri-build");
+    }
+
+    #[cfg(not(windows))]
+    {
+        tauri_build::build()
+    }
 }

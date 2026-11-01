@@ -281,6 +281,8 @@ npm run tauri dev        # 开发模式（自动启动 Vite + 桌面窗口）
 npm run tauri build      # 产出安装包
 ```
 
+> **Windows 上桌面版始终以管理员身份运行**：TUN 模式需要创建虚拟网卡，没有管理员权限会在核心内部失败并给出难懂的日志。清单里声明了 `requireAdministrator`，启动时由系统弹出一次 UAC。
+
 也可以在浏览器里只跑界面（无后端，使用假数据）：
 
 ```bash
