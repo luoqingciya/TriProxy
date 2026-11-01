@@ -65,6 +65,7 @@ interface AppState {
   importProfile: (text: string, name: string) => Promise<StoredProfile | null>
   useProfile: (id: string) => Promise<void>
   removeProfile: (id: string) => Promise<void>
+  refreshProfile: (id: string) => Promise<void>
 
   setSystemProxy: (enabled: boolean) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
@@ -197,6 +198,18 @@ export const useApp = create<AppState>((set, get) => ({
       await get().updateSettings({ system_proxy: enabled })
     } catch (error) {
       set({ error: describe(error) })
+    }
+  },
+
+  refreshProfile: async (id) => {
+    set({ busy: true })
+    try {
+      await api.refreshProfile(id)
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false })
     }
   },
 

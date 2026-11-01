@@ -58,6 +58,9 @@ export const api = {
 
   deleteProfile: (id: string) => call<void>('delete_profile', { id }),
 
+  refreshProfile: (id: string) =>
+    call<{ kind: string; node_count?: number; error?: string }>('refresh_profile', { id }),
+
   startCore: (core: CoreKind | null) => call<ManagerStatus>('start_core', { core }),
 
   stopCore: () => call<void>('stop_core'),
