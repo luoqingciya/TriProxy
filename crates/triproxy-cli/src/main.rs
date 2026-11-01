@@ -22,10 +22,10 @@ use triproxy_core::binaries::InstallOptions;
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
-    compile, is_elevated, leftovers, parse_payload, CompileOptions, CompiledConfig, CoreKind,
-    CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus, NetworkRequirements, Node,
-    ParsedProfile, Profile, ProfileStore, RefreshStatus, RuleMode, Selector, StoredProfile,
-    SubscriptionService, SwitchReport, SystemProxyManager,
+    compile, is_elevated, leftovers, measure_nodes, parse_payload, CompileOptions, CompiledConfig,
+    CoreKind, CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus,
+    NetworkRequirements, Node, ParsedProfile, Profile, ProfileStore, RefreshStatus, RuleMode,
+    Selector, StoredProfile, SubscriptionService, SwitchReport, SystemProxyManager,
 };
 
 #[derive(Parser)]
@@ -242,6 +242,17 @@ enum ProfileCommand {
     Use {
         /// Profile id or name
         target: String,
+    },
+    /// Measure TCP latency for the nodes of a profile
+    Test {
+        /// Profile id or name (defaults to the active profile)
+        target: Option<String>,
+        /// Per-node timeout in seconds
+        #[arg(long, default_value_t = 3)]
+        timeout: u64,
+        /// Print the results as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Refresh URL subscriptions
     Refresh {
@@ -487,6 +498,11 @@ async fn run(cli: Cli) -> Result<i32> {
             ProfileCommand::Show { target, json } => cmd_profile_show(&manager, &target, json),
             ProfileCommand::Remove { target } => cmd_profile_remove(&manager, &target),
             ProfileCommand::Use { target } => cmd_profile_use(&manager, &target),
+            ProfileCommand::Test {
+                target,
+                timeout,
+                json,
+            } => cmd_profile_test(&manager, target.as_deref(), timeout, json).await,
             ProfileCommand::Refresh { target, all, json } => {
                 cmd_profile_refresh(&manager, target.as_deref(), all, json).await
             }
@@ -1241,6 +1257,67 @@ async fn cmd_profile_add(
         store.set_active(Some(&saved.id))?;
         println!("  active profile is now `{}`", saved.name);
     }
+    Ok(0)
+}
+
+async fn cmd_profile_test(
+    manager: &CoreManager,
+    target: Option<&str>,
+    timeout_secs: u64,
+    json: bool,
+) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let profile = match target {
+        Some(key) => {
+            let stored = resolve_stored(&store, key)?;
+            store.load(&stored.id)?
+        }
+        None => store
+            .active()?
+            .map(|(_, profile)| profile)
+            .ok_or_else(|| anyhow!("no active profile; pass a profile name or use profile use"))?,
+    };
+
+    if profile.nodes.is_empty() {
+        bail!("the profile has no nodes to test");
+    }
+
+    let samples = measure_nodes(
+        &profile.nodes,
+        std::time::Duration::from_secs(timeout_secs.max(1)),
+    )
+    .await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&samples)?);
+        return Ok(0);
+    }
+
+    let headers = ["#", "NAME", "ENDPOINT", "TCP", "STATUS"];
+    let rows: Vec<Vec<String>> = samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            vec![
+                (index + 1).to_string(),
+                sample.name.clone(),
+                sample.endpoint.clone(),
+                sample
+                    .latency_ms
+                    .map(|ms| format!("{ms} ms"))
+                    .unwrap_or_else(|| "-".to_string()),
+                sample.error.clone().unwrap_or_else(|| "ok".to_string()),
+            ]
+        })
+        .collect();
+    print!("{}", render_table(&headers, &rows));
+
+    let reachable = samples.iter().filter(|sample| sample.reachable()).count();
+    println!(
+        "
+{reachable}/{} reachable · TCP handshake only, not proof the proxy works",
+        samples.len()
+    );
     Ok(0)
 }
 

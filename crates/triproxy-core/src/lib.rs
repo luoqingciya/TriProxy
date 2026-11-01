@@ -40,6 +40,7 @@ pub mod compiler;
 pub mod core;
 pub mod error;
 pub mod health;
+pub mod latency;
 pub mod logging;
 pub mod network;
 pub mod paths;
@@ -63,6 +64,7 @@ pub use core::{
 };
 pub use error::{Error, Result};
 pub use health::CoreHealth;
+pub use latency::{measure_nodes, tcp_latency, LatencyKind, LatencySample};
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{
     is_elevated, leftovers, AppliedProxy, ProxyBackend, SystemProxyManager, TunAdapter,

@@ -95,6 +95,16 @@ export interface Selection {
   overridden: boolean
 }
 
+export interface LatencySample {
+  node_id: string
+  name: string
+  endpoint: string
+  kind: 'tcp'
+  latency_ms: number | null
+  error: string | null
+  measured_at_ms: number
+}
+
 export interface LogEntry {
   seq: number
   ts_ms: number
