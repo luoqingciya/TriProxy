@@ -139,8 +139,29 @@ mod windows {
     ///
     /// The registry is used rather than `netsh interface show interface` because
     /// that output is localised and the interface column can contain spaces.
+    ///
+    /// **The registry is not authoritative on its own.** Windows keeps the
+    /// `Connection` key after an adapter is removed — that is how it remembers
+    /// per-adapter settings when the device comes back. So a name found here may
+    /// belong to an adapter that no longer exists, and reporting it as a leftover
+    /// would warn every user who has ever used TUN. Each hit is therefore
+    /// confirmed against the live interface list first.
     const NETWORK_CLASS: &str =
         r"SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}";
+
+    /// Does this interface actually exist right now?
+    ///
+    /// Only the exit status is inspected, never the output, so this works on a
+    /// localised Windows. If `netsh` cannot be run at all the entry is kept:
+    /// warning about an adapter that may not exist is annoying, but hiding a real
+    /// leftover means traffic silently goes into a dead interface.
+    fn interface_exists(name: &str) -> bool {
+        std::process::Command::new("netsh")
+            .args(["interface", "show", "interface", &format!("name={name}")])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(true)
+    }
 
     pub fn enumerate() -> Result<Vec<TunAdapter>> {
         let root = match RegKey::predef(HKEY_LOCAL_MACHINE)
@@ -164,7 +185,7 @@ mod windows {
             let Ok(name) = instance.get_value::<String, _>("Name") else {
                 continue;
             };
-            if looks_like_ours(&name) {
+            if looks_like_ours(&name) && interface_exists(&name) {
                 found.push(TunAdapter { name, id: guid });
             }
         }
