@@ -132,6 +132,7 @@ impl AppSettings {
             api_port,
             log_level: self.log_level.clone(),
             allow_lan: self.allow_lan,
+            tun: self.tun,
         }
     }
 }

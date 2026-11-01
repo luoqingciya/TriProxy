@@ -79,17 +79,35 @@ impl ConfigCompiler for SingBoxCompiler {
             "127.0.0.1"
         };
 
+        let mut inbounds = vec![json!({
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": listen,
+            "listen_port": options.listen_port,
+        })];
+
+        if options.tun {
+            // The interface is named so a leftover adapter can be identified
+            // after a crash; the address is inside a range RFC 1918 reserves for
+            // this kind of point-to-point link.
+            inbounds.push(json!({
+                "type": "tun",
+                "tag": "tun-in",
+                "interface_name": crate::network::tun::INTERFACE_NAME,
+                "address": ["172.19.0.1/30"],
+                "mtu": 9000,
+                "auto_route": true,
+                "strict_route": true,
+                "stack": "mixed",
+            }));
+        }
+
         let document = json!({
             "log": {
                 "level": options.log_level,
                 "timestamp": true,
             },
-            "inbounds": [{
-                "type": "mixed",
-                "tag": "mixed-in",
-                "listen": listen,
-                "listen_port": options.listen_port,
-            }],
+            "inbounds": inbounds,
             "outbounds": outbounds,
             "route": {
                 "final": PROXY_GROUP,
@@ -373,6 +391,30 @@ mod tests {
         );
         let document = compiled(node);
         assert_eq!(document["outbounds"][0]["tls"]["insecure"], true);
+    }
+
+    #[test]
+    fn tun_option_adds_a_tun_inbound() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            tun: true,
+            ..Default::default()
+        };
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![node]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        let tun = &document["inbounds"][1];
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(tun["interface_name"], crate::network::tun::INTERFACE_NAME);
+        assert_eq!(tun["auto_route"], true);
+        // The mixed inbound stays: explicit clients still need a port.
+        assert_eq!(document["inbounds"][0]["type"], "mixed");
     }
 
     #[test]

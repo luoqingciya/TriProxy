@@ -61,7 +61,10 @@ pub use core::{
 pub use error::{Error, Result};
 pub use health::CoreHealth;
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
-pub use network::{AppliedProxy, ProxyBackend, SystemProxyManager};
+pub use network::{
+    is_elevated, leftovers, AppliedProxy, ProxyBackend, SystemProxyManager, TunAdapter,
+    INTERFACE_NAME,
+};
 pub use paths::Layout;
 pub use profile::{
     parse_payload, parse_uri, Credentials, Diagnostic, InputFormat, Node, ParsedProfile, Profile,

@@ -55,6 +55,8 @@ pub struct CompileOptions {
     pub api_port: u16,
     pub log_level: String,
     pub allow_lan: bool,
+    /// Create a TUN interface instead of only a local mixed port.
+    pub tun: bool,
 }
 
 impl Default for CompileOptions {
@@ -64,6 +66,7 @@ impl Default for CompileOptions {
             api_port: 9090,
             log_level: "info".to_string(),
             allow_lan: false,
+            tun: false,
         }
     }
 }
@@ -168,7 +171,12 @@ pub fn compile(
     }
 
     let capability = CoreCapability::for_core(kind);
-    let unmet = profile.requirement().unmet_by(&capability);
+    let mut unmet = profile.requirement().unmet_by(&capability);
+    // TUN is a runtime option rather than a profile property, so it is checked
+    // here instead of coming out of `requirement()`.
+    if options.tun && !capability.supports_tun {
+        unmet.push("TUN".to_string());
+    }
     if !unmet.is_empty() {
         return Err(CompileError::Incompatible { core: kind, unmet });
     }

@@ -187,6 +187,11 @@ pub async fn start_core(
         .map_err(err)?
         .is_some();
 
+    let settings = AppSettings::load(state.manager.layout());
+    if settings.tun && !triproxy_core::is_elevated() {
+        return Err("TUN 模式需要管理员权限：请以管理员身份重新启动 TriProxy".to_string());
+    }
+
     if has_profile {
         let (kind, compiled) = compile_active(&state, core)?;
         state
@@ -246,6 +251,11 @@ pub async fn switch_core(state: State<'_, AppState>, target: String) -> CmdResul
         Some(target.parse::<CoreKind>().map_err(err)?)
     };
 
+    let settings = AppSettings::load(state.manager.layout());
+    if settings.tun && !triproxy_core::is_elevated() {
+        return Err("TUN 模式需要管理员权限：请以管理员身份重新启动 TriProxy".to_string());
+    }
+
     let (kind, compiled) = compile_active(&state, requested)?;
     state
         .manager
@@ -284,6 +294,20 @@ fn to_view(line: LogLine) -> LogEntryView {
 pub async fn recent_logs(state: State<'_, AppState>, limit: usize) -> CmdResult<Vec<LogEntryView>> {
     let logs = state.manager.logs();
     Ok(logs.tail(limit).into_iter().map(to_view).collect())
+}
+
+#[derive(Serialize)]
+pub struct TunStatus {
+    elevated: bool,
+    leftovers: Vec<triproxy_core::TunAdapter>,
+}
+
+#[tauri::command]
+pub async fn tun_status() -> CmdResult<TunStatus> {
+    Ok(TunStatus {
+        elevated: triproxy_core::is_elevated(),
+        leftovers: triproxy_core::leftovers().map_err(err)?,
+    })
 }
 
 #[tauri::command]

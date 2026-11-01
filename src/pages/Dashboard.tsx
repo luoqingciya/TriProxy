@@ -159,7 +159,11 @@ export function Dashboard() {
               label="系统代理"
               value={proxy ? proxy.endpoint : "未启用"}
             />
-            <Row label="TUN" value={settings?.tun ? '已启用' : '未启用'} hint="Phase 7" />
+            <Row
+              label="TUN"
+              value={settings?.tun ? "已启用" : "未启用"}
+              hint={settings?.tun ? "需要管理员" : undefined}
+            />
             <Row label="分流规则" value={settings?.rule_set ? '已启用' : '未启用'} />
           </div>
         </Card>
