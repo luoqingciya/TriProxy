@@ -36,6 +36,10 @@ use crate::error::Result;
 pub const INTERFACE_NAME: &str = "TriProxy";
 
 /// Adapter names that indicate a leftover from a supported core.
+///
+/// Not used on macOS: utun interfaces are numbered dynamically and carry no name
+/// we could match, so  always returns empty there.
+#[cfg(not(target_os = "macos"))]
 const KNOWN_PREFIXES: [&str; 3] = ["triproxy", "mihomo", "sing-box"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -114,6 +118,7 @@ pub fn leftovers() -> Result<Vec<TunAdapter>> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn looks_like_ours(name: &str) -> bool {
     let lowered = name.to_ascii_lowercase();
     KNOWN_PREFIXES
@@ -197,6 +202,7 @@ mod linux {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn recognises_known_adapter_names() {
         assert!(looks_like_ours("TriProxy"));
@@ -221,9 +227,12 @@ mod tests {
         // Whether anything is found depends on the machine; the call itself must
         // always succeed so startup is never blocked by it.
         let found = leftovers().expect("enumeration must not fail");
+        #[cfg(not(target_os = "macos"))]
         for adapter in found {
             assert!(looks_like_ours(&adapter.name));
         }
+        #[cfg(target_os = "macos")]
+        assert!(found.is_empty());
     }
 
     #[test]
