@@ -847,13 +847,37 @@ sing-box 叫 `clash_api`），端口都是我们生成的配置里那个 `api_po
 **`/traffic` 是流式端点**，每秒推一个 JSON 对象、永不关闭。取一次采样意味着读第一个
 完整对象然后断开连接，而不是让调用方拿着一条它没要求的流。
 
-### 18.3 真实代理延迟（`proxy_delay`）
+### 18.3 两种延迟，不能互相冒充
 
-`GET /proxies/{name}/delay?url=...&timeout=...` 让**核心自己**通过节点发一次 HTTP 请求。
-这是唯一能证明「代理可用」的测量——凭据错、协议错都会失败，而 TCP 握手不会。
+| 指标 | 做法 | 证明什么 | 前提 |
+|---|---|---|---|
+| TCP 延迟 | 到节点 `server:port` 的握手 | 端点可达、有多远 | 无 |
+| 真实延迟 | 核心通过节点发 HTTP 请求 | **代理真的能用** | 运行中的 Mihomo / sing-box |
 
-它和 Phase 10 的 TCP 延迟是**两个不同的指标**，不能互相冒充。CLI 目前暴露的是 TCP 那个；
-`proxy_delay` 已在客户端实现，尚未接到界面上。
+凭据错、UUID 过期、加密不匹配——TCP 握手全都会成功，真实延迟全都会失败。
+所以两个都要有，且界面上分开命名（「TCP 延迟」/「真实延迟」），不合并成一个「延迟」数字。
+
+```bash
+triproxy profile test              # TCP
+triproxy profile test --http       # 真实延迟，需要核心在跑
+triproxy profile test --http --url http://cp.cloudflare.com/generate_204
+```
+
+没有核心时 `--http` 会直接报错，而不是逐个节点打印同样的失败：
+
+```text
+error: proxy delay needs a running Mihomo or sing-box with its controller API
+       (controller API not reachable on http://127.0.0.1:9090: ...)
+```
+
+有核心时，每个节点的错误来自核心本身并被原样带回：
+
+```text
+1  Singapore gRPC  sg.example.com:443  -  delay probe for `Singapore gRPC` failed
+                                          (HTTP 503): {"message":"An error occurred in the delay test"}
+```
+
+## 19. 尚未实现（明确的边界）
 
 ### 18.4 实测
 

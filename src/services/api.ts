@@ -79,6 +79,9 @@ export const api = {
   closeConnection: (id: string | null) =>
     call<void>('close_connection', { id }),
 
+  testProxyDelay: (timeoutSecs: number) =>
+    call<LatencySample[]>('test_proxy_delay', { timeoutSecs }),
+
   testLatency: (timeoutSecs: number) =>
     call<LatencySample[]>('test_latency', { timeoutSecs }),
 

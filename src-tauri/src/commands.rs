@@ -325,6 +325,30 @@ fn to_view(line: LogLine) -> LogEntryView {
 }
 
 #[tauri::command]
+pub async fn test_proxy_delay(
+    state: State<'_, AppState>,
+    timeout_secs: u64,
+) -> CmdResult<Vec<triproxy_core::LatencySample>> {
+    let store = ProfileStore::new(state.manager.layout());
+    let Some((_, profile)) = store.active().map_err(err)? else {
+        return Ok(Vec::new());
+    };
+
+    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    client.version().await.map_err(|error| {
+        format!("真实延迟需要运行中的 Mihomo 或 sing-box（Xray 没有控制器 API）：{error}")
+    })?;
+
+    Ok(triproxy_core::measure_proxy_delay(
+        &client,
+        &profile.nodes,
+        triproxy_core::DEFAULT_PROBE_URL,
+        timeout_secs.max(1) * 1000,
+    )
+    .await)
+}
+
+#[tauri::command]
 pub async fn traffic(
     state: State<'_, AppState>,
 ) -> CmdResult<Option<triproxy_core::TrafficSample>> {

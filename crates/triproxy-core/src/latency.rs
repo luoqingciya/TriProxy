@@ -47,6 +47,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 pub enum LatencyKind {
     /// TCP handshake to the node endpoint.
     Tcp,
+    /// HTTP request made by the core through the node. Only possible while a
+    /// Mihomo or sing-box instance is running with its controller API.
+    Http,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +100,41 @@ pub async fn tcp_latency(server: &str, port: u16, timeout: Duration) -> Result<u
     Err(Error::Other(last_error.unwrap_or_else(|| {
         "no address could be reached".to_string()
     })))
+}
+
+/// Default URL for the HTTP probe.
+///
+/// A 204 endpoint is the convention: it returns no body, so the measurement is
+/// the round trip rather than the download.
+pub const DEFAULT_PROBE_URL: &str = "http://www.gstatic.com/generate_204";
+
+/// Measure real proxy delay through the running core.
+///
+/// This is the only measurement that proves a node works: the core opens an HTTP
+/// request through the node, so wrong credentials or a broken protocol fail here
+/// while a TCP handshake would still succeed. Requires a controller API, which
+/// Xray does not have.
+pub async fn measure_proxy_delay(
+    client: &crate::controller::ControllerClient,
+    nodes: &[Node],
+    probe_url: &str,
+    timeout_ms: u64,
+) -> Vec<LatencySample> {
+    let mut samples = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let result = client.proxy_delay(&node.name, probe_url, timeout_ms).await;
+        samples.push(LatencySample {
+            node_id: node.id.clone(),
+            name: node.name.clone(),
+            endpoint: node.endpoint(),
+            kind: LatencyKind::Http,
+            latency_ms: result.as_ref().ok().copied(),
+            error: result.err().map(|error| error.to_string()),
+            measured_at_ms: now_ms(),
+        });
+    }
+    samples.sort_by(|a, b| a.name.cmp(&b.name));
+    samples
 }
 
 /// Probe every node, at most `concurrency` at a time.

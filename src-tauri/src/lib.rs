@@ -77,6 +77,7 @@ pub fn run() {
             commands::start_core,
             commands::stop_core,
             commands::switch_core,
+            commands::test_proxy_delay,
             commands::traffic,
             commands::connections,
             commands::close_connection,

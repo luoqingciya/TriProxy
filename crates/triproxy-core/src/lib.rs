@@ -66,7 +66,9 @@ pub use core::{
 };
 pub use error::{Error, Result};
 pub use health::CoreHealth;
-pub use latency::{measure_nodes, tcp_latency, LatencyKind, LatencySample};
+pub use latency::{
+    measure_nodes, measure_proxy_delay, tcp_latency, LatencyKind, LatencySample, DEFAULT_PROBE_URL,
+};
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{
     is_elevated, leftovers, AppliedProxy, ProxyBackend, SystemProxyManager, TunAdapter,
