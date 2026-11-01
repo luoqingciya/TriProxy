@@ -324,6 +324,22 @@ fn to_view(line: LogLine) -> LogEntryView {
 }
 
 #[tauri::command]
+pub async fn test_latency(
+    state: State<'_, AppState>,
+    timeout_secs: u64,
+) -> CmdResult<Vec<triproxy_core::LatencySample>> {
+    let store = ProfileStore::new(state.manager.layout());
+    let Some((_, profile)) = store.active().map_err(err)? else {
+        return Ok(Vec::new());
+    };
+    Ok(triproxy_core::measure_nodes(
+        &profile.nodes,
+        std::time::Duration::from_secs(timeout_secs.max(1)),
+    )
+    .await)
+}
+
+#[tauri::command]
 pub async fn recent_logs(state: State<'_, AppState>, limit: usize) -> CmdResult<Vec<LogEntryView>> {
     let logs = state.manager.logs();
     Ok(logs.tail(limit).into_iter().map(to_view).collect())

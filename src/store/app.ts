@@ -18,6 +18,7 @@ import { create } from 'zustand'
 import { api } from '../services/api'
 import type {
   AppliedProxy,
+  LatencySample,
   CoreKind,
   ManagerStatus,
   NodeSummary,
@@ -51,6 +52,8 @@ interface AppState {
   selection: Selection | null
   settings: Settings | null
   proxy: AppliedProxy | null
+  latency: Record<string, LatencySample>
+  testing: boolean
   busy: boolean
   error: string | null
 
@@ -68,6 +71,7 @@ interface AppState {
   refreshProfile: (id: string) => Promise<void>
 
   setSystemProxy: (enabled: boolean) => Promise<void>
+  testLatency: () => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   clearError: () => void
 }
@@ -82,6 +86,8 @@ export const useApp = create<AppState>((set, get) => ({
   selection: null,
   settings: null,
   proxy: null,
+  latency: {},
+  testing: false,
   busy: false,
   error: null,
 
@@ -198,6 +204,20 @@ export const useApp = create<AppState>((set, get) => ({
       await get().updateSettings({ system_proxy: enabled })
     } catch (error) {
       set({ error: describe(error) })
+    }
+  },
+
+  testLatency: async () => {
+    set({ testing: true })
+    try {
+      const samples = await api.testLatency(3)
+      const map: Record<string, LatencySample> = {}
+      for (const sample of samples) map[sample.node_id] = sample
+      set({ latency: map, error: null })
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ testing: false })
     }
   },
 
