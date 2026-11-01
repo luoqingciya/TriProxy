@@ -4,6 +4,38 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
+## 本次更新（v0.2.0）
+
+从「能管核心」到「能当客户端用」。v0.1.0 只有核心生命周期管理，这个版本补齐了订阅、配置、选核、GUI、系统代理、TUN、DNS 与分流。
+
+**订阅与配置**
+
+- 分享链接解析：VLESS / VMess / Trojan / Shadowsocks，支持 URI 列表与 base64 订阅
+- URL 订阅：条件请求缓存（`ETag` / `Last-Modified`），刷新失败不会毁掉已有节点
+- 同一份 Unified Profile 编译成三个核心各自的配置，且**由核心自己校验**后才使用
+
+**智能选核**
+
+- 硬约束淘汰 → 原生特性数量 → 文档化默认顺序，同一份配置永远选出同一个核心
+- 决策可解释：给出理由，并列出被淘汰的核心及原因
+
+**桌面客户端**
+
+- 仪表盘 / 节点 / 连接 / 配置 / 日志 / 设置
+- 实时流量、连接列表与逐个关闭、延迟测试、订阅刷新
+
+**网络接管**
+
+- 系统代理：先落盘快照再改系统设置，崩溃后下次启动自愈
+- TUN：管理员实测，硬杀进程后网卡与路由均被清理
+- DNS：`off` / `split` / `fakeip` 三种模式，被代理的域名在隧道内解析
+- 分流：`global` 全部走代理，`split` 局域网与国内目标直连
+
+**诊断与维护**
+
+- 两种延迟分开命名：`TCP 延迟` 只说明端点可达，`真实延迟` 由核心通过节点发请求、能证明代理可用
+- `core update` 检查并安装核心更新
+
 ## 下载哪一个？
 
 每个平台提供两种压缩包：
@@ -26,7 +58,8 @@
 
 ```bash
 triproxy doctor      # 环境自检
-triproxy start       # 启动（lite 版会提示先 core install）
+triproxy profile add https://example.com/sub --name my-sub --use
+triproxy start mihomo --proxy
 triproxy status
 ```
 
@@ -44,6 +77,18 @@ triproxy core install xray
 triproxy core install mihomo --mirror https://ghfast.top/
 triproxy core install xray --file ./Xray-windows-64.zip
 ```
+
+桌面客户端源码在同一仓库，`npm install && npm run tauri build` 构建。
+
+## 已知限制
+
+这些是刻意留在这一版之外的，不是遗漏：
+
+- **Xray 没有控制器 API**，因此「连接」「流量」「真实延迟」三项在 Xray 下不可用；界面会说明原因
+- **系统代理只在 Windows 上实测过**，macOS（`networksetup`）与 Linux（`gsettings`）的实现已写好但未经真机验证
+- **订阅没有后台定时更新**，自动刷新只在显式执行 `triproxy profile refresh` 时发生
+- **`split` 分流是预设规则**（局域网 + 国内直连），尚不支持自定义规则
+- 暂无节点收藏与流量历史图表
 
 ## 授权
 
