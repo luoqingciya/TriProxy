@@ -284,18 +284,84 @@ legacy 形态根本不是合法 URL）：
 只报告节点层面可见的需求（协议、Reality、Vision、WireGuard）；TUN / DNS / rule-set
 属于网络与规则配置，Phase 3 才有。
 
-## 7. 尚未实现（明确的边界）
+## 7. Phase 3 — Config Compiler
+
+```text
+Profile
+  ├─→ MihomoCompiler   → config.yaml   (YAML)
+  ├─→ SingBoxCompiler  → config.json   (JSON)
+  └─→ XrayCompiler     → config.json   (JSON)
+```
+
+### 7.1 三条设计规则
+
+1. **无法忠实表达就跳过，不做近似**。静默丢掉一个传输选项会生成「能连但行为不同」的配置，
+   比一个明显缺失的节点危险得多。被跳过的节点带原因记录在 `CompiledConfig::skipped` 里。
+2. **硬能力不匹配直接整体失败**。`compile()` 先跑 `ProfileRequirement::unmet_by()`，
+   核心根本服务不了这份 Profile 时不出配置（规划书 13 章）。
+3. **生成的配置必须先由核心自己校验**。`CoreManager` 写盘后立刻调用
+   `mihomo -t` / `sing-box check` / `xray -test`，编译器有 bug 会表现为「配置被拒绝」，
+   而不是「核心起来了但行为不对」。
+
+### 7.2 真实核心教会我们的事
+
+Xray 编译器最初把 Reality + WebSocket 节点照直写进 `streamSettings`，被 Xray 自己否掉了：
+
+```text
+REALITY only supports RAW, XHTTP and gRPC for now.
+```
+
+这是编译期就该知道的约束，已改为在编译时跳过并说明原因。mihomo 与 sing-box 都接受该组合，
+所以只在 Xray 编译器中限制——**每个核心的限制来自该核心自己的校验器，不靠猜**。
+
+同类约束还有：trojan 没有 TLS 就不是 trojan（三个编译器统一拒绝），
+Xray 不支持 shadowsocks plugin（跳过），sing-box 反而原生支持 SIP003 plugin（透传）。
+
+### 7.3 各核心的结构差异
+
+| | Mihomo | sing-box | Xray |
+|---|---|---|---|
+| 节点选择 | `proxy-groups: select` | `selector` outbound | **无**，只有第一个 outbound 生效 |
+| 传输 | `network` + `ws-opts`/`grpc-opts`/`h2-opts` | `transport` 对象 | `streamSettings` |
+| Reality | `reality-opts` | `tls.reality` | `streamSettings.realitySettings` |
+| 本地入站 | `mixed-port` | `mixed` inbound | socks + http 两个入站（相邻端口） |
+
+Xray 没有 selector，所以多节点时只有第一个被使用。这是核心能力差异，不是实现缺陷；
+节点选择属于 Phase 4，而 Mihomo/sing-box 已经提供了可用的选择器。
+
+### 7.4 YAML 是手写的
+
+Mihomo 需要 YAML 输出，但项目只**写**不读，而维护中的序列化库都会带上完整解析器。
+因此写了 `compiler::yaml`：只支持 map / list / scalar，所有字符串一律双引号转义。
+节点名来自订阅，可能含 `:`、`#`、引号、CJK 与 emoji——裸写会静默改变配置语义。
+
+### 7.5 与 CLI / 管理器的衔接
+
+```bash
+triproxy profile compile sub.txt --core xray -o xray.json --check
+triproxy start mihomo --profile sub.txt
+triproxy switch xray --profile sub.txt
+```
+
+`CoreManager::start_with_config` / `switch_with_config` 接收已渲染的配置文本；
+`validate_config` 写到 `downloads/` 而不是活动配置目录——运行中的核心会监视自己的配置文件并热重载，
+校验用的临时文件不能放在那里。
+
+`bootstrap.rs` 仍然保留：不带 `--profile` 的 `start` 还没有 Profile 可用（订阅存储属于 Phase 9），
+所以「直连最小配置」仍是默认路径。Phase 9 落地后这条路径应被删除。
+
+## 8. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 
 - 系统代理、TUN、DNS、路由（Phase 6–8）
-- Config Compiler（Phase 3）——当前解析结果没有消费方，`bootstrap.rs` 仍是占位配置
-- Clash YAML 导入与订阅下载（Phase 3 / Phase 9）
+- Clash YAML 导入、订阅下载与本地存储（Phase 3 剩余 / Phase 9）
 - Hysteria2 / TUIC / SOCKS / HTTP 节点（Phase 10 扩展）
-- 延迟测试（Phase 4 依赖真实节点与控制器 API）
+- 规则分流：三个编译器目前都只生成 `MATCH,PROXY` / `final: PROXY` 单条规则
+- 延迟测试与 Smart Core 评分（Phase 4）
 - 控制器 API 健康检查（当前用 TCP 探活）
 - GUI（Phase 5）
 
-因此 `triproxy` 目前**还不是一个可用的翻墙客户端**：它能管理三个核心的生命周期，
-也能解析订阅并校验节点，但还不会把节点编译成任何核心能吃的配置。
+因此 `triproxy` 目前**还不是一个可用的翻墙客户端**：它能解析订阅、把节点编译成三个核心都认可的配置、
+并管理核心生命周期，但还没有系统代理/TUN 把流量真正导进去，也没有规则分流与节点选择界面。
 这是规划书 38 章规定的开发顺序。

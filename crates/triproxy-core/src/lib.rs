@@ -36,6 +36,7 @@ pub mod adapters;
 pub mod binaries;
 pub mod bootstrap;
 pub mod capability;
+pub mod compiler;
 pub mod core;
 pub mod error;
 pub mod health;
@@ -46,6 +47,9 @@ pub mod profile;
 pub mod state;
 
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
+pub use compiler::{
+    compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, SkippedNode,
+};
 pub use core::{
     CoreKind, CoreManager, CoreReport, ManagerStatus, ProxyCore, RecoveryReport, StartReport,
     SwitchReport, SwitchStep,
