@@ -95,6 +95,8 @@ export interface LogEntry {
   text: string
 }
 
+export type DnsMode = 'off' | 'split' | 'fake_ip'
+
 export interface AppliedProxy {
   endpoint: string
   backend: string
@@ -110,6 +112,8 @@ export interface Settings {
   allow_lan: boolean
   /** Install the system proxy automatically when a core starts. */
   system_proxy: boolean
+  /** DNS strategy baked into the generated config. */
+  dns_mode: DnsMode
   log_level: string
 }
 

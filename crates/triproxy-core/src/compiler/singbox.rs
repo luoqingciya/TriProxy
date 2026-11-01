@@ -20,7 +20,7 @@ use crate::profile::node::{Credentials, Node, Transport, VlessFlow};
 use crate::profile::Profile;
 
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, SkippedNode, PROXY_GROUP,
+    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, SkippedNode, PROXY_GROUP,
 };
 
 pub struct SingBoxCompiler;
@@ -102,22 +102,38 @@ impl ConfigCompiler for SingBoxCompiler {
             }));
         }
 
-        let document = json!({
+        let dns_mode = options.dns.effective(options.tun);
+
+        // Without a hijack rule the core would forward DNS packets as plain UDP
+        // to the original resolver: slow, and the query itself still leaves the
+        // tunnel. hijack-dns makes the core answer from its own dns section.
+        let mut route = json!({ "final": PROXY_GROUP });
+        if dns_mode != DnsMode::Off {
+            route["rules"] = json!([{ "protocol": "dns", "action": "hijack-dns" }]);
+            // sing-box 1.12+ refuses a config with a dns section but no bootstrap
+            // resolver: something has to resolve the domain names used by the
+            // outbounds themselves, before any rule can apply.
+            route["default_domain_resolver"] = json!("local-dns");
+        }
+
+        let mut document = json!({
             "log": {
                 "level": options.log_level,
                 "timestamp": true,
             },
             "inbounds": inbounds,
             "outbounds": outbounds,
-            "route": {
-                "final": PROXY_GROUP,
-            },
+            "route": route,
             "experimental": {
                 "clash_api": {
                     "external_controller": format!("127.0.0.1:{}", options.api_port),
                 }
             }
         });
+
+        if dns_mode != DnsMode::Off {
+            document["dns"] = dns_object(dns_mode);
+        }
 
         let mut text =
             serde_json::to_string_pretty(&document).map_err(|error| CompileError::Internal {
@@ -134,6 +150,44 @@ impl ConfigCompiler for SingBoxCompiler {
             skipped,
         })
     }
+}
+
+/// DNS section.
+///
+/// The proxy-dns server carries `detour: PROXY`, so lookups for tunnelled
+/// domains are resolved inside the tunnel rather than beside it.
+fn dns_object(mode: DnsMode) -> Value {
+    let mut servers = vec![
+        json!({
+            "tag": "proxy-dns",
+            "type": "https",
+            "server": "1.1.1.1",
+            "detour": PROXY_GROUP,
+        }),
+        json!({
+            "tag": "local-dns",
+            "type": "udp",
+            "server": "223.5.5.5",
+        }),
+    ];
+
+    let mut dns = serde_json::Map::new();
+    dns.insert("final".to_string(), json!("proxy-dns"));
+
+    if mode == DnsMode::FakeIp {
+        servers.push(json!({
+            "tag": "fakeip",
+            "type": "fakeip",
+            "inet4_range": "198.18.0.0/15",
+        }));
+        dns.insert(
+            "rules".to_string(),
+            json!([{ "query_type": ["A", "AAAA"], "server": "fakeip" }]),
+        );
+    }
+
+    dns.insert("servers".to_string(), json!(servers));
+    Value::Object(dns)
 }
 
 fn outbound(node: &Node) -> Result<Value, String> {
@@ -415,6 +469,66 @@ mod tests {
         assert_eq!(tun["auto_route"], true);
         // The mixed inbound stays: explicit clients still need a port.
         assert_eq!(document["inbounds"][0]["type"], "mixed");
+    }
+
+    #[test]
+    fn dns_section_hijacks_queries_and_resolves_through_the_proxy() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            dns: DnsMode::Split,
+            ..Default::default()
+        };
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![node]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+
+        assert_eq!(document["dns"]["final"], "proxy-dns");
+        assert_eq!(document["dns"]["servers"][0]["detour"], "PROXY");
+        assert_eq!(document["route"]["rules"][0]["action"], "hijack-dns");
+        assert_eq!(document["route"]["default_domain_resolver"], "local-dns");
+    }
+
+    #[test]
+    fn fakeip_mode_adds_a_fakeip_server_and_rule() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            dns: DnsMode::FakeIp,
+            ..Default::default()
+        };
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![node]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        let servers = document["dns"]["servers"].as_array().unwrap();
+        assert!(servers.iter().any(|s| s["type"] == "fakeip"));
+        assert_eq!(document["dns"]["rules"][0]["server"], "fakeip");
+    }
+
+    #[test]
+    fn dns_off_emits_no_dns_section() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![node]), &CompileOptions::default())
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        assert!(document.get("dns").is_none());
+        assert!(document["route"].get("rules").is_none());
     }
 
     #[test]
