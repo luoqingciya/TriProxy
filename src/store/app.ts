@@ -18,7 +18,9 @@ import { create } from 'zustand'
 import { api } from '../services/api'
 import type {
   AppliedProxy,
+  ConnectionsSnapshot,
   LatencySample,
+  TrafficSample,
   CoreKind,
   ManagerStatus,
   NodeSummary,
@@ -28,9 +30,22 @@ import type {
   StoredProfile,
 } from '../types'
 
-export type Page = 'dashboard' | 'proxies' | 'profiles' | 'logs' | 'settings'
+export type Page =
+  | 'dashboard'
+  | 'proxies'
+  | 'connections'
+  | 'profiles'
+  | 'logs'
+  | 'settings'
 
-const PAGES: Page[] = ['dashboard', 'proxies', 'profiles', 'logs', 'settings']
+const PAGES: Page[] = [
+  'dashboard',
+  'proxies',
+  'connections',
+  'profiles',
+  'logs',
+  'settings',
+]
 
 /**
  * The active page lives in the URL hash.
@@ -53,6 +68,8 @@ interface AppState {
   settings: Settings | null
   proxy: AppliedProxy | null
   latency: Record<string, LatencySample>
+  traffic: TrafficSample | null
+  connections: ConnectionsSnapshot | null
   testing: boolean
   busy: boolean
   error: string | null
@@ -72,6 +89,7 @@ interface AppState {
 
   setSystemProxy: (enabled: boolean) => Promise<void>
   testLatency: () => Promise<void>
+  closeConnection: (id: string | null) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   clearError: () => void
 }
@@ -87,6 +105,8 @@ export const useApp = create<AppState>((set, get) => ({
   settings: null,
   proxy: null,
   latency: {},
+  traffic: null,
+  connections: null,
   testing: false,
   busy: false,
   error: null,
@@ -104,14 +124,26 @@ export const useApp = create<AppState>((set, get) => ({
    */
   refresh: async () => {
     try {
-      const [status, library, nodes, selection, proxy] = await Promise.all([
-        api.status(),
-        api.profiles(),
-        api.activeNodes(),
-        api.previewSelection(),
-        api.systemProxyStatus(),
-      ])
-      set({ status, library, nodes, selection, proxy, error: null })
+      const [status, library, nodes, selection, proxy, traffic, connections] =
+        await Promise.all([
+          api.status(),
+          api.profiles(),
+          api.activeNodes(),
+          api.previewSelection(),
+          api.systemProxyStatus(),
+          api.traffic(),
+          api.connections(),
+        ])
+      set({
+        status,
+        library,
+        nodes,
+        selection,
+        proxy,
+        traffic,
+        connections,
+        error: null,
+      })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -218,6 +250,15 @@ export const useApp = create<AppState>((set, get) => ({
       set({ error: describe(error) })
     } finally {
       set({ testing: false })
+    }
+  },
+
+  closeConnection: async (id) => {
+    try {
+      await api.closeConnection(id)
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
     }
   },
 

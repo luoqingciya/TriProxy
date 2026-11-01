@@ -168,6 +168,11 @@ impl CoreManager {
         })
     }
 
+    /// Port the controller API listens on (Mihomo / sing-box only).
+    pub fn api_port(&self) -> u16 {
+        self.api_port
+    }
+
     pub fn layout(&self) -> &Layout {
         &self.layout
     }

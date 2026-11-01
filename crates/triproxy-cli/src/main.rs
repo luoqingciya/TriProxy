@@ -21,6 +21,7 @@ use clap::{Parser, Subcommand};
 use triproxy_core::binaries::{InstallOptions, UpdateStatus};
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
+use triproxy_core::ControllerClient;
 use triproxy_core::{
     compile, is_elevated, leftovers, measure_nodes, parse_payload, CompileOptions, CompiledConfig,
     CoreKind, CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus,
@@ -121,6 +122,24 @@ enum Command {
     Core {
         #[command(subcommand)]
         command: CoreCommand,
+    },
+    /// List live connections from the running core (Mihomo / sing-box only)
+    Connections {
+        /// Close this connection id
+        #[arg(long, value_name = "ID")]
+        close: Option<String>,
+        /// Close every connection
+        #[arg(long = "close-all")]
+        close_all: bool,
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read one traffic sample from the running core
+    Traffic {
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect TUN mode prerequisites and leftovers
     Tun {
@@ -477,6 +496,12 @@ async fn run(cli: Cli) -> Result<i32> {
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
             CoreCommand::Select { source, tun, json } => cmd_core_select(&source, tun, json),
         },
+        Command::Connections {
+            close,
+            close_all,
+            json,
+        } => cmd_connections(&manager, close.as_deref(), close_all, json).await,
+        Command::Traffic { json } => cmd_traffic(&manager, json).await,
         Command::Tun { command } => match command {
             TunCommand::Status => cmd_tun_status(&manager),
         },
@@ -1610,6 +1635,99 @@ fn running_port(manager: &CoreManager) -> Option<u16> {
     // `status()` is async; the CLI calls this from a sync helper, so use the
     // persisted listen port recorded when the core was started.
     manager.persisted_listen_port()
+}
+
+fn controller(manager: &CoreManager) -> Result<ControllerClient> {
+    ControllerClient::new(manager.api_port()).map_err(|error| anyhow!("{error}"))
+}
+
+async fn cmd_connections(
+    manager: &CoreManager,
+    close: Option<&str>,
+    close_all: bool,
+    json: bool,
+) -> Result<i32> {
+    let client = controller(manager)?;
+
+    if close_all {
+        client.close_all().await?;
+        println!("all connections closed");
+        return Ok(0);
+    }
+    if let Some(id) = close {
+        client.close_connection(id).await?;
+        println!("closed {id}");
+        return Ok(0);
+    }
+
+    let snapshot = client.connections().await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        return Ok(0);
+    }
+
+    if snapshot.connections.is_empty() {
+        println!("no live connections");
+        return Ok(0);
+    }
+
+    let headers = ["ID", "TARGET", "NET", "CHAIN", "UP", "DOWN"];
+    let rows: Vec<Vec<String>> = snapshot
+        .connections
+        .iter()
+        .map(|connection| {
+            vec![
+                connection.id.chars().take(8).collect::<String>(),
+                connection.target(),
+                connection.metadata.network.clone(),
+                connection.chains.join(" ← "),
+                format_bytes(connection.upload),
+                format_bytes(connection.download),
+            ]
+        })
+        .collect();
+    print!("{}", render_table(&headers, &rows));
+    println!(
+        "
+{} live · total up {} / down {}",
+        snapshot.connections.len(),
+        format_bytes(snapshot.upload_total),
+        format_bytes(snapshot.download_total)
+    );
+    Ok(0)
+}
+
+async fn cmd_traffic(manager: &CoreManager, json: bool) -> Result<i32> {
+    let client = controller(manager)?;
+    let sample = client.traffic_once().await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&sample)?);
+        return Ok(0);
+    }
+
+    println!(
+        "↑ {} /s    ↓ {} /s",
+        format_bytes(sample.up),
+        format_bytes(sample.down)
+    );
+    Ok(0)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn cmd_tun_status(manager: &CoreManager) -> Result<i32> {
