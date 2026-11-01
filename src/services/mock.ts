@@ -228,6 +228,16 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       } as T
     case 'close_connection':
       return undefined as T
+    case 'test_proxy_delay':
+      return nodes.map((n, i) => ({
+        node_id: n.id,
+        name: n.name,
+        endpoint: n.server + ':' + n.port,
+        kind: 'http',
+        latency_ms: 120 + i * 90,
+        error: null,
+        measured_at_ms: now,
+      })) as T
     case 'test_latency':
       return nodes.map((n, i) => ({
         node_id: n.id,

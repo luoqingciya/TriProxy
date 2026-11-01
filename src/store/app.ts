@@ -89,6 +89,7 @@ interface AppState {
 
   setSystemProxy: (enabled: boolean) => Promise<void>
   testLatency: () => Promise<void>
+  testProxyDelay: () => Promise<void>
   closeConnection: (id: string | null) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   clearError: () => void
@@ -259,6 +260,20 @@ export const useApp = create<AppState>((set, get) => ({
       await get().refresh()
     } catch (error) {
       set({ error: describe(error) })
+    }
+  },
+
+  testProxyDelay: async () => {
+    set({ testing: true })
+    try {
+      const samples = await api.testProxyDelay(3)
+      const map: Record<string, LatencySample> = {}
+      for (const sample of samples) map[sample.node_id] = sample
+      set({ latency: map, error: null })
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ testing: false })
     }
   },
 

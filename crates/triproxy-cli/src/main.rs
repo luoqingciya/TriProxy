@@ -23,10 +23,11 @@ use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::ControllerClient;
 use triproxy_core::{
-    compile, is_elevated, leftovers, measure_nodes, parse_payload, CompileOptions, CompiledConfig,
-    CoreKind, CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus,
-    NetworkRequirements, Node, ParsedProfile, Profile, ProfileStore, RefreshStatus, RuleMode,
-    Selector, StoredProfile, SubscriptionService, SwitchReport, SystemProxyManager,
+    compile, is_elevated, leftovers, measure_nodes, measure_proxy_delay, parse_payload,
+    CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport, Diagnostic, DnsMode, Layout,
+    ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile, ProfileStore, RefreshStatus,
+    RuleMode, Selector, StoredProfile, SubscriptionService, SwitchReport, SystemProxyManager,
+    DEFAULT_PROBE_URL,
 };
 
 #[derive(Parser)]
@@ -269,6 +270,13 @@ enum ProfileCommand {
         /// Per-node timeout in seconds
         #[arg(long, default_value_t = 3)]
         timeout: u64,
+        /// Measure real proxy delay through the running core instead of a TCP
+        /// handshake (needs Mihomo or sing-box; Xray has no controller API)
+        #[arg(long)]
+        http: bool,
+        /// URL the core requests when measuring proxy delay
+        #[arg(long, value_name = "URL")]
+        url: Option<String>,
         /// Print the results as JSON
         #[arg(long)]
         json: bool,
@@ -546,8 +554,20 @@ async fn run(cli: Cli) -> Result<i32> {
             ProfileCommand::Test {
                 target,
                 timeout,
+                http,
+                url,
                 json,
-            } => cmd_profile_test(&manager, target.as_deref(), timeout, json).await,
+            } => {
+                cmd_profile_test(
+                    &manager,
+                    target.as_deref(),
+                    timeout,
+                    http,
+                    url.as_deref(),
+                    json,
+                )
+                .await
+            }
             ProfileCommand::Refresh { target, all, json } => {
                 cmd_profile_refresh(&manager, target.as_deref(), all, json).await
             }
@@ -1378,6 +1398,8 @@ async fn cmd_profile_test(
     manager: &CoreManager,
     target: Option<&str>,
     timeout_secs: u64,
+    http: bool,
+    probe_url: Option<&str>,
     json: bool,
 ) -> Result<i32> {
     let store = ProfileStore::new(manager.layout());
@@ -1396,18 +1418,36 @@ async fn cmd_profile_test(
         bail!("the profile has no nodes to test");
     }
 
-    let samples = measure_nodes(
-        &profile.nodes,
-        std::time::Duration::from_secs(timeout_secs.max(1)),
-    )
-    .await;
+    let samples = if http {
+        let client = controller(manager)?;
+        // Fail early with one useful message instead of N identical errors.
+        client.version().await.map_err(|error| {
+            anyhow!(
+                "proxy delay needs a running Mihomo or sing-box with its controller API ({error})"
+            )
+        })?;
+        measure_proxy_delay(
+            &client,
+            &profile.nodes,
+            probe_url.unwrap_or(DEFAULT_PROBE_URL),
+            timeout_secs.max(1) * 1000,
+        )
+        .await
+    } else {
+        measure_nodes(
+            &profile.nodes,
+            std::time::Duration::from_secs(timeout_secs.max(1)),
+        )
+        .await
+    };
 
     if json {
         println!("{}", serde_json::to_string_pretty(&samples)?);
         return Ok(0);
     }
 
-    let headers = ["#", "NAME", "ENDPOINT", "TCP", "STATUS"];
+    let latency_header = if http { "PROXY" } else { "TCP" };
+    let headers = ["#", "NAME", "ENDPOINT", latency_header, "STATUS"];
     let rows: Vec<Vec<String>> = samples
         .iter()
         .enumerate()
@@ -1427,11 +1467,19 @@ async fn cmd_profile_test(
     print!("{}", render_table(&headers, &rows));
 
     let reachable = samples.iter().filter(|sample| sample.reachable()).count();
-    println!(
-        "
+    if http {
+        println!(
+            "
+{reachable}/{} working · measured by the core through each node",
+            samples.len()
+        );
+    } else {
+        println!(
+            "
 {reachable}/{} reachable · TCP handshake only, not proof the proxy works",
-        samples.len()
-    );
+            samples.len()
+        );
+    }
     Ok(0)
 }
 
