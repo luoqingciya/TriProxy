@@ -16,12 +16,15 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use triproxy_core::binaries::InstallOptions;
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
-use triproxy_core::{CoreKind, CoreManager, CoreReport, Layout, ManagerStatus, SwitchReport};
+use triproxy_core::{
+    parse_payload, CoreKind, CoreManager, CoreReport, Diagnostic, Layout, ManagerStatus, Node,
+    SwitchReport,
+};
 
 #[derive(Parser)]
 #[command(
@@ -87,8 +90,33 @@ enum Command {
         #[command(subcommand)]
         command: CoreCommand,
     },
+    /// Inspect a profile (Phase 2: URI lists and base64 subscriptions)
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
     /// Check the environment: binaries, versions, ports, data directory
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum ProfileCommand {
+    /// Parse a profile and list its nodes
+    Parse {
+        /// File path, or `-` to read stdin
+        source: String,
+        /// Print the parsed profile as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a profile and report problems; exits 1 when any node is unusable
+    Check {
+        /// File path, or `-` to read stdin
+        source: String,
+        /// Print the diagnostics as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,7 +153,7 @@ async fn main() {
     init_tracing();
     let cli = Cli::parse();
     let code = match run(cli).await {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err:#}");
             1
@@ -159,7 +187,7 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn run(cli: Cli) -> Result<()> {
+async fn run(cli: Cli) -> Result<i32> {
     let layout = match cli.data_dir {
         Some(path) => Layout::new(path),
         None => Layout::discover()?,
@@ -203,6 +231,10 @@ async fn run(cli: Cli) -> Result<()> {
             }
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
         },
+        Command::Profile { command } => match command {
+            ProfileCommand::Parse { source, json } => cmd_profile_parse(&source, json),
+            ProfileCommand::Check { source, json } => cmd_profile_check(&source, json),
+        },
         Command::Doctor => cmd_doctor(&manager).await,
     }
 }
@@ -211,27 +243,27 @@ fn parse_core(value: &str) -> Result<CoreKind> {
     value.parse::<CoreKind>().map_err(|e| anyhow!(e))
 }
 
-async fn cmd_status(manager: &CoreManager, json: bool) -> Result<()> {
+async fn cmd_status(manager: &CoreManager, json: bool) -> Result<i32> {
     let status = manager.status().await;
     if json {
         println!("{}", serde_json::to_string_pretty(&status)?);
-        return Ok(());
+        return Ok(0);
     }
     print_status(&status);
-    Ok(())
+    Ok(0)
 }
 
-async fn cmd_cores(manager: &CoreManager, json: bool) -> Result<()> {
+async fn cmd_cores(manager: &CoreManager, json: bool) -> Result<i32> {
     let status = manager.status().await;
     if json {
         println!("{}", serde_json::to_string_pretty(&status.cores)?);
-        return Ok(());
+        return Ok(0);
     }
     print_core_table(&status.cores);
-    Ok(())
+    Ok(0)
 }
 
-async fn cmd_start(manager: &CoreManager, core: Option<&str>) -> Result<()> {
+async fn cmd_start(manager: &CoreManager, core: Option<&str>) -> Result<i32> {
     let kind = match core {
         Some(name) => parse_core(name)?,
         None => resolve_default_core(manager).await?,
@@ -240,7 +272,7 @@ async fn cmd_start(manager: &CoreManager, core: Option<&str>) -> Result<()> {
     let report = manager.start(kind).await?;
     if report.already_running {
         println!("{} is already running", kind);
-        return Ok(());
+        return Ok(0);
     }
 
     println!(
@@ -253,10 +285,10 @@ async fn cmd_start(manager: &CoreManager, core: Option<&str>) -> Result<()> {
     );
     println!("  config  {}", report.config.display());
     println!("  listen  127.0.0.1:{}", kind.default_listen_port());
-    Ok(())
+    Ok(0)
 }
 
-async fn cmd_stop(manager: &CoreManager) -> Result<()> {
+async fn cmd_stop(manager: &CoreManager) -> Result<i32> {
     let stopped = manager.stop().await?;
     if stopped.is_empty() {
         println!("nothing to stop");
@@ -265,10 +297,10 @@ async fn cmd_stop(manager: &CoreManager) -> Result<()> {
             println!("{kind} stopped");
         }
     }
-    Ok(())
+    Ok(0)
 }
 
-async fn cmd_restart(manager: &CoreManager) -> Result<()> {
+async fn cmd_restart(manager: &CoreManager) -> Result<i32> {
     let report = manager.restart().await?;
     println!(
         "{} restarted{}",
@@ -278,14 +310,14 @@ async fn cmd_restart(manager: &CoreManager) -> Result<()> {
             .map(|pid| format!(" (pid {pid})"))
             .unwrap_or_default()
     );
-    Ok(())
+    Ok(0)
 }
 
-async fn cmd_switch(manager: &CoreManager, core: &str) -> Result<()> {
+async fn cmd_switch(manager: &CoreManager, core: &str) -> Result<i32> {
     let kind = parse_core(core)?;
     let report = manager.switch(kind).await?;
     print_switch_report(&report);
-    Ok(())
+    Ok(0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,7 +329,7 @@ async fn cmd_core_install(
     allow_unverified: bool,
     file: Option<PathBuf>,
     mirror: Option<String>,
-) -> Result<()> {
+) -> Result<i32> {
     let kind = parse_core(core)?;
     let options = InstallOptions {
         version,
@@ -316,16 +348,16 @@ async fn cmd_core_install(
     println!("  tag      {}", installed.tag);
     println!("  path     {}", installed.path.display());
     println!("  sha256   {}", installed.sha256);
-    Ok(())
+    Ok(0)
 }
 
-fn cmd_core_path(manager: &CoreManager, core: &str) -> Result<()> {
+fn cmd_core_path(manager: &CoreManager, core: &str) -> Result<i32> {
     let kind = parse_core(core)?;
     match manager.binaries().resolve(kind) {
         Some((path, source)) => {
             println!("{}", path.display());
             eprintln!("source: {}", source.as_str());
-            Ok(())
+            Ok(0)
         }
         None => {
             bail!(
@@ -336,7 +368,155 @@ fn cmd_core_path(manager: &CoreManager, core: &str) -> Result<()> {
     }
 }
 
-async fn cmd_doctor(manager: &CoreManager) -> Result<()> {
+// ---------------------------------------------------------------------------
+// profile (Phase 2)
+// ---------------------------------------------------------------------------
+
+fn read_profile_source(source: &str) -> Result<(String, String)> {
+    if source == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .context("cannot read stdin")?;
+        return Ok((buffer, "stdin".to_string()));
+    }
+
+    let path = PathBuf::from(source);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    Ok((text, path.display().to_string()))
+}
+
+fn profile_name_from_source(source: &str) -> String {
+    if source == "-" {
+        return "stdin".to_string();
+    }
+    Path::new(source)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("profile")
+        .to_string()
+}
+
+fn security_label(node: &Node) -> String {
+    match &node.tls {
+        None => "-".to_string(),
+        Some(tls) if tls.reality.is_some() => "reality".to_string(),
+        Some(_) => "tls".to_string(),
+    }
+}
+
+fn print_diagnostics(diagnostics: &[Diagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+    println!();
+    for diagnostic in diagnostics.iter().take(30) {
+        let location = match (diagnostic.node, &diagnostic.node_name) {
+            (Some(index), Some(name)) => format!("[{:>3} {}]", index + 1, name),
+            _ => String::new(),
+        };
+        println!(
+            "  {:<7} {:<26} {} {}",
+            diagnostic.severity.as_str(),
+            diagnostic.code,
+            location,
+            diagnostic.message
+        );
+    }
+    if diagnostics.len() > 30 {
+        println!("  … {} more", diagnostics.len() - 30);
+    }
+}
+
+fn cmd_profile_parse(source: &str, json: bool) -> Result<i32> {
+    let (text, label) = read_profile_source(source)?;
+    let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
+
+    if json {
+        let payload = serde_json::json!({
+            "profile": parsed.profile,
+            "diagnostics": parsed.diagnostics,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    let profile = &parsed.profile;
+    println!("profile   {}  ({})", profile.name, profile.id);
+    println!("source    {}", profile.metadata.source);
+    println!("format    {}", profile.metadata.format.as_str());
+    println!("nodes     {}", profile.nodes.len());
+    if !profile.nodes.is_empty() {
+        let protocols = profile
+            .protocols()
+            .iter()
+            .map(|protocol| protocol.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("protocols {protocols}");
+    }
+    println!();
+
+    let headers = ["#", "NAME", "PROTOCOL", "ENDPOINT", "TRANSPORT", "SECURITY"];
+    let rows: Vec<Vec<String>> = profile
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            vec![
+                (index + 1).to_string(),
+                node.name.clone(),
+                node.protocol.as_str().to_string(),
+                node.endpoint(),
+                node.transport.label().to_string(),
+                security_label(node),
+            ]
+        })
+        .collect();
+    print!("{}", render_table(&headers, &rows));
+
+    println!(
+        "\n{} errors, {} warnings",
+        parsed.errors(),
+        parsed.warnings()
+    );
+    print_diagnostics(&parsed.diagnostics);
+    Ok(0)
+}
+
+fn cmd_profile_check(source: &str, json: bool) -> Result<i32> {
+    let (text, label) = read_profile_source(source)?;
+    let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
+    let errors = parsed.errors();
+    let warnings = parsed.warnings();
+    let code = if errors > 0 { 1 } else { 0 };
+
+    if json {
+        let payload = serde_json::json!({
+            "profile": parsed.profile.name,
+            "id": parsed.profile.id,
+            "nodes": parsed.node_count(),
+            "errors": errors,
+            "warnings": warnings,
+            "diagnostics": parsed.diagnostics,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(code);
+    }
+
+    println!(
+        "{}: {} nodes, {} errors, {} warnings",
+        parsed.profile.name,
+        parsed.node_count(),
+        errors,
+        warnings
+    );
+    print_diagnostics(&parsed.diagnostics);
+    Ok(code)
+}
+
+async fn cmd_doctor(manager: &CoreManager) -> Result<i32> {
     println!("TriProxy doctor");
     println!();
 
@@ -391,7 +571,7 @@ async fn cmd_doctor(manager: &CoreManager) -> Result<()> {
         );
     }
 
-    Ok(())
+    Ok(0)
 }
 
 fn probe_writable(dir: &Path) -> bool {
@@ -646,7 +826,7 @@ async fn cmd_logs(
     lines: usize,
     core: Option<&str>,
     follow: bool,
-) -> Result<()> {
+) -> Result<i32> {
     let kinds: Vec<CoreKind> = match core {
         Some(name) => vec![parse_core(name)?],
         None => CoreKind::ALL.to_vec(),
@@ -661,7 +841,7 @@ async fn cmd_logs(
     if entries.is_empty() {
         eprintln!("no logs captured yet — start a core first");
         if !follow {
-            return Ok(());
+            return Ok(0);
         }
     }
 
@@ -670,7 +850,7 @@ async fn cmd_logs(
     print_entries(&entries[skip..], show_core);
 
     if !follow {
-        return Ok(());
+        return Ok(0);
     }
 
     // Follow mode polls the per-core log files. Polling (rather than an in-memory
@@ -716,7 +896,7 @@ async fn cmd_logs(
         }
     }
 
-    Ok(())
+    Ok(0)
 }
 
 fn parse_log_line(line: &str, core: CoreKind) -> Option<LogEntry> {

@@ -42,6 +42,7 @@ pub mod health;
 pub mod logging;
 pub mod paths;
 pub mod process;
+pub mod profile;
 pub mod state;
 
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
@@ -53,4 +54,8 @@ pub use error::{Error, Result};
 pub use health::CoreHealth;
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use paths::Layout;
+pub use profile::{
+    parse_payload, parse_uri, Credentials, Diagnostic, InputFormat, Node, ParsedProfile, Profile,
+    Severity, Transport, VlessFlow,
+};
 pub use state::CoreState;
