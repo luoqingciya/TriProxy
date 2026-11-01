@@ -56,6 +56,9 @@ pub struct AppSettings {
     /// DNS strategy for the generated config.
     #[serde(default)]
     pub dns_mode: crate::compiler::DnsMode,
+    /// Routing strategy for the generated config.
+    #[serde(default)]
+    pub rule_mode: crate::compiler::RuleMode,
     #[serde(default = "default_log_level")]
     pub log_level: String,
 }
@@ -75,6 +78,7 @@ impl Default for AppSettings {
             allow_lan: false,
             system_proxy: false,
             dns_mode: crate::compiler::DnsMode::Off,
+            rule_mode: crate::compiler::RuleMode::Global,
             log_level: default_log_level(),
         }
     }
@@ -138,6 +142,7 @@ impl AppSettings {
             allow_lan: self.allow_lan,
             tun: self.tun,
             dns: self.dns_mode,
+            rules: self.rule_mode,
         }
     }
 }
@@ -178,6 +183,7 @@ mod tests {
             allow_lan: true,
             system_proxy: true,
             dns_mode: crate::compiler::DnsMode::Split,
+            rule_mode: crate::compiler::RuleMode::Split,
             log_level: "debug".to_string(),
         };
         settings.save(&layout).unwrap();

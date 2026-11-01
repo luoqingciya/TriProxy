@@ -132,6 +132,18 @@ export function Settings() {
 
       <Card>
         <SectionTitle title="高级" />
+        <SettingRow title="分流模式" hint="global 全部走代理；split 局域网与国内站点直连">
+          <select
+            value={settings.rule_mode}
+            onChange={(event) =>
+              update({ rule_mode: event.target.value as AppSettings['rule_mode'] })
+            }
+            className="rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg outline-none"
+          >
+            <option value="global">global</option>
+            <option value="split">split</option>
+          </select>
+        </SettingRow>
         <SettingRow title="DNS 模式" hint="split：走代理解析；fake-ip：TUN 下最快，但部分应用不兼容">
           <select
             value={settings.dns_mode}

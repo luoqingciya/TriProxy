@@ -15,6 +15,26 @@ use std::io::{Cursor, Read};
 
 use crate::error::{Error, Result};
 
+/// Data files a core loads at runtime, if the release archive carries them.
+///
+/// Xray's `geosite:cn` / `geoip:cn` routing only works when `geosite.dat` and
+/// `geoip.dat` sit next to the executable. They are inside the official archive,
+/// so dropping them during install silently disables a whole feature — the config
+/// is accepted, then fails at load time with "failed to open geosite.dat".
+const COMPANION_FILES: [&str; 4] = [
+    "geosite.dat",
+    "geoip.dat",
+    "geoip-only-cn-private.dat",
+    "country.mmdb",
+];
+
+/// A core executable plus the data files it expects to find beside it.
+#[derive(Debug, Clone)]
+pub struct ExtractedBundle {
+    pub binary: Vec<u8>,
+    pub companions: Vec<(String, Vec<u8>)>,
+}
+
 /// Extract the core executable out of a release archive.
 ///
 /// The three projects ship three different container formats:
@@ -22,16 +42,32 @@ use crate::error::{Error, Result};
 /// - sing-box: `.zip` on Windows, `.tar.gz` elsewhere
 /// - Xray: `.zip` everywhere
 pub fn extract_binary(asset_name: &str, bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
+    Ok(extract_bundle(asset_name, bytes, stem)?.binary)
+}
+
+/// Extract the executable and any runtime data files from a release archive.
+pub fn extract_bundle(asset_name: &str, bytes: &[u8], stem: &str) -> Result<ExtractedBundle> {
     let name = asset_name.to_ascii_lowercase();
     if name.ends_with(".zip") {
         extract_from_zip(bytes, stem)
     } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         extract_from_tar_gz(bytes, stem)
     } else if name.ends_with(".gz") {
-        extract_from_gz(bytes)
+        Ok(ExtractedBundle {
+            binary: extract_from_gz(bytes)?,
+            companions: Vec::new(),
+        })
     } else {
-        Ok(bytes.to_vec())
+        Ok(ExtractedBundle {
+            binary: bytes.to_vec(),
+            companions: Vec::new(),
+        })
     }
+}
+
+fn is_companion(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    COMPANION_FILES.contains(&lower.as_str())
 }
 
 /// Does this archive entry look like the core executable?
@@ -54,7 +90,7 @@ fn is_target_file(file_name: &str, stem: &str) -> bool {
     base == stem || base.starts_with(&format!("{stem}-"))
 }
 
-fn extract_from_zip(bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
+fn extract_from_zip(bytes: &[u8], stem: &str) -> Result<ExtractedBundle> {
     let reader = Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| Error::Other(format!("invalid zip archive: {e}")))?;
@@ -76,21 +112,48 @@ fn extract_from_zip(bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
             ))
         })?;
 
+    let binary = read_zip_entry(&mut archive, &target)?;
+
+    // Runtime data files live in the same archive; collect them while it is open.
+    let mut companions = Vec::new();
+    let companion_names: Vec<String> = names
+        .iter()
+        .filter(|name| {
+            name.rsplit(['/', '\\'])
+                .next()
+                .map(is_companion)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    for name in companion_names {
+        let file_name = name.rsplit(['/', '\\']).next().unwrap_or(&name).to_string();
+        let data = read_zip_entry(&mut archive, &name)?;
+        companions.push((file_name, data));
+    }
+
+    Ok(ExtractedBundle { binary, companions })
+}
+
+fn read_zip_entry(archive: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<Vec<u8>> {
     let mut file = archive
-        .by_name(&target)
-        .map_err(|e| Error::Other(format!("cannot read `{target}` from zip: {e}")))?;
+        .by_name(name)
+        .map_err(|e| Error::Other(format!("cannot read `{name}` from zip: {e}")))?;
     let mut buffer = Vec::with_capacity(file.size() as usize);
     file.read_to_end(&mut buffer)
-        .map_err(|e| Error::Other(format!("cannot extract `{target}`: {e}")))?;
+        .map_err(|e| Error::Other(format!("cannot extract `{name}`: {e}")))?;
     Ok(buffer)
 }
 
-fn extract_from_tar_gz(bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
+fn extract_from_tar_gz(bytes: &[u8], stem: &str) -> Result<ExtractedBundle> {
     let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
     let mut archive = tar::Archive::new(decoder);
     let entries = archive
         .entries()
         .map_err(|e| Error::Other(format!("invalid tar archive: {e}")))?;
+
+    let mut binary: Option<Vec<u8>> = None;
+    let mut companions = Vec::new();
 
     for entry in entries {
         let mut entry = entry.map_err(|e| Error::Other(format!("invalid tar entry: {e}")))?;
@@ -101,18 +164,31 @@ fn extract_from_tar_gz(bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
         let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if is_target_file(file_name, stem) {
+        let file_name = file_name.to_string();
+
+        // Keep scanning after the binary is found: the data files can come
+        // after it in the archive, and stopping early would silently drop them.
+        if binary.is_none() && is_target_file(&file_name, stem) {
             let mut buffer = Vec::new();
             entry
                 .read_to_end(&mut buffer)
                 .map_err(|e| Error::Other(format!("cannot extract `{stem}`: {e}")))?;
-            return Ok(buffer);
+            binary = Some(buffer);
+        } else if is_companion(&file_name) {
+            let mut buffer = Vec::new();
+            entry
+                .read_to_end(&mut buffer)
+                .map_err(|e| Error::Other(format!("cannot extract `{file_name}`: {e}")))?;
+            companions.push((file_name, buffer));
         }
     }
 
-    Err(Error::Other(format!(
-        "`{stem}` not found in tar.gz archive"
-    )))
+    match binary {
+        Some(binary) => Ok(ExtractedBundle { binary, companions }),
+        None => Err(Error::Other(format!(
+            "`{stem}` not found in tar.gz archive"
+        ))),
+    }
 }
 
 fn extract_from_gz(bytes: &[u8]) -> Result<Vec<u8>> {

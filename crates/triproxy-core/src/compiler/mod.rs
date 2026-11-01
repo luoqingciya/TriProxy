@@ -57,8 +57,30 @@ pub struct CompileOptions {
     pub allow_lan: bool,
     /// Create a TUN interface instead of only a local mixed port.
     pub tun: bool,
-    /// How the core resolves names. See [].
+    /// How the core resolves names. See [`DnsMode`].
     pub dns: DnsMode,
+    /// How traffic is split between the proxy and a direct connection.
+    pub rules: RuleMode,
+}
+
+/// Routing strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleMode {
+    /// Everything through the proxy — what the compiler did before rules existed.
+    #[default]
+    Global,
+    /// Local networks and Chinese sites go direct, everything else is proxied.
+    Split,
+}
+
+impl RuleMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleMode::Global => "global",
+            RuleMode::Split => "split",
+        }
+    }
 }
 
 /// DNS strategy baked into the generated config.
@@ -105,6 +127,7 @@ impl Default for CompileOptions {
             allow_lan: false,
             tun: false,
             dns: DnsMode::Off,
+            rules: RuleMode::Global,
         }
     }
 }

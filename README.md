@@ -37,6 +37,7 @@
 | **Phase 7** | **TUN 模式** | **已完成（管理员实测：网卡与路由在崩溃后均被清理）** |
 | **Phase 8** | **DNS** | **已完成（三核心 × 三模式全部通过校验；未改系统 DNS，理由见文档）** |
 | **Phase 9** | **订阅** | **已完成（URL 导入 / 条件请求缓存 / 错误恢复；无后台定时器）** |
+| **Phase 10** | **分流规则** | **部分完成（global / split 已实现并三核心验证；流量图表等未做）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -146,6 +147,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy proxy status` | 查看系统代理是否由 TriProxy 托管 |
 | `triproxy tun status` | 查看 TUN 权限与残留网卡 |
 | `--dns <off\|split\|fakeip>` | start / switch / profile compile 的 DNS 模式 |
+| `--rules <global\|split>` | 分流模式：全部代理 / 国内直连 |
 | `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
 
 全局参数：`--data-dir <DIR>`（等价于环境变量 `TRIPROXY_HOME`）、`--json`。
@@ -273,6 +275,21 @@ specialisation; eliminated: xray (TUN)
 **随包核心只读**：`cores/` 目录由发行包提供，程序运行时从不写入；所有安装与更新都进 `bin/`。
 
 ---
+
+## 分流规则（Phase 10）
+
+```bash
+triproxy start mihomo --rules split      # 局域网与国内站点直连
+triproxy profile compile sub.txt --core sing-box --rules split --check
+```
+
+| 模式 | 行为 |
+|---|---|
+| `global` | 全部走代理（默认） |
+| `split` | 局域网 + 国内目标直连，其余走代理 |
+
+三个核心的实现方式完全不同：mihomo 用内置 `GEOSITE`/`GEOIP`，Xray 用自带的 `geosite.dat`/`geoip.dat`，
+sing-box 1.12 之后只能靠**远程 rule-set**（运行时下载）。细节见 ARCHITECTURE 第 15 章。
 
 ## 订阅（Phase 9）
 

@@ -705,7 +705,44 @@ ERROR[0000] missing `route.default_domain_resolver`
 自动更新目前发生在显式调用 `refresh --all` 时。真正的后台更新需要一个常驻进程或系统服务，
 那是另一个量级的工程，不在本阶段范围内——这一点写在这里，避免被当成已完成。
 
-## 15. 尚未实现（明确的边界）
+## 15. Phase 10 — 分流规则
+
+### 15.1 两种模式
+
+| 模式 | 行为 |
+|---|---|
+| `global` | 全部走代理（编译器的历史行为，默认） |
+| `split` | 局域网与国内目标直连，其余走代理 |
+
+默认仍是 `global`：静默改变既有行为比多一个开关更糟。
+
+### 15.2 三个核心的实现方式完全不同
+
+| 核心 | 做法 | 依赖 |
+|---|---|---|
+| mihomo | `GEOSITE,cn` / `GEOIP,CN` 规则 | 自带 geo 数据库 |
+| sing-box | 远程 rule-set（`geosite-cn.srs` / `geoip-cn.srs`） | **运行时下载** |
+| Xray | `geosite:cn` / `geoip:cn` 路由规则 | `geosite.dat` / `geoip.dat` |
+
+sing-box 1.12 移除了内置 geoip/geosite，只能走 rule-set；其 `download_detour` 设为 `direct`——
+用代理去下载「决定什么走代理」的规则集是个死循环。
+
+### 15.3 安装器的一个真实缺口（这次才发现）
+
+Xray 的 geo 分流依赖 `geosite.dat` 与 `geoip.dat`，它们就在官方发布包里，
+但安装器只解出了可执行文件。结果是：**配置能被接受，运行时却报 `failed to open geosite.dat`**。
+
+这不是配置问题，是安装器漏了文件。已修：`extract_bundle()` 现在同时解出已知的运行时数据文件
+（`geosite.dat`、`geoip.dat`、`geoip-only-cn-private.dat`、`Country.mmdb`）写到可执行文件旁边。
+tar.gz 分支也改成**扫描完整个归档再返回**，否则数据文件排在可执行文件之后时会被静默丢掉。
+
+重装后实测：`geosite.dat` 7.3 MB、`geoip.dat` 3.2 MB 落盘，Xray 的 split 配置通过校验。
+
+### 15.4 验证
+
+三核心 × 两模式共 6 种组合，全部通过各自核心的 `check` / `-t`。
+
+## 16. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 

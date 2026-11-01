@@ -27,7 +27,7 @@ use crate::profile::Profile;
 
 use super::{
     common_skip_reason, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
-    SkippedNode,
+    RuleMode, SkippedNode,
 };
 
 pub struct XrayCompiler;
@@ -93,8 +93,17 @@ impl ConfigCompiler for XrayCompiler {
                 }
             ],
             "outbounds": outbounds,
-            "dns": dns_object(dns_mode),
         });
+
+        // Omit the keys entirely rather than emitting nulls: Xray validates
+        // fields it finds, and a null dns/routing block reads as malformed.
+        let mut document = document;
+        if dns_mode != DnsMode::Off {
+            document["dns"] = dns_object();
+        }
+        if options.rules != RuleMode::Global {
+            document["routing"] = routing_object();
+        }
 
         let mut text =
             serde_json::to_string_pretty(&document).map_err(|error| CompileError::Internal {
@@ -113,16 +122,28 @@ impl ConfigCompiler for XrayCompiler {
     }
 }
 
+/// Routing section.
+///
+/// Xray ships its own geosite/geoip data files, so the split lists need no
+/// download. Rules send Chinese domains and addresses to the  outbound;
+/// anything unmatched falls through to the first outbound, which is the proxy.
+fn routing_object() -> Value {
+    json!({
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            { "type": "field", "outboundTag": "direct", "domain": ["geosite:cn"] },
+            { "type": "field", "outboundTag": "direct", "ip": ["geoip:cn", "geoip:private"] },
+        ],
+    })
+}
+
 /// DNS section.
 ///
 /// Xray resolves through its own DNS service; there is no  equivalent,
 /// so these servers are queried over whatever routing applies to their address.
 /// Emitting the block still helps: it stops the system resolver from being the
 /// only answer source, and it keeps lookups consistent with the proxy rules.
-fn dns_object(mode: DnsMode) -> Value {
-    if mode == DnsMode::Off {
-        return Value::Null;
-    }
+fn dns_object() -> Value {
     json!({
         "servers": ["https://1.1.1.1/dns-query", "223.5.5.5"],
         "queryStrategy": "UseIPv4",
@@ -542,6 +563,43 @@ mod tests {
         assert_eq!(stream["realitySettings"]["fingerprint"], "chrome");
         assert_eq!(stream["realitySettings"]["spiderX"], "/");
         assert_eq!(stream["realitySettings"]["serverName"], "www.microsoft.com");
+    }
+
+    #[test]
+    fn split_mode_adds_geo_routing_to_direct() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            rules: RuleMode::Split,
+            ..Default::default()
+        };
+        let compiled = XrayCompiler
+            .compile(&Profile::new("p", vec![node]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        let rules = document["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["outboundTag"], "direct");
+        assert_eq!(rules[1]["ip"][0], "geoip:cn");
+    }
+
+    #[test]
+    fn global_mode_has_no_routing_section() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let compiled = XrayCompiler
+            .compile(&Profile::new("p", vec![node]), &CompileOptions::default())
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        assert!(document.get("routing").is_none());
     }
 
     #[test]

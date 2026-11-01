@@ -80,6 +80,7 @@ let settings: Settings = {
   allow_lan: false,
   system_proxy: false,
   dns_mode: 'off',
+  rule_mode: 'global',
   log_level: 'info',
 }
 
