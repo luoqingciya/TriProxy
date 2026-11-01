@@ -69,6 +69,19 @@ pub async fn probe_tcp(port: u16) -> Option<u64> {
     }
 }
 
+/// Blocking TCP probe, for call sites that are not async (or must not be).
+///
+/// Used by the system-proxy manager to refuse pointing the machine at a dead
+/// port before the caller has had a chance to await anything.
+pub fn probe_tcp_blocking(port: u16, timeout: Duration) -> Option<u64> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let started = std::time::Instant::now();
+    match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => Some(started.elapsed().as_millis() as u64),
+        Err(_) => None,
+    }
+}
+
 /// Check whether a loopback port can still be bound.
 ///
 /// Used as a pre-flight guard: starting a core that cannot bind would otherwise

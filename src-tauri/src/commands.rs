@@ -23,8 +23,8 @@ use tauri::State;
 use triproxy_core::compiler::compile;
 use triproxy_core::profile::{parse_payload, Node};
 use triproxy_core::{
-    AppSettings, CompiledConfig, CoreKind, CorePreference, LogLevel, LogLine, ManagerStatus,
-    ProfileStore, Selection, Selector, StoredProfile,
+    AppSettings, AppliedProxy, CompiledConfig, CoreKind, CorePreference, LogLevel, LogLine,
+    ManagerStatus, ProfileStore, Selection, Selector, StoredProfile, SystemProxyManager,
 };
 
 use crate::AppState;
@@ -206,12 +206,35 @@ pub async fn start_core(
         state.manager.start(kind).await.map_err(err)?;
     }
 
+    let settings = AppSettings::load(state.manager.layout());
+    if settings.system_proxy {
+        // A failure here must not undo a successful start; surface it instead.
+        if let Err(error) = enable_system_proxy(&state) {
+            tracing::warn!(%error, "could not enable the system proxy");
+        }
+    }
+
     Ok(state.manager.status().await)
+}
+
+fn enable_system_proxy(state: &AppState) -> Result<(), String> {
+    let port = state
+        .manager
+        .persisted_listen_port()
+        .ok_or_else(|| "no core is running".to_string())?;
+    SystemProxyManager::new(state.manager.layout())
+        .enable(&format!("127.0.0.1:{port}"))
+        .map(|_| ())
+        .map_err(err)
 }
 
 #[tauri::command]
 pub async fn stop_core(state: State<'_, AppState>) -> CmdResult<()> {
     state.manager.stop().await.map_err(err)?;
+    // The proxy is useless without a core and would break connectivity.
+    SystemProxyManager::new(state.manager.layout())
+        .disable()
+        .map_err(err)?;
     Ok(())
 }
 
@@ -261,4 +284,28 @@ fn to_view(line: LogLine) -> LogEntryView {
 pub async fn recent_logs(state: State<'_, AppState>, limit: usize) -> CmdResult<Vec<LogEntryView>> {
     let logs = state.manager.logs();
     Ok(logs.tail(limit).into_iter().map(to_view).collect())
+}
+
+#[tauri::command]
+pub async fn system_proxy_status(state: State<'_, AppState>) -> CmdResult<Option<AppliedProxy>> {
+    Ok(SystemProxyManager::new(state.manager.layout()).status())
+}
+
+#[tauri::command]
+pub async fn set_system_proxy(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<Option<AppliedProxy>> {
+    let proxy = SystemProxyManager::new(state.manager.layout());
+    if !enabled {
+        proxy.disable().map_err(err)?;
+        return Ok(None);
+    }
+
+    let port = state
+        .manager
+        .persisted_listen_port()
+        .ok_or_else(|| "还没有核心在运行，无法启用系统代理".to_string())?;
+    let applied = proxy.enable(&format!("127.0.0.1:{port}")).map_err(err)?;
+    Ok(Some(applied))
 }
