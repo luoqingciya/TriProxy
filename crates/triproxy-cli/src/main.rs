@@ -24,7 +24,7 @@ use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, is_elevated, leftovers, parse_payload, CompileOptions, CompiledConfig, CoreKind,
     CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus, NetworkRequirements, Node,
-    ParsedProfile, Profile, ProfileStore, RefreshStatus, Selector, StoredProfile,
+    ParsedProfile, Profile, ProfileStore, RefreshStatus, RuleMode, Selector, StoredProfile,
     SubscriptionService, SwitchReport, SystemProxyManager,
 };
 
@@ -77,6 +77,9 @@ enum Command {
         /// DNS strategy: off | split | fakeip
         #[arg(long, value_name = "MODE")]
         dns: Option<String>,
+        /// Routing strategy: global | split
+        #[arg(long, value_name = "MODE")]
+        rules: Option<String>,
     },
     /// Stop whatever core is running
     Stop,
@@ -98,6 +101,9 @@ enum Command {
         /// DNS strategy: off | split | fakeip
         #[arg(long, value_name = "MODE")]
         dns: Option<String>,
+        /// Routing strategy: global | split
+        #[arg(long, value_name = "MODE")]
+        rules: Option<String>,
     },
     /// Show captured core logs
     Logs {
@@ -181,6 +187,9 @@ enum ProfileCommand {
         /// DNS strategy: off | split | fakeip
         #[arg(long, value_name = "MODE")]
         dns: Option<String>,
+        /// Routing strategy: global | split
+        #[arg(long, value_name = "MODE")]
+        rules: Option<String>,
         /// Let the core validate the generated config before returning
         #[arg(long)]
         check: bool,
@@ -386,6 +395,7 @@ async fn run(cli: Cli) -> Result<i32> {
             proxy,
             tun,
             dns,
+            rules,
         } => {
             cmd_start(
                 &manager,
@@ -394,6 +404,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 proxy,
                 tun,
                 dns,
+                rules,
             )
             .await
         }
@@ -405,7 +416,8 @@ async fn run(cli: Cli) -> Result<i32> {
             proxy,
             tun,
             dns,
-        } => cmd_switch(&manager, &core, profile.as_deref(), proxy, tun, dns).await,
+            rules,
+        } => cmd_switch(&manager, &core, profile.as_deref(), proxy, tun, dns, rules).await,
         Command::Logs {
             lines,
             core,
@@ -450,6 +462,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 output,
                 tun,
                 dns,
+                rules,
                 check,
                 json,
             } => {
@@ -457,6 +470,7 @@ async fn run(cli: Cli) -> Result<i32> {
                     output,
                     tun,
                     dns,
+                    rules,
                     check,
                     json,
                 };
@@ -513,6 +527,7 @@ async fn cmd_start(
     proxy: bool,
     tun: bool,
     dns: Option<String>,
+    rules: Option<String>,
 ) -> Result<i32> {
     if tun && !is_elevated() {
         bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
@@ -522,7 +537,13 @@ async fn cmd_start(
         Some(name) => parse_core_choice(name)?,
         None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
-    let (kind, compiled) = resolve_target(manager, choice, profile, tun, dns)?;
+    let options = CompileOptions {
+        tun,
+        dns: parse_dns_mode(dns.as_deref())?,
+        rules: parse_rule_mode(rules.as_deref())?,
+        ..Default::default()
+    };
+    let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -594,13 +615,20 @@ async fn cmd_switch(
     proxy: bool,
     tun: bool,
     dns: Option<String>,
+    rules: Option<String>,
 ) -> Result<i32> {
     if tun && !is_elevated() {
         bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
     }
 
     let choice = parse_core_choice(core)?;
-    let (kind, compiled) = resolve_target(manager, choice, profile, tun, dns)?;
+    let options = CompileOptions {
+        tun,
+        dns: parse_dns_mode(dns.as_deref())?,
+        rules: parse_rule_mode(rules.as_deref())?,
+        ..Default::default()
+    };
+    let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -831,6 +859,7 @@ async fn cmd_profile_compile(
         output,
         tun,
         dns,
+        rules,
         check,
         json,
     } = args;
@@ -840,6 +869,7 @@ async fn cmd_profile_compile(
     let options = CompileOptions {
         tun,
         dns: parse_dns_mode(dns.as_deref())?,
+        rules: parse_rule_mode(rules.as_deref())?,
         ..Default::default()
     };
     let compiled = compile(kind, &parsed.profile, &options).map_err(|error| anyhow!("{error}"))?;
@@ -904,15 +934,9 @@ fn load_profile(path: &Path) -> Result<ParsedProfile> {
 fn compile_for(
     kind: CoreKind,
     profile: &Profile,
-    tun: bool,
-    dns: Option<&str>,
+    options: &CompileOptions,
 ) -> Result<CompiledConfig> {
-    let options = CompileOptions {
-        tun,
-        dns: parse_dns_mode(dns)?,
-        ..Default::default()
-    };
-    let compiled = compile(kind, profile, &options).map_err(|error| anyhow!("{error}"))?;
+    let compiled = compile(kind, profile, options).map_err(|error| anyhow!("{error}"))?;
     for skipped in &compiled.skipped {
         eprintln!("skipped `{}`: {}", skipped.name, skipped.reason);
     }
@@ -935,6 +959,14 @@ fn parse_dns_mode(value: Option<&str>) -> Result<DnsMode> {
     }
 }
 
+fn parse_rule_mode(value: Option<&str>) -> Result<RuleMode> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("global") => Ok(RuleMode::Global),
+        Some("split") => Ok(RuleMode::Split),
+        Some(other) => bail!("unknown rule mode `{other}` (expected global or split)"),
+    }
+}
+
 fn parse_core_choice(value: &str) -> Result<CoreChoice> {
     let lowered = value.trim().to_ascii_lowercase();
     if lowered == "smart" || lowered == "auto" {
@@ -951,12 +983,11 @@ fn resolve_target(
     manager: &CoreManager,
     choice: CoreChoice,
     profile: Option<&Path>,
-    tun: bool,
-    dns: Option<String>,
+    options: &CompileOptions,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
     if let Some(path) = profile {
         let parsed = load_profile(path)?;
-        return finish_target(choice, parsed.profile, tun, dns);
+        return finish_target(choice, parsed.profile, options);
     }
 
     let store = ProfileStore::new(manager.layout());
@@ -966,7 +997,7 @@ fn resolve_target(
             stored.name,
             active.nodes.len()
         );
-        return finish_target(choice, active, tun, dns);
+        return finish_target(choice, active, options);
     }
 
     match choice {
@@ -980,8 +1011,7 @@ fn resolve_target(
 fn finish_target(
     choice: CoreChoice,
     profile: Profile,
-    tun: bool,
-    dns: Option<String>,
+    options: &CompileOptions,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
     match choice {
         CoreChoice::Smart => {
@@ -992,11 +1022,11 @@ fn finish_target(
                 "smart: selected `{}` — {}",
                 selection.selected, selection.reason
             );
-            let compiled = compile_for(selection.selected, &profile, tun, dns.as_deref())?;
+            let compiled = compile_for(selection.selected, &profile, options)?;
             Ok((selection.selected, Some(compiled)))
         }
         CoreChoice::Fixed(kind) => {
-            let compiled = compile_for(kind, &profile, tun, dns.as_deref())?;
+            let compiled = compile_for(kind, &profile, options)?;
             Ok((kind, Some(compiled)))
         }
     }
@@ -1007,6 +1037,7 @@ struct CompileArgs {
     output: Option<PathBuf>,
     tun: bool,
     dns: Option<String>,
+    rules: Option<String>,
     check: bool,
     json: bool,
 }
