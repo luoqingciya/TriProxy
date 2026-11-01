@@ -1,0 +1,626 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+
+use crate::adapters;
+use crate::binaries::{BinaryManager, InstallOptions, InstalledBinary};
+use crate::bootstrap;
+use crate::core::{CoreKind, ProxyCore};
+use crate::error::{Error, Result};
+use crate::health::CoreHealth;
+use crate::logging::{now_ms, LogBuffer};
+use crate::paths::Layout;
+use crate::process::pid_alive;
+use crate::state::CoreState;
+
+pub const DEFAULT_API_PORT: u16 = 9090;
+pub const DEFAULT_LOG_LEVEL: &str = "info";
+
+/// State persisted between invocations, used for crash recovery (plan ch.33).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedState {
+    active_core: Option<CoreKind>,
+    pid: Option<u32>,
+    binary: Option<PathBuf>,
+    listen_port: Option<u16>,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecoveryReport {
+    pub previous_active: Option<CoreKind>,
+    pub previous_pid: Option<u32>,
+    /// Core whose running process was taken over from a previous invocation.
+    pub adopted: Option<CoreKind>,
+    /// `true` when a recorded process was already gone and the state was cleared.
+    pub stale_state_cleared: bool,
+}
+
+impl RecoveryReport {
+    fn is_noop(&self) -> bool {
+        self.previous_active.is_none() && self.previous_pid.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CoreReport {
+    pub kind: CoreKind,
+    pub display_name: String,
+    pub binary: Option<PathBuf>,
+    pub binary_source: Option<String>,
+    pub binary_version: Option<String>,
+    pub state: CoreState,
+    pub pid: Option<u32>,
+    pub uptime_secs: Option<u64>,
+    pub listen_port: Option<u16>,
+    pub listening: Option<bool>,
+    pub latency_ms: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagerStatus {
+    pub active_core: Option<CoreKind>,
+    pub exclusive: bool,
+    pub data_dir: PathBuf,
+    pub cores: Vec<CoreReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchStep {
+    pub step: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+impl SwitchStep {
+    fn ok(step: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            step: step.into(),
+            ok: true,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchReport {
+    pub target: CoreKind,
+    pub previous: Option<CoreKind>,
+    pub steps: Vec<SwitchStep>,
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StartReport {
+    pub kind: CoreKind,
+    pub config: PathBuf,
+    pub pid: Option<u32>,
+    pub already_running: bool,
+}
+
+/// Owns the three cores and enforces the project's central invariant:
+/// **at most one core is running at any time** (plan ch.3.2).
+pub struct CoreManager {
+    layout: Layout,
+    binaries: BinaryManager,
+    cores: RwLock<BTreeMap<CoreKind, Arc<dyn ProxyCore>>>,
+    logs: Arc<LogBuffer>,
+    /// Serializes lifecycle operations, mirroring "Lock CoreManager" in ch.14.
+    op_lock: Mutex<()>,
+    persisted: Mutex<PersistedState>,
+    api_port: u16,
+    log_level: String,
+}
+
+impl CoreManager {
+    pub fn new(layout: Layout) -> Result<Self> {
+        layout.ensure()?;
+        let logs = Arc::new(LogBuffer::default());
+        let binaries = BinaryManager::new(layout.clone())?;
+
+        let mut cores = BTreeMap::new();
+        for kind in CoreKind::ALL {
+            if let Some((path, source)) = binaries.resolve(kind) {
+                tracing::debug!(
+                    core = kind.as_str(),
+                    path = %path.display(),
+                    source = source.as_str(),
+                    "core binary resolved"
+                );
+                cores.insert(kind, build_core(kind, path, logs.clone(), &layout));
+            }
+        }
+
+        Ok(Self {
+            layout,
+            binaries,
+            cores: RwLock::new(cores),
+            logs,
+            op_lock: Mutex::new(()),
+            persisted: Mutex::new(PersistedState::default()),
+            api_port: DEFAULT_API_PORT,
+            log_level: DEFAULT_LOG_LEVEL.to_string(),
+        })
+    }
+
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    pub fn binaries(&self) -> &BinaryManager {
+        &self.binaries
+    }
+
+    pub fn logs(&self) -> Arc<LogBuffer> {
+        self.logs.clone()
+    }
+
+    /// Reconcile with whatever the previous run left behind.
+    ///
+    /// A CLI invocation is short-lived but the core it spawned is not, so the
+    /// previous process is normally still alive and gets adopted. Only a dead
+    /// PID is treated as a stale record.
+    pub async fn recover(&self) -> Result<RecoveryReport> {
+        let state = self.load_state().await;
+        let mut report = RecoveryReport {
+            previous_active: state.active_core,
+            previous_pid: state.pid,
+            adopted: None,
+            stale_state_cleared: false,
+        };
+
+        if report.is_noop() {
+            return Ok(report);
+        }
+
+        match (state.active_core, state.pid) {
+            (Some(kind), Some(pid)) if pid_alive(pid) => {
+                let core = self.cores_read().get(&kind).cloned();
+                if let Some(core) = core {
+                    let port = state.listen_port.unwrap_or(kind.default_listen_port());
+                    if core.adopt(pid, port).await {
+                        report.adopted = Some(kind);
+                        tracing::info!(core = kind.as_str(), pid, "adopted running core");
+                    } else {
+                        report.stale_state_cleared = true;
+                    }
+                } else {
+                    // The process is alive but we have no binary to control it
+                    // with; leave it alone rather than killing something the
+                    // user may have started manually.
+                    tracing::warn!(
+                        core = kind.as_str(),
+                        pid,
+                        "recorded core is running but its binary is missing"
+                    );
+                    report.stale_state_cleared = true;
+                }
+            }
+            _ => {
+                report.stale_state_cleared = true;
+            }
+        }
+
+        if report.adopted.is_none() {
+            self.write_state(PersistedState::default()).await?;
+        }
+        Ok(report)
+    }
+
+    pub async fn status(&self) -> ManagerStatus {
+        let mut cores = Vec::new();
+        let mut active = None;
+
+        for kind in CoreKind::ALL {
+            let binary = self.binaries.status(kind);
+            // Take the Arc out before awaiting: holding the read guard across
+            // `health_check().await` would block `install()`'s write lock.
+            let core = self.cores_read().get(&kind).cloned();
+            let health = match core {
+                Some(core) => core
+                    .health_check()
+                    .await
+                    .unwrap_or_else(|_| CoreHealth::stopped()),
+                None => CoreHealth::stopped(),
+            };
+
+            if health.state.is_running() {
+                active = Some(kind);
+            }
+
+            cores.push(CoreReport {
+                kind,
+                display_name: kind.display_name().to_string(),
+                binary: binary.path,
+                binary_source: binary.source.map(|s| s.as_str().to_string()),
+                binary_version: binary.version,
+                state: health.state,
+                pid: health.pid,
+                uptime_secs: health.uptime_secs,
+                listen_port: health.listen_port,
+                listening: health.listening,
+                latency_ms: health.latency_ms,
+                last_error: health.last_error,
+            });
+        }
+
+        ManagerStatus {
+            active_core: active,
+            exclusive: true,
+            data_dir: self.layout.root().to_path_buf(),
+            cores,
+        }
+    }
+
+    pub async fn start(&self, kind: CoreKind) -> Result<StartReport> {
+        let _op = self.op_lock.lock().await;
+        self.start_locked(kind).await
+    }
+
+    async fn start_locked(&self, kind: CoreKind) -> Result<StartReport> {
+        let core = self.core(kind)?;
+
+        if let Some(other) = self.running_core_except(kind).await {
+            return Err(Error::Other(format!(
+                "`{other}` is already running and only one core may run at a time; use `switch {kind}` instead"
+            )));
+        }
+
+        if core.state().await.is_running() {
+            let config = self
+                .config_path_for(kind)
+                .unwrap_or_else(|| self.layout.core_config_dir(kind.as_str()));
+            return Ok(StartReport {
+                kind,
+                config,
+                pid: core.pid().await,
+                already_running: true,
+            });
+        }
+
+        let config = self.prepare_config(kind, &core)?;
+        core.check_config(&config).await?;
+        core.start(&config).await?;
+
+        let pid = core.pid().await;
+        self.persist(Some(kind), pid, Some(core.listen_port())).await?;
+
+        Ok(StartReport {
+            kind,
+            config,
+            pid,
+            already_running: false,
+        })
+    }
+
+    pub async fn stop(&self) -> Result<Vec<CoreKind>> {
+        let _op = self.op_lock.lock().await;
+        self.stop_locked().await
+    }
+
+    async fn stop_locked(&self) -> Result<Vec<CoreKind>> {
+        let mut stopped = Vec::new();
+        for kind in CoreKind::ALL {
+            let Some(core) = self.cores_read().get(&kind).cloned() else {
+                continue;
+            };
+            let state = core.state().await;
+            let has_pid = core.pid().await.is_some();
+            if state != CoreState::Stopped || has_pid {
+                core.stop().await?;
+                stopped.push(kind);
+            }
+        }
+
+        // An orphan PID recorded by an older run must not survive either.
+        let recorded = self.load_state().await;
+        if let Some(pid) = recorded.pid {
+            if pid_alive(pid) {
+                let _ = crate::process::force_kill(pid);
+                tracing::warn!(pid, "terminated orphan core process");
+            }
+        }
+
+        self.write_state(PersistedState::default()).await?;
+        Ok(stopped)
+    }
+
+    pub async fn restart(&self) -> Result<StartReport> {
+        let _op = self.op_lock.lock().await;
+        let active = match self.running_core().await {
+            Some(kind) => kind,
+            None => self.persisted_active().await.ok_or(Error::NoActiveCore)?,
+        };
+        self.stop_locked().await?;
+        self.start_locked(active).await
+    }
+
+    /// Stop whatever is running, then start the target core.
+    ///
+    /// Every step is recorded so the UI can explain what happened (plan ch.14/23).
+    pub async fn switch(&self, target: CoreKind) -> Result<SwitchReport> {
+        let _op = self.op_lock.lock().await;
+        let core = self.core(target)?;
+        let mut steps = Vec::new();
+        let previous = self.running_core().await;
+
+        if previous == Some(target) {
+            steps.push(SwitchStep::ok(
+                "resolve target",
+                format!("`{target}` is already running"),
+            ));
+            return Ok(SwitchReport {
+                target,
+                previous,
+                steps,
+                config: self.config_path_for(target),
+            });
+        }
+
+        match previous {
+            Some(previous) => {
+                let previous_core = self.core(previous)?;
+                let pid = previous_core.pid().await;
+                previous_core.stop().await?;
+                steps.push(SwitchStep::ok(
+                    "stop current core",
+                    match pid {
+                        Some(pid) => format!("{previous} stopped (pid {pid})"),
+                        None => format!("{previous} stopped"),
+                    },
+                ));
+                steps.push(SwitchStep::ok(
+                    "wait for process exit",
+                    "process is no longer alive",
+                ));
+                steps.push(SwitchStep::ok(
+                    "cleanup network state",
+                    "Phase 1 has no system proxy / TUN / DNS state to restore",
+                ));
+            }
+            None => steps.push(SwitchStep::ok("stop current core", "no core was running")),
+        }
+
+        let config = self.prepare_config(target, &core)?;
+        steps.push(SwitchStep::ok(
+            "generate config",
+            config.display().to_string(),
+        ));
+
+        core.check_config(&config).await?;
+        steps.push(SwitchStep::ok("validate config", format!("{target} accepted the config")));
+
+        core.start(&config).await?;
+        let health = core.health_check().await?;
+        let port = core.listen_port();
+        steps.push(SwitchStep::ok(
+            "start new core",
+            format!("{target} listening on 127.0.0.1:{port}"),
+        ));
+
+        if !health.state.is_running() {
+            return Err(Error::StartupFailed {
+                core: target.as_str().to_string(),
+                reason: format!("health check reported {}", health.state),
+            });
+        }
+
+        self.persist(Some(target), health.pid, Some(port)).await?;
+
+        Ok(SwitchReport {
+            target,
+            previous,
+            steps,
+            config: Some(config),
+        })
+    }
+
+    pub async fn install(
+        &self,
+        kind: CoreKind,
+        options: &InstallOptions,
+    ) -> Result<InstalledBinary> {
+        let installed = self.binaries.install(kind, options).await?;
+        // Register immediately so that a long-lived host (the future GUI) does
+        // not need a restart after installing a core.
+        let core = build_core(kind, installed.path.clone(), self.logs.clone(), &self.layout);
+        self.cores_write().insert(kind, core);
+        Ok(installed)
+    }
+
+    pub fn config_path_for(&self, kind: CoreKind) -> Option<PathBuf> {
+        let dir = self.layout.core_config_dir(kind.as_str());
+        let path = bootstrap::config_path_for(&dir, kind);
+        path.is_file().then_some(path)
+    }
+
+    /// Core recorded as active in the persisted state (may not be running).
+    pub async fn persisted_active(&self) -> Option<CoreKind> {
+        self.persisted.lock().await.active_core
+    }
+
+    fn prepare_config(&self, kind: CoreKind, core: &Arc<dyn ProxyCore>) -> Result<PathBuf> {
+        let dir = self.layout.core_config_dir(kind.as_str());
+        std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
+        let path = bootstrap::config_path_for(&dir, kind);
+        let text = core.bootstrap_config(self.api_port, &self.log_level);
+        std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+        Ok(path)
+    }
+
+    fn core(&self, kind: CoreKind) -> Result<Arc<dyn ProxyCore>> {
+        self.cores_read()
+            .get(&kind)
+            .cloned()
+            .ok_or_else(|| Error::BinaryNotFound {
+                core: kind.as_str().to_string(),
+                hint: format!(
+                    "run `triproxy core install {kind}` or set {}",
+                    kind.bin_env_var()
+                ),
+            })
+    }
+
+    async fn running_core_except(&self, excluded: CoreKind) -> Option<CoreKind> {
+        for kind in CoreKind::ALL {
+            if kind == excluded {
+                continue;
+            }
+            let core = self.cores_read().get(&kind).cloned();
+            if let Some(core) = core {
+                if core
+                    .health_check()
+                    .await
+                    .map(|h| h.state.is_running())
+                    .unwrap_or(false)
+                {
+                    return Some(kind);
+                }
+            }
+        }
+        None
+    }
+
+    async fn running_core(&self) -> Option<CoreKind> {
+        for kind in CoreKind::ALL {
+            let core = self.cores_read().get(&kind).cloned();
+            if let Some(core) = core {
+                if core
+                    .health_check()
+                    .await
+                    .map(|h| h.state.is_running())
+                    .unwrap_or(false)
+                {
+                    return Some(kind);
+                }
+            }
+        }
+        None
+    }
+
+    async fn load_state(&self) -> PersistedState {
+        let path = self.layout.state_file();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+            Err(_) => PersistedState::default(),
+        }
+    }
+
+    async fn persist(
+        &self,
+        active: Option<CoreKind>,
+        pid: Option<u32>,
+        listen_port: Option<u16>,
+    ) -> Result<()> {
+        let binary = active.and_then(|kind| {
+            self.cores_read()
+                .get(&kind)
+                .map(|core| core.binary_path().to_path_buf())
+        });
+        let state = PersistedState {
+            active_core: active,
+            pid,
+            binary,
+            listen_port,
+            updated_at_ms: now_ms(),
+        };
+        self.write_state(state).await
+    }
+
+    async fn write_state(&self, state: PersistedState) -> Result<()> {
+        let path = self.layout.state_file();
+        let text = serde_json::to_string_pretty(&state)?;
+        std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+        *self.persisted.lock().await = state;
+        Ok(())
+    }
+
+    fn cores_read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<CoreKind, Arc<dyn ProxyCore>>> {
+        self.cores.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn cores_write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<CoreKind, Arc<dyn ProxyCore>>> {
+        self.cores.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+fn build_core(kind: CoreKind, path: PathBuf, logs: Arc<LogBuffer>, layout: &Layout) -> Arc<dyn ProxyCore> {
+    let log_file = Some(layout.core_log_file(kind.as_str()));
+    match kind {
+        CoreKind::Mihomo => adapters::mihomo::new(path, logs, log_file),
+        CoreKind::SingBox => adapters::singbox::new(path, logs, log_file),
+        CoreKind::Xray => adapters::xray::new(path, logs, log_file),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_layout(name: &str) -> Layout {
+        let root = std::env::temp_dir().join(format!("triproxy-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        Layout::new(root)
+    }
+
+    #[tokio::test]
+    async fn manager_without_binaries_reports_all_cores_stopped() {
+        let layout = temp_layout("no-bin");
+        // Make sure no PATH/env override leaks in from the host.
+        for kind in CoreKind::ALL {
+            std::env::remove_var(kind.bin_env_var());
+        }
+        let manager = CoreManager::new(layout).unwrap();
+        let status = manager.status().await;
+        assert!(status.exclusive);
+        assert_eq!(status.cores.len(), 3);
+        assert!(status.active_core.is_none());
+        assert!(status.cores.iter().all(|c| c.state == CoreState::Stopped));
+    }
+
+    #[tokio::test]
+    async fn starting_a_core_without_a_binary_fails_with_a_hint() {
+        let layout = temp_layout("missing-bin");
+        let manager = CoreManager::new(layout).unwrap();
+        let err = manager.start(CoreKind::Xray).await.unwrap_err();
+        match err {
+            Error::BinaryNotFound { hint, .. } => assert!(hint.contains("core install xray")),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn recover_clears_a_dead_pid() {
+        let layout = temp_layout("recover");
+        layout.ensure().unwrap();
+        // A PID that cannot exist.
+        std::fs::write(
+            layout.state_file(),
+            r#"{"active_core":"xray","pid":4294967290,"binary":null,"listen_port":7890,"updated_at_ms":0}"#,
+        )
+        .unwrap();
+
+        let manager = CoreManager::new(layout).unwrap();
+        let report = manager.recover().await.unwrap();
+        assert_eq!(report.previous_active, Some(CoreKind::Xray));
+        assert!(report.stale_state_cleared);
+        assert!(report.adopted.is_none());
+
+        let text = std::fs::read_to_string(manager.layout().state_file()).unwrap();
+        let state: PersistedState = serde_json::from_str(&text).unwrap();
+        assert!(state.pid.is_none());
+        assert!(state.active_core.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_with_nothing_running_is_a_noop() {
+        let layout = temp_layout("stop-noop");
+        let manager = CoreManager::new(layout).unwrap();
+        let stopped = manager.stop().await.unwrap();
+        assert!(stopped.is_empty());
+    }
+}

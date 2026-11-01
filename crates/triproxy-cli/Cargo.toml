@@ -1,0 +1,24 @@
+[package]
+name = "triproxy-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "TriProxy command line interface (Phase 1 core manager)."
+
+[[bin]]
+name = "triproxy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+triproxy-core = { path = "../triproxy-core" }

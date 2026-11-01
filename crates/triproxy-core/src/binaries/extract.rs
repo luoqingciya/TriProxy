@@ -1,0 +1,195 @@
+use std::io::{Cursor, Read};
+
+use crate::error::{Error, Result};
+
+/// Extract the core executable out of a release archive.
+///
+/// The three projects ship three different container formats:
+/// - Mihomo on Windows: `.zip`, on Linux/macOS: a gzipped raw binary (`.gz`)
+/// - sing-box: `.zip` on Windows, `.tar.gz` elsewhere
+/// - Xray: `.zip` everywhere
+pub fn extract_binary(asset_name: &str, bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
+    let name = asset_name.to_ascii_lowercase();
+    if name.ends_with(".zip") {
+        extract_from_zip(bytes, stem)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        extract_from_tar_gz(bytes, stem)
+    } else if name.ends_with(".gz") {
+        extract_from_gz(bytes)
+    } else {
+        Ok(bytes.to_vec())
+    }
+}
+
+/// Does this archive entry look like the core executable?
+///
+/// Exact stems are not enough: releases ship platform-prefixed names such as
+/// `mihomo-windows-amd64-compatible.exe` and
+/// `sing-box-1.11.15-windows-amd64.exe` inside their archives.
+fn is_target_file(file_name: &str, stem: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    let stem = stem.to_ascii_lowercase();
+
+    let (base, extension) = match lower.rsplit_once('.') {
+        Some((base, extension)) => (base, Some(extension)),
+        None => (lower.as_str(), None),
+    };
+    if !matches!(extension, None | Some("exe")) {
+        return false;
+    }
+
+    base == stem || base.starts_with(&format!("{stem}-"))
+}
+
+fn extract_from_zip(bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| Error::Other(format!("invalid zip archive: {e}")))?;
+
+    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let target = names
+        .iter()
+        .find(|name| {
+            name.rsplit(['/', '\\'])
+                .next()
+                .map(|file_name| is_target_file(file_name, stem))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "`{stem}` not found in zip archive (contains: {})",
+                names.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+
+    let mut file = archive
+        .by_name(&target)
+        .map_err(|e| Error::Other(format!("cannot read `{target}` from zip: {e}")))?;
+    let mut buffer = Vec::with_capacity(file.size() as usize);
+    file.read_to_end(&mut buffer)
+        .map_err(|e| Error::Other(format!("cannot extract `{target}`: {e}")))?;
+    Ok(buffer)
+}
+
+fn extract_from_tar_gz(bytes: &[u8], stem: &str) -> Result<Vec<u8>> {
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|e| Error::Other(format!("invalid tar archive: {e}")))?;
+
+    for entry in entries {
+        let mut entry = entry.map_err(|e| Error::Other(format!("invalid tar entry: {e}")))?;
+        let path = entry
+            .path()
+            .map_err(|e| Error::Other(format!("invalid tar path: {e}")))?
+            .to_path_buf();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if is_target_file(file_name, stem) {
+            let mut buffer = Vec::new();
+            entry
+                .read_to_end(&mut buffer)
+                .map_err(|e| Error::Other(format!("cannot extract `{stem}`: {e}")))?;
+            return Ok(buffer);
+        }
+    }
+
+    Err(Error::Other(format!(
+        "`{stem}` not found in tar.gz archive"
+    )))
+}
+
+fn extract_from_gz(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut buffer = Vec::new();
+    decoder
+        .read_to_end(&mut buffer)
+        .map_err(|e| Error::Other(format!("invalid gzip stream: {e}")))?;
+    Ok(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buffer = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default();
+            for (name, content) in files {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(content).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        buffer.into_inner()
+    }
+
+    #[test]
+    fn zip_extraction_finds_nested_binary() {
+        let archive = build_zip(&[
+            ("LICENSE", b"license text".as_slice()),
+            ("nested/xray.exe", b"binary bytes".as_slice()),
+        ]);
+        let extracted = extract_binary("Xray-windows-64.zip", &archive, "xray").unwrap();
+        assert_eq!(extracted, b"binary bytes");
+    }
+
+    #[test]
+    fn zip_extraction_reports_missing_binary() {
+        let archive = build_zip(&[("readme.txt", b"hi".as_slice())]);
+        let err = extract_binary("Xray-windows-64.zip", &archive, "xray").unwrap_err();
+        assert!(err.to_string().contains("not found in zip archive"));
+    }
+
+    #[test]
+    fn gz_extraction_returns_raw_binary() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"mihomo binary").unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let extracted = extract_binary("mihomo-linux-amd64-v1.19.12.gz", &compressed, "mihomo").unwrap();
+        assert_eq!(extracted, b"mihomo binary");
+    }
+
+    #[test]
+    fn zip_extraction_matches_platform_prefixed_names() {
+        // The real mihomo archive ships exactly this name.
+        let archive = build_zip(&[
+            ("LICENSE", b"license".as_slice()),
+            ("mihomo-windows-amd64-compatible.exe", b"meta binary".as_slice()),
+        ]);
+        let extracted = extract_binary(
+            "mihomo-windows-amd64-compatible-v1.19.33.zip",
+            &archive,
+            "mihomo",
+        )
+        .unwrap();
+        assert_eq!(extracted, b"meta binary");
+    }
+
+    #[test]
+    fn zip_extraction_ignores_non_executables_with_similar_names() {
+        let archive = build_zip(&[
+            ("xray-notes.txt", b"notes".as_slice()),
+            ("xray.exe", b"real".as_slice()),
+        ]);
+        let extracted = extract_binary("Xray-windows-64.zip", &archive, "xray").unwrap();
+        assert_eq!(extracted, b"real");
+    }
+
+    #[test]
+    fn plain_bytes_pass_through() {
+        let extracted = extract_binary("sing-box", b"raw".as_slice(), "sing-box").unwrap();
+        assert_eq!(extracted, b"raw");
+    }
+}

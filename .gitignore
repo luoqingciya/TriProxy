@@ -1,0 +1,19 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# Node (added in Phase 5 when the Tauri frontend lands)
+/node_modules
+/dist
+/.vite
+
+# Local test data
+/.tmp
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

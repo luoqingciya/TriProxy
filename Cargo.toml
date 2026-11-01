@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = ["crates/triproxy-core", "crates/triproxy-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "GPL-3.0-or-later"
+authors = ["luoqingci"]
+repository = "https://github.com/luoqingciya/TriProxy"
+description = "A modern multi-core proxy client: unified lifecycle management for Mihomo, sing-box and Xray."
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+flate2 = "1"
+futures-util = "0.3"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "time",
+    "sync",
+    "io-util",
+    "fs",
+    "net",
+    "signal",
+] }
+time = { version = "0.3", features = ["local-offset"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
