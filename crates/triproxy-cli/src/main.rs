@@ -22,8 +22,8 @@ use triproxy_core::binaries::InstallOptions;
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
-    parse_payload, CoreKind, CoreManager, CoreReport, Diagnostic, Layout, ManagerStatus, Node,
-    SwitchReport,
+    compile, parse_payload, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport,
+    Diagnostic, Layout, ManagerStatus, Node, SwitchReport,
 };
 
 #[derive(Parser)]
@@ -63,6 +63,9 @@ enum Command {
     Start {
         /// mihomo | sing-box | xray
         core: Option<String>,
+        /// Compile this profile for the core instead of using the bootstrap config
+        #[arg(long, value_name = "PATH")]
+        profile: Option<PathBuf>,
     },
     /// Stop whatever core is running
     Stop,
@@ -72,6 +75,9 @@ enum Command {
     Switch {
         /// mihomo | sing-box | xray
         core: String,
+        /// Compile this profile for the core instead of using the bootstrap config
+        #[arg(long, value_name = "PATH")]
+        profile: Option<PathBuf>,
     },
     /// Show captured core logs
     Logs {
@@ -106,6 +112,23 @@ enum ProfileCommand {
         /// File path, or `-` to read stdin
         source: String,
         /// Print the parsed profile as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compile a profile into a core-native config
+    Compile {
+        /// File path, or `-` to read stdin
+        source: String,
+        /// Target core: mihomo | sing-box | xray
+        #[arg(long)]
+        core: String,
+        /// Write the config to this file instead of stdout
+        #[arg(short = 'o', long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Let the core validate the generated config before returning
+        #[arg(long)]
+        check: bool,
+        /// Print a summary as JSON instead of the config
         #[arg(long)]
         json: bool,
     },
@@ -200,10 +223,12 @@ async fn run(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::Status => cmd_status(&manager, cli.json).await,
         Command::Cores => cmd_cores(&manager, cli.json).await,
-        Command::Start { core } => cmd_start(&manager, core.as_deref()).await,
+        Command::Start { core, profile } => {
+            cmd_start(&manager, core.as_deref(), profile.as_deref()).await
+        }
         Command::Stop => cmd_stop(&manager).await,
         Command::Restart => cmd_restart(&manager).await,
-        Command::Switch { core } => cmd_switch(&manager, &core).await,
+        Command::Switch { core, profile } => cmd_switch(&manager, &core, profile.as_deref()).await,
         Command::Logs {
             lines,
             core,
@@ -233,6 +258,13 @@ async fn run(cli: Cli) -> Result<i32> {
         },
         Command::Profile { command } => match command {
             ProfileCommand::Parse { source, json } => cmd_profile_parse(&source, json),
+            ProfileCommand::Compile {
+                source,
+                core,
+                output,
+                check,
+                json,
+            } => cmd_profile_compile(&manager, &source, &core, output, check, json).await,
             ProfileCommand::Check { source, json } => cmd_profile_check(&source, json),
         },
         Command::Doctor => cmd_doctor(&manager).await,
@@ -263,13 +295,26 @@ async fn cmd_cores(manager: &CoreManager, json: bool) -> Result<i32> {
     Ok(0)
 }
 
-async fn cmd_start(manager: &CoreManager, core: Option<&str>) -> Result<i32> {
+async fn cmd_start(
+    manager: &CoreManager,
+    core: Option<&str>,
+    profile: Option<&Path>,
+) -> Result<i32> {
     let kind = match core {
         Some(name) => parse_core(name)?,
         None => resolve_default_core(manager).await?,
     };
 
-    let report = manager.start(kind).await?;
+    let report = match profile {
+        Some(path) => {
+            let compiled = compile_profile(path, kind)?;
+            manager
+                .start_with_config(kind, &compiled.text, compiled.file_name)
+                .await?
+        }
+        None => manager.start(kind).await?,
+    };
+
     if report.already_running {
         println!("{} is already running", kind);
         return Ok(0);
@@ -313,9 +358,17 @@ async fn cmd_restart(manager: &CoreManager) -> Result<i32> {
     Ok(0)
 }
 
-async fn cmd_switch(manager: &CoreManager, core: &str) -> Result<i32> {
+async fn cmd_switch(manager: &CoreManager, core: &str, profile: Option<&Path>) -> Result<i32> {
     let kind = parse_core(core)?;
-    let report = manager.switch(kind).await?;
+    let report = match profile {
+        Some(path) => {
+            let compiled = compile_profile(path, kind)?;
+            manager
+                .switch_with_config(kind, &compiled.text, compiled.file_name)
+                .await?
+        }
+        None => manager.switch(kind).await?,
+    };
     print_switch_report(&report);
     Ok(0)
 }
@@ -514,6 +567,78 @@ fn cmd_profile_check(source: &str, json: bool) -> Result<i32> {
     );
     print_diagnostics(&parsed.diagnostics);
     Ok(code)
+}
+
+/// Read, parse and compile a profile for one core, reporting skipped nodes.
+fn compile_profile(path: &Path, kind: CoreKind) -> Result<CompiledConfig> {
+    let label = path.display().to_string();
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {label}"))?;
+    let parsed = parse_payload(&text, &profile_name_from_source(&label), &label);
+    let compiled = compile(kind, &parsed.profile, &CompileOptions::default())
+        .map_err(|error| anyhow!("{error}"))?;
+    for skipped in &compiled.skipped {
+        eprintln!("skipped `{}`: {}", skipped.name, skipped.reason);
+    }
+    Ok(compiled)
+}
+
+async fn cmd_profile_compile(
+    manager: &CoreManager,
+    source: &str,
+    core: &str,
+    output: Option<PathBuf>,
+    check: bool,
+    json: bool,
+) -> Result<i32> {
+    let kind = parse_core(core)?;
+    let (text, label) = read_profile_source(source)?;
+    let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
+    let compiled = compile(kind, &parsed.profile, &CompileOptions::default())
+        .map_err(|error| anyhow!("{error}"))?;
+
+    if check {
+        manager
+            .validate_config(kind, &compiled.text, compiled.file_name)
+            .await?;
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "core": kind.as_str(),
+            "file": compiled.file_name,
+            "included": compiled.included,
+            "skipped": compiled.skipped,
+            "checked": check,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    match &output {
+        Some(path) => {
+            std::fs::write(path, &compiled.text)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            println!(
+                "wrote {} — {} nodes for {}{}",
+                path.display(),
+                compiled.included.len(),
+                kind,
+                if check { ", validated" } else { "" }
+            );
+            for skipped in &compiled.skipped {
+                println!("  skipped {}: {}", skipped.name, skipped.reason);
+            }
+        }
+        None => {
+            // Config on stdout so it can be piped; notes on stderr.
+            print!("{}", compiled.text);
+            for skipped in &compiled.skipped {
+                eprintln!("skipped {}: {}", skipped.name, skipped.reason);
+            }
+        }
+    }
+
+    Ok(0)
 }
 
 async fn cmd_doctor(manager: &CoreManager) -> Result<i32> {
