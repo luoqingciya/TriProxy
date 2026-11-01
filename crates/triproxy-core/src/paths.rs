@@ -155,10 +155,19 @@ pub fn binary_in(dir: &Path, stem: &str) -> PathBuf {
 /// records) in `cores/` beside the binary, so that build works offline with no
 /// Adopt `<exe dir>/data` if it exists or can be created.
 ///
-/// Returning `None` means the portable layout is not usable here — a binary in
-/// a read-only location, for instance — and the caller falls back to the
-/// platform data directory.
+/// **Windows only.** An installed Windows application is expected to keep
+/// everything in one folder, and the installer grants the Users group write
+/// access so the bundled CLI can use it from an ordinary terminal.
+///
+/// macOS and Linux deliberately do not do this. A `.app` is a sealed bundle and
+/// an AppImage is a read-only mount; writing application state inside either is
+/// wrong on those platforms, and the platform data directory is what users and
+/// backup tools expect.
 fn portable_root() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
     let root = dir.join("data");
@@ -197,7 +206,9 @@ fn migrate_from_legacy(root: &Path) {
         ),
         // Not fatal: the app works with an empty root, and the old data is still
         // where it was.
-        Err(error) => tracing::warn!(error = %error, "could not migrate the previous data directory"),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not migrate the previous data directory")
+        }
     }
 }
 
@@ -218,6 +229,20 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 /// first-run download. Nothing is ever written here at runtime — updates always
 /// go to the managed `bin/` directory, which takes precedence.
 pub fn bundled_core_dir() -> Option<PathBuf> {
+    // Set by the desktop shell from its own resource directory. Needed because
+    // the location differs per platform and cannot be derived from the
+    // executable path alone: on macOS the cores live in
+    // `TriProxy.app/Contents/Resources/cores`, and a Linux `.deb` installs them
+    // under `/usr/lib/triproxy/cores`.
+    if let Some(explicit) = std::env::var_os("TRIPROXY_BUNDLED_CORES") {
+        if !explicit.is_empty() {
+            let dir = PathBuf::from(explicit);
+            if dir.is_dir() {
+                return Some(dir);
+            }
+        }
+    }
+
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join("cores"))
 }

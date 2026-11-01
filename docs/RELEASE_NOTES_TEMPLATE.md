@@ -57,22 +57,34 @@ Controls v6 的依赖声明**。没有它，Windows 加载的是旧版 comctl32�
 
 ## 下载哪一个？
 
-发布里只有桌面安装包，两个变体：
+每个平台都提供桌面安装包，两个变体：
 
-| 包 | 内容 | 适用 |
+| 变体 | 内容 | 适用 |
 |---|---|---|
-| `TriProxy_<版本>_x64-setup-lite.exe` | 图形界面 + `triproxy.exe`，不含核心 | 首次运行会联网下载核心 |
-| `TriProxy_<版本>_x64-setup-full.exe` | 同上 + `cores/` 内三个已校验的核心 | 开箱即用，首次运行无需联网 |
+| `*-lite` | 图形界面 + 命令行，不含核心 | 首次运行会联网下载核心 |
+| `*-full` | 同上 + `cores/` 内三个已校验的核心 | 开箱即用，首次运行无需联网 |
 
-双击安装，装到 `C:\Program Files\TriProxy`，装完在开始菜单里。
+| 平台 | 文件 | 安装方式 |
+|---|---|---|
+| Windows | `TriProxy_<版本>_x64-{lite,full}.exe` | 双击安装到 `C:\Program Files\TriProxy` |
+| macOS (Apple Silicon) | `TriProxy_<版本>_aarch64-{lite,full}.dmg` | 打开后拖进「应用程序」 |
+| Linux | `TriProxy_<版本>_amd64-{lite,full}.AppImage` / `.deb` | AppImage 加执行权限直接运行；deb 用包管理器安装 |
 
-- **所有数据都在安装目录下的 `data\`**（配置、日志、下载的核心）。卸载时会一并删除，
-  需要保留请先备份该目录
-- **命令行也在同一个包里**：安装目录下的 `triproxy.exe`，与图形界面共用同一份数据
-- 启动时请求管理员权限：TUN 模式需要
+**命令行都在同一个包里**，与图形界面共用同一份数据，不需要单独下载。
 
-> 安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」。
-> 点「更多信息 → 仍要运行」即可。
+### 数据放在哪里
+
+| 平台 | 位置 | 说明 |
+|---|---|---|
+| Windows | `<安装目录>\data` | 整个应用一个文件夹；卸载会一并删除 |
+| macOS | `~/Library/Application Support/TriProxy` | `.app` 是密封包，不应写入 |
+| Linux | `~/.local/share/TriProxy` | 遵循 XDG 约定 |
+
+Windows 上首次启动会把旧版 `%APPDATA%\TriProxy` 的数据自动迁移过来。
+
+> 安装包未做代码签名：
+> - Windows SmartScreen 提示「未知发布者」→ 点「更多信息 → 仍要运行」
+> - macOS 首次打开提示「无法验证开发者」→ 右键点图标选「打开」
 
 `full` 版的核心由 CI 通过 TriProxy 自身的下载与校验流程获取，SHA256 与上游 Release
 一致，未经修改。程序优先使用用户自行安装的更新版本（`triproxy core install`），
@@ -80,12 +92,6 @@ Controls v6 的依赖声明**。没有它，Windows 加载的是旧版 comctl32�
 
 随包核心是独立作品，许可文本在 `cores/LICENSE-<core>.txt`，版本、来源与对应源码地址
 见 `cores/THIRD-PARTY-NOTICES.txt`。
-
-### macOS / Linux
-
-**本版暂不提供。** 这两个平台的桌面构建还需要单独适配——macOS 的 .app 把资源放在
-`Contents/Resources` 而不是可执行文件旁边，与本版「数据全部在安装目录」的布局冲突。
-与其发一个找不到自己数据的包，不如不发；适配完成后会单独提供。
 
 ## 首次运行
 
