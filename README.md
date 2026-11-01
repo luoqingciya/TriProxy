@@ -249,6 +249,8 @@ specialisation; eliminated: xray (TUN)
 
 ## 桌面客户端（Phase 5）
 
+![仪表盘](docs/screenshots/dashboard.png)
+
 ```bash
 npm install
 npm run tauri dev        # 开发模式（自动启动 Vite + 桌面窗口）
