@@ -26,18 +26,20 @@ env:
 
 jobs:
   build:
-    name: build (${{ matrix.target }})
+    name: cli (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       # Native runners only: `triproxy core install` downloads cores for the
       # host platform, so cross-compiling would bundle the wrong architecture.
       # macOS Intel is intentionally out of scope (see README).
+      #
+      # Windows is not here: it ships desktop installers instead, which contain
+      # the CLI. macOS and Linux have no desktop build yet, so they keep the
+      # command-line archives — removing them without a replacement would leave
+      # those platforms with nothing to download.
       matrix:
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            pack: zip
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             pack: tar
@@ -270,10 +272,13 @@ jobs:
           if-no-files-found: error
 
   # The desktop shell is a separate deliverable: the `build` job ships the CLI,
-  # this one ships the GUI installer. Without it the release contained no
-  # runnable application at all — only archives of a command-line tool.
+  # Windows ships the desktop application, in two variants:
+  #   lite — GUI + CLI, no cores (downloaded on first run)
+  #   full — GUI + CLI + the three verified cores, ready offline
+  # The CLI is inside both, so there is no separate command-line download for
+  # Windows: one artifact per variant, and it is the one people can install.
   desktop:
-    name: desktop (windows installer)
+    name: desktop (windows, lite + full)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -289,25 +294,74 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # `tauri build` runs `beforeBuildCommand` (npm run build) itself, so the
-      # frontend is built as part of this step.
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build NSIS installer
-        run: npx tauri build --bundles nsis
+      # The installer bundles the CLI, so it has to exist before bundling.
+      - name: Build the CLI
+        run: cargo build --release -p triproxy-cli
 
-      - name: Verify the installer exists
+      - name: Stage the CLI as a bundle resource
         shell: bash
         run: |
           set -euo pipefail
-          ls -l src-tauri/target/release/bundle/nsis/
-          test -n "$(ls src-tauri/target/release/bundle/nsis/*.exe)"
+          mkdir -p src-tauri/resources
+          cp target/release/triproxy.exe src-tauri/resources/triproxy.exe
+          ls -l src-tauri/resources/
+
+      - name: Build lite installer
+        run: npx tauri build --bundles nsis
+
+      - name: Keep the lite installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cp src-tauri/target/release/bundle/nsis/*.exe \
+             "dist/TriProxy_${version}_x64-setup-lite.exe"
+          ls -l dist/
+
+      # Cores are fetched through TriProxy's own verified download path, so the
+      # SHA256 in the bundle matches the upstream release.
+      - name: Stage the cores for the full variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/core-stage"
+          for core in mihomo sing-box xray; do
+            ./target/release/triproxy.exe core install "$core" --data-dir "$stage"
+          done
+          mkdir -p src-tauri/resources/cores
+          cp "$stage"/bin/*.exe "$stage"/bin/*.dat src-tauri/resources/cores/ 2>/dev/null || true
+          ls -l src-tauri/resources/cores/
+
+      - name: Build full installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tauri build --bundles nsis \
+            --config '{"bundle":{"resources":{"resources/triproxy.exe":"triproxy.exe","resources/cores":"cores"}}}'
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          cp src-tauri/target/release/bundle/nsis/*.exe \
+             "dist/TriProxy_${version}_x64-setup-full.exe"
+          ls -l dist/
+
+      - name: Verify both installers exist and differ in size
+        shell: bash
+        run: |
+          set -euo pipefail
+          lite=$(stat -c%s dist/*-lite.exe)
+          full=$(stat -c%s dist/*-full.exe)
+          echo "lite=$lite full=$full"
+          # The full build carries ~180 MB of cores; if the two are the same
+          # size the resource override silently did nothing.
+          test "$full" -gt "$lite"
 
       - uses: actions/upload-artifact@v4
         with:
           name: triproxy-desktop-windows
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: dist/*.exe
           if-no-files-found: error
 
   release:

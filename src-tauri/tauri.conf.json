@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TriProxy",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "identifier": "cn.luoqingciya.triproxy",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,10 +27,18 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "dmg", "appimage", "deb"],
+    "targets": [
+      "nsis",
+      "dmg",
+      "appimage",
+      "deb"
+    ],
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerHooks": "installer-hooks.nsh",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
       }
     },
     "icon": [
@@ -42,6 +50,9 @@
     ],
     "category": "Utility",
     "shortDescription": "三核代理客户端",
-    "longDescription": "TriProxy 统一管理 Mihomo、sing-box 与 Xray 三个核心，自动选择最合适的核心。"
+    "longDescription": "TriProxy 统一管理 Mihomo、sing-box 与 Xray 三个核心，自动选择最合适的核心。",
+    "resources": {
+      "resources/triproxy.exe": "triproxy.exe"
+    }
   }
 }
