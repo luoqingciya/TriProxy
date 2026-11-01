@@ -36,6 +36,7 @@
 | **Phase 6** | **系统代理** | **已完成（Windows 实测，macOS/Linux 待验证）** |
 | **Phase 7** | **TUN 模式** | **已完成（管理员实测：网卡与路由在崩溃后均被清理）** |
 | **Phase 8** | **DNS** | **已完成（三核心 × 三模式全部通过校验；未改系统 DNS，理由见文档）** |
+| **Phase 9** | **订阅** | **已完成（URL 导入 / 条件请求缓存 / 错误恢复；无后台定时器）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -272,6 +273,18 @@ specialisation; eliminated: xray (TUN)
 **随包核心只读**：`cores/` 目录由发行包提供，程序运行时从不写入；所有安装与更新都进 `bin/`。
 
 ---
+
+## 订阅（Phase 9）
+
+```bash
+triproxy profile add https://example.com/sub --name jp-sub --use   # URL 即订阅
+triproxy profile refresh jp-sub      # 手动刷新（304 时不做无谓重解析）
+triproxy profile refresh --all       # 刷新全部
+```
+
+- **缓存走条件请求**：`ETag` / `Last-Modified` 随订阅存盘，下次带 `If-None-Match`，服务端回 304 就跳过。
+- **刷新失败不毁数据**：只记录 `last_error`，已存的节点原样保留，退出码为 1。
+- **自动更新只在显式调用时发生**（`--interval` 记录到期时间，`refresh --all` 只刷到期的）。没有后台常驻定时器。
 
 ## DNS（Phase 8）
 

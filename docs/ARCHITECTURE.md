@@ -660,7 +660,52 @@ ERROR[0000] missing `route.default_domain_resolver`
 
 三核心 × 三模式共 9 种组合（含 `off`），全部通过各自核心的 `check` / `-t` 校验。
 
-## 14. 尚未实现（明确的边界）
+## 14. Phase 9 — 订阅
+
+### 14.1 一条铁律：刷新失败不能毁掉已有的东西
+
+服务商会挂、URL 会过期、网络会抖。因为一次请求超时就把用户能用的节点列表清空，
+是这类功能最糟糕的失败方式。所以：
+
+- **首次导入必须成功**——没有旧数据可退，存一份空配置比报错更糟；
+- **刷新失败只记录错误**——`last_error` 写进订阅状态，profile 一个字节都不动；
+- **失败也推进时间戳**——否则每次启动都会反复捶一个已经挂掉的服务器。
+
+实测（本地 HTTP 服务器）：
+
+```text
+刷新失败 → `demo` — refresh failed: cannot reach http://127.0.0.1:18080/sub
+          the stored profile is unchanged
+          exit=1
+之后 `profile show demo` → 3 nodes，完好
+记录里 → last_error 已写入，last_fetch_ms 已推进
+```
+
+### 14.2 缓存靠条件请求，不是靠时间
+
+订阅里的节点列表很少变，每次启动重新下载一兆再丢掉，既慢又对服务商不礼貌。
+`ETag` 与 `Last-Modified` 随订阅一起存盘，下次请求带上 `If-None-Match` / `If-Modified-Since`；
+服务端回 304 就只更新时间戳，不重新解析。
+
+实测：第二次刷新返回 304 → `unchanged (provider returned 304)`；
+服务端内容变更后 → `updated — 3 nodes`。
+
+### 14.3 记录身份与订阅状态分开存
+
+`StoredProfile::id` 在订阅刷新后不变（Phase 5 的设计），订阅状态作为 `Record` 的可选字段
+一起落盘。老记录没有这个字段也能正常加载（`#[serde(default)]`），不需要迁移。
+
+### 14.4 自动更新的触发点
+
+`Subscription::is_due()` 判断是否到期，`interval_secs = 0` 表示不自动更新。
+`refresh_due()` 只刷新到期的订阅；手动刷新（`profile refresh <name>` / GUI 的刷新按钮）
+不看间隔。
+
+**没有做后台常驻定时器**：CLI 每次调用都是独立进程，GUI 也没有常驻调度。
+自动更新目前发生在显式调用 `refresh --all` 时。真正的后台更新需要一个常驻进程或系统服务，
+那是另一个量级的工程，不在本阶段范围内——这一点写在这里，避免被当成已完成。
+
+## 15. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 

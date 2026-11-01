@@ -46,6 +46,13 @@ export interface ManagerStatus {
   cores: CoreReport[]
 }
 
+export interface Subscription {
+  url: string
+  interval_secs: number
+  last_fetch_ms: number
+  last_error?: string | null
+}
+
 export interface StoredProfile {
   id: string
   name: string
@@ -54,6 +61,7 @@ export interface StoredProfile {
   node_count: number
   content_id: string
   updated_at_ms: number
+  subscription?: Subscription | null
 }
 
 export interface ProfileLibrary {

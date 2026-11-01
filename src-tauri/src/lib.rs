@@ -70,6 +70,7 @@ pub fn run() {
             commands::import_profile,
             commands::set_active_profile,
             commands::delete_profile,
+            commands::refresh_profile,
             commands::settings,
             commands::save_settings,
             commands::preview_selection,

@@ -48,6 +48,12 @@ let library: ProfileLibrary = {
       node_count: 4,
       content_id: '837dc357d6deeb27',
       updated_at_ms: now - 1000 * 60 * 12,
+      subscription: {
+        url: 'https://example.com/api/v1/client/subscribe?token=demo',
+        interval_secs: 86400,
+        last_fetch_ms: now - 1000 * 60 * 12,
+        last_error: null,
+      },
     },
     {
       id: 'b2c3d4e5f6a7',
@@ -181,6 +187,8 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
     case 'set_active_profile':
       library = { ...library, active: String(args?.id) }
       return undefined as T
+    case 'refresh_profile':
+      return { kind: 'not_modified' } as T
     case 'delete_profile':
       library = {
         active: library.active === args?.id ? null : library.active,

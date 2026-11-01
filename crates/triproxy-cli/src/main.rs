@@ -24,8 +24,8 @@ use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, is_elevated, leftovers, parse_payload, CompileOptions, CompiledConfig, CoreKind,
     CoreManager, CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus, NetworkRequirements, Node,
-    ParsedProfile, Profile, ProfileStore, Selector, StoredProfile, SwitchReport,
-    SystemProxyManager,
+    ParsedProfile, Profile, ProfileStore, RefreshStatus, Selector, StoredProfile,
+    SubscriptionService, SwitchReport, SystemProxyManager,
 };
 
 #[derive(Parser)]
@@ -206,6 +206,9 @@ enum ProfileCommand {
         /// Make it the active profile
         #[arg(long = "use")]
         use_it: bool,
+        /// Auto-refresh interval in hours for a URL subscription (0 = never)
+        #[arg(long, value_name = "HOURS", default_value_t = 24)]
+        interval: u64,
     },
     /// List stored profiles
     List {
@@ -230,6 +233,17 @@ enum ProfileCommand {
     Use {
         /// Profile id or name
         target: String,
+    },
+    /// Refresh URL subscriptions
+    Refresh {
+        /// Profile id or name; omit with --all
+        target: Option<String>,
+        /// Refresh every subscription, due or not
+        #[arg(long)]
+        all: bool,
+        /// Print the results as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show the active profile
     Current {
@@ -453,11 +467,15 @@ async fn run(cli: Cli) -> Result<i32> {
                 source,
                 name,
                 use_it,
-            } => cmd_profile_add(&manager, &source, name, use_it),
+                interval,
+            } => cmd_profile_add(&manager, &source, name, use_it, interval).await,
             ProfileCommand::List { json } => cmd_profile_list(&manager, json),
             ProfileCommand::Show { target, json } => cmd_profile_show(&manager, &target, json),
             ProfileCommand::Remove { target } => cmd_profile_remove(&manager, &target),
             ProfileCommand::Use { target } => cmd_profile_use(&manager, &target),
+            ProfileCommand::Refresh { target, all, json } => {
+                cmd_profile_refresh(&manager, target.as_deref(), all, json).await
+            }
             ProfileCommand::Current { json } => cmd_profile_current(&manager, json),
         },
         Command::Doctor => cmd_doctor(&manager).await,
@@ -1126,18 +1144,42 @@ fn resolve_stored(store: &ProfileStore, key: &str) -> Result<StoredProfile> {
     bail!("no profile with id or name `{key}`")
 }
 
-fn cmd_profile_add(
+async fn cmd_profile_add(
     manager: &CoreManager,
     source: &str,
     name: Option<String>,
     use_it: bool,
+    interval_hours: u64,
 ) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+
+    // A URL is a subscription, not something to read from disk.
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let service = SubscriptionService::new(&store)?;
+        let name = name.unwrap_or_else(|| "subscription".to_string());
+        let saved = service
+            .add(source, &name, interval_hours.saturating_mul(3600))
+            .await?;
+
+        println!(
+            "subscribed `{}` — {} nodes ({})",
+            saved.name, saved.node_count, saved.id
+        );
+        if interval_hours > 0 {
+            println!("  auto refresh every {interval_hours}h");
+        }
+        if use_it {
+            store.set_active(Some(&saved.id))?;
+            println!("  active profile is now `{}`", saved.name);
+        }
+        return Ok(0);
+    }
+
     let (text, label) = read_profile_source(source)?;
     let name = name.unwrap_or_else(|| profile_name_from_source(source));
     let mut parsed = parse_payload(&text, &name, &label);
     parsed.profile.name = name.clone();
 
-    let store = ProfileStore::new(manager.layout());
     // Re-importing under an existing name updates that record instead of
     // creating a second entry with the same title.
     let existing = store.find_by_name(&name)?;
@@ -1169,6 +1211,78 @@ fn cmd_profile_add(
         println!("  active profile is now `{}`", saved.name);
     }
     Ok(0)
+}
+
+async fn cmd_profile_refresh(
+    manager: &CoreManager,
+    target: Option<&str>,
+    all: bool,
+    json: bool,
+) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let service = SubscriptionService::new(&store)?;
+
+    let outcomes = if all {
+        let mut outcomes = Vec::new();
+        for record in store.records()? {
+            if record.subscription.is_some() {
+                outcomes.push(service.refresh(&record.id).await?);
+            }
+        }
+        outcomes
+    } else {
+        let Some(target) = target else {
+            bail!("specify a profile id/name, or pass --all to refresh every subscription");
+        };
+        let stored = resolve_stored(&store, target)?;
+        vec![service.refresh(&stored.id).await?]
+    };
+
+    if outcomes.is_empty() {
+        println!("no subscriptions to refresh");
+        return Ok(0);
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "outcomes": outcomes.iter().map(|outcome| serde_json::json!({
+                "id": outcome.id,
+                "name": outcome.name,
+                "status": match &outcome.status {
+                    RefreshStatus::Updated { node_count } => serde_json::json!({
+                        "kind": "updated", "node_count": node_count
+                    }),
+                    RefreshStatus::NotModified => serde_json::json!({ "kind": "not_modified" }),
+                    RefreshStatus::Failed { error } => serde_json::json!({
+                        "kind": "failed", "error": error
+                    }),
+                },
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for outcome in &outcomes {
+            match &outcome.status {
+                RefreshStatus::Updated { node_count } => {
+                    println!("updated `{}` — {node_count} nodes", outcome.name)
+                }
+                RefreshStatus::NotModified => {
+                    println!("`{}` — unchanged (provider returned 304)", outcome.name)
+                }
+                RefreshStatus::Failed { error } => {
+                    println!("`{}` — refresh failed: {error}", outcome.name);
+                    println!("  the stored profile is unchanged");
+                }
+            }
+        }
+    }
+
+    // A failed refresh is worth a non-zero exit code so scripts can notice,
+    // even though the library is intact.
+    let failed = outcomes
+        .iter()
+        .any(|outcome| matches!(outcome.status, RefreshStatus::Failed { .. }));
+    Ok(if failed { 1 } else { 0 })
 }
 
 fn cmd_profile_list(manager: &CoreManager, json: bool) -> Result<i32> {
