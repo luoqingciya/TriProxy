@@ -27,6 +27,7 @@ description = "A modern multi-core proxy client: unified lifecycle management fo
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "6"
 flate2 = "1"
