@@ -270,8 +270,30 @@ enum CoreCommand {
     },
 }
 
+/// Switch the Windows console to UTF-8.
+///
+/// Rust writes UTF-8 bytes to stdout, but a Chinese-locale console defaults to
+/// code page 936 and renders them as mojibake. The CLI prints Chinese status
+/// text, so without this the output is unreadable on exactly the machines this
+/// project targets.
+#[cfg(windows)]
+fn use_utf8_console() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetConsoleOutputCP(code_page: u32) -> i32;
+    }
+    // SAFETY: one integer argument, no pointers, no lifetime concerns.
+    unsafe {
+        SetConsoleOutputCP(65001);
+    }
+}
+
+#[cfg(not(windows))]
+fn use_utf8_console() {}
+
 #[tokio::main]
 async fn main() {
+    use_utf8_console();
     init_tracing();
     let cli = Cli::parse();
     let code = match run(cli).await {
