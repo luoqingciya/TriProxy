@@ -10,6 +10,23 @@
 # PARTICULAR PURPOSE. See LICENSE for the full text.
 #
 # Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+#
+# Release pipeline.
+#
+# There is exactly one kind of artifact: a desktop installer. The command-line
+# tool is bundled inside it rather than published separately — users were
+# downloading archives that contained only a CLI and reasonably concluding the
+# project had no application at all.
+#
+# Two variants:
+#   lite — GUI + CLI, cores downloaded on first run
+#   full — GUI + CLI + three verified cores, works offline
+#
+# Windows only for now. macOS and Linux need platform-specific work before they
+# can ship: on macOS the bundle resources live in Contents/Resources rather than
+# beside the executable, which breaks the single-folder data layout this build
+# relies on. Shipping a desktop package that cannot find its own data would be
+# worse than shipping nothing.
 
 name: release
 
@@ -25,258 +42,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: cli (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      # Native runners only: `triproxy core install` downloads cores for the
-      # host platform, so cross-compiling would bundle the wrong architecture.
-      # macOS Intel is intentionally out of scope (see README).
-      #
-      # Windows is not here: it ships desktop installers instead, which contain
-      # the CLI. macOS and Linux have no desktop build yet, so they keep the
-      # command-line archives — removing them without a replacement would leave
-      # those platforms with nothing to download.
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            pack: tar
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            pack: tar
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
-
-      - name: Stage both variants
-        shell: bash
-        env:
-          # Unauthenticated api.github.com access is 60 req/hour per IP and
-          # runners share egress IPs, so the release pipeline must authenticate.
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          SUFFIX=""
-          if [ "${{ runner.os }}" = "Windows" ]; then SUFFIX=".exe"; fi
-          BIN="target/${{ matrix.target }}/release/triproxy${SUFFIX}"
-
-          # Variant 1 — "lite": binary only, cores are downloaded on first run.
-          LITE="dist/lite"
-          mkdir -p "$LITE"
-          cp "$BIN" "$LITE/"
-          cp README.md LICENSE NOTICE.md ADDITIONAL-TERMS.md "$LITE/"
-
-          # Variant 2 — "full": same binary plus verified cores in cores/.
-          # Downloading is done by TriProxy itself, so the same SHA256 checks
-          # that protect end users also protect the release pipeline.
-          FULL="dist/full"
-          mkdir -p "$FULL/cores"
-          cp "$BIN" "$FULL/"
-          cp README.md LICENSE NOTICE.md ADDITIONAL-TERMS.md "$FULL/"
-
-          DATA="$RUNNER_TEMP/triproxy-data"
-          for core in mihomo sing-box xray; do
-            "$BIN" core install "$core" --data-dir "$DATA"
-          done
-          cp -p "$DATA"/bin/* "$FULL/cores/"
-
-          echo "--- staged ---"
-          ls -l "$FULL/cores"
-
-      - name: Fetch upstream license texts for the bundled cores
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FULL="dist/full"
-
-          # Redistributing a binary requires shipping its license text. Fetch the
-          # exact text at the pinned tag, not from the default branch, so the
-          # license matches the bytes actually bundled.
-          fetch_license() {
-            local repo="$1" tag="$2" out="$3" name
-            for name in LICENSE LICENSE.txt LICENSE.md COPYING COPYING.txt; do
-              if curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
-                   "https://raw.githubusercontent.com/$repo/$tag/$name" -o "$out" \
-                 && [ -s "$out" ] && ! grep -q '^404: Not Found' "$out"; then
-                echo "  got $repo/$name at $tag"
-                return 0
-              fi
-            done
-            return 1
-          }
-
-          for core in mihomo sing-box xray; do
-            case "$core" in
-              mihomo)   repo="MetaCubeX/mihomo" ;;
-              sing-box) repo="SagerNet/sing-box" ;;
-              xray)     repo="XTLS/Xray-core" ;;
-            esac
-            tag=$(jq -r '.tag' "$FULL/cores/$core.json")
-            out="$FULL/cores/LICENSE-$core.txt"
-
-            echo "--- $core ($repo@$tag) ---"
-            if ! fetch_license "$repo" "$tag" "$out"; then
-              echo "::error::no license text found for $core at $tag; refusing to ship an unlicensed binary"
-              exit 1
-            fi
-            # Some projects ship a short GPL notice instead of the full text
-            # (sing-box: ~800 bytes), so only reject obvious non-licenses.
-            size=$(wc -c < "$out")
-            if [ "$size" -lt 200 ] || grep -qiE '<!DOCTYPE|<html' "$out"; then
-              echo "::error::license text for $core looks invalid ($size bytes)"
-              exit 1
-            fi
-            head -1 "$out"
-            echo "  $size bytes"
-          done
-
-          # sing-box points at the GPL instead of embedding it. Include the body
-          # once; it is the same document as this package's own LICENSE.
-          cp LICENSE "$FULL/cores/LICENSE-GPL-3.0.txt"
-
-      - name: Generate third-party notices for the bundled cores
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FULL="dist/full"
-          OUT="$FULL/cores/THIRD-PARTY-NOTICES.txt"
-
-          {
-            echo "TriProxy — bundled third-party proxy cores"
-            echo "=========================================="
-            echo
-            echo "This build of TriProxy ships the proxy cores listed below."
-            echo "Each core is an independent work under its own license and is"
-            echo "distributed unmodified. TriProxy only starts, stops and"
-            echo "supervises them."
-            echo
-            echo "Corresponding source for every core is available at the exact"
-            echo "tag listed here, from the upstream repository. No modifications"
-            echo "have been made to these binaries. The full license text of each"
-            echo "core is bundled next to it, as LICENSE-<core>.txt."
-            echo
-
-            for core in mihomo sing-box xray; do
-              REC="$FULL/cores/$core.json"
-              case "$core" in
-                mihomo)   repo="MetaCubeX/mihomo";  lic="GPL-3.0" ;;
-                sing-box) repo="SagerNet/sing-box"; lic="GPL-3.0-or-later" ;;
-                xray)     repo="XTLS/Xray-core";    lic="MPL-2.0" ;;
-              esac
-
-              tag=$(jq -r '.tag' "$REC")
-              ver=$(jq -r '.version' "$REC")
-              sha=$(jq -r '.sha256' "$REC")
-
-              echo "----------------------------------------------------------"
-              echo "$core $ver"
-              echo "  upstream: https://github.com/$repo"
-              echo "  license:  $lic"
-              echo "  source:   https://github.com/$repo/tree/$tag"
-              echo "  release:  https://github.com/$repo/releases/tag/$tag"
-              echo "  sha256:   $sha"
-              echo "  license:  see cores/LICENSE-$core.txt"
-              echo
-            done
-
-            echo "----------------------------------------------------------"
-            echo "The GNU GPL v3 full text is included as cores/LICENSE-GPL-3.0.txt"
-            echo "(identical to the top-level LICENSE of this package), because some"
-            echo "cores ship only a short GPL notice rather than the license body."
-            echo
-            echo "TriProxy itself is licensed GPL-3.0-or-later; see LICENSE"
-            echo "and ADDITIONAL-TERMS.md at the top level of this package."
-          } > "$OUT"
-
-          cat "$OUT"
-
-      - name: Smoke-test the bundled variant
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SUFFIX=""
-          if [ "${{ runner.os }}" = "Windows" ]; then SUFFIX=".exe"; fi
-          SMOKE="$RUNNER_TEMP/smoke"
-
-          # A fresh data directory proves the cores are discovered next to the
-          # executable rather than from any earlier install.
-          OUT=$(./dist/full/triproxy${SUFFIX} cores --data-dir "$SMOKE")
-          echo "$OUT"
-          echo "$OUT" | grep -q bundled
-
-          # Discovery is not enough: the shipped binaries must actually execute
-          # on this platform (wrong arch, missing exec bit, macOS signature).
-          # `doctor` runs each core's version probe and reports FAILED on error.
-          DOCTOR=$(./dist/full/triproxy${SUFFIX} doctor --data-dir "$SMOKE")
-          echo "$DOCTOR"
-          if echo "$DOCTOR" | grep -q "FAILED"; then
-            echo "::error::bundled cores are present but not executable on this runner"
-            exit 1
-          fi
-
-          # Licensing artefacts are part of the deliverable, so assert them.
-          for f in dist/lite/LICENSE dist/lite/ADDITIONAL-TERMS.md \
-                   dist/full/LICENSE dist/full/ADDITIONAL-TERMS.md \
-                   dist/full/NOTICE.md \
-                   dist/full/cores/THIRD-PARTY-NOTICES.txt; do
-            [ -s "$f" ] || { echo "::error::missing or empty: $f"; exit 1; }
-          done
-          for core in mihomo sing-box xray; do
-            f="dist/full/cores/LICENSE-$core.txt"
-            [ -s "$f" ] || { echo "::error::missing upstream license: $f"; exit 1; }
-            echo "  $f: $(wc -c < "$f") bytes"
-          done
-          [ -s dist/full/cores/LICENSE-GPL-3.0.txt ] \
-            || { echo "::error::missing the GPLv3 body in the bundle"; exit 1; }
-
-          echo "smoke: ok"
-
-      - name: Pack (Windows)
-        if: matrix.pack == 'zip'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist/lite/* -DestinationPath "triproxy-${{ matrix.target }}-lite.zip"
-          Compress-Archive -Path dist/full/* -DestinationPath "triproxy-${{ matrix.target }}-full.zip"
-
-      - name: Pack (Unix)
-        if: matrix.pack == 'tar'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -C dist/lite -czf "triproxy-${{ matrix.target }}-lite.tar.gz" .
-          tar -C dist/full -czf "triproxy-${{ matrix.target }}-full.tar.gz" .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: triproxy-${{ matrix.target }}
-          path: |
-            triproxy-${{ matrix.target }}-lite.*
-            triproxy-${{ matrix.target }}-full.*
-          if-no-files-found: error
-
-  # The desktop shell is a separate deliverable: the `build` job ships the CLI,
-  # Windows ships the desktop application, in two variants:
-  #   lite — GUI + CLI, no cores (downloaded on first run)
-  #   full — GUI + CLI + the three verified cores, ready offline
-  # The CLI is inside both, so there is no separate command-line download for
-  # Windows: one artifact per variant, and it is the one people can install.
   desktop:
     name: desktop (windows, lite + full)
     runs-on: windows-latest
@@ -309,22 +74,25 @@ jobs:
           cp target/release/triproxy.exe src-tauri/resources/triproxy.exe
           ls -l src-tauri/resources/
 
-      - name: Build lite installer
+      - name: Build the lite installer
         run: npx tauri build --bundles nsis
 
-      - name: Keep the lite installer
+      - name: Collect the lite installer
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          mkdir -p dist
           cp src-tauri/target/release/bundle/nsis/*.exe \
              "dist/TriProxy_${version}_x64-setup-lite.exe"
+          # Clear the bundle directory so the full build cannot be collected
+          # under the lite name.
+          rm -rf src-tauri/target/release/bundle
           ls -l dist/
 
       # Cores are fetched through TriProxy's own verified download path, so the
-      # SHA256 in the bundle matches the upstream release.
-      - name: Stage the cores for the full variant
+      # SHA256 recorded alongside them matches the upstream release.
+      - name: Stage the cores
         shell: bash
         run: |
           set -euo pipefail
@@ -333,10 +101,90 @@ jobs:
             ./target/release/triproxy.exe core install "$core" --data-dir "$stage"
           done
           mkdir -p src-tauri/resources/cores
-          cp "$stage"/bin/*.exe "$stage"/bin/*.dat src-tauri/resources/cores/ 2>/dev/null || true
+          cp "$stage"/bin/*.exe "$stage"/bin/*.dat src-tauri/resources/cores/
+          cp "$stage"/bin/*.json src-tauri/resources/cores/ 2>/dev/null || true
           ls -l src-tauri/resources/cores/
 
-      - name: Build full installer
+      # The full bundle ships third-party binaries, so their licence texts have
+      # to travel with them.
+      - name: Fetch upstream licence texts for the bundled cores
+        shell: bash
+        run: |
+          set -euo pipefail
+          cores="src-tauri/resources/cores"
+
+          fetch_license() {
+            local repo="$1" tag="$2" out="$3" name
+            for name in LICENSE LICENSE.txt LICENSE.md COPYING COPYING.txt; do
+              if curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
+                   "https://raw.githubusercontent.com/$repo/$tag/$name" -o "$out" \
+                 && [ -s "$out" ] && ! grep -q '^404: Not Found' "$out"; then
+                echo "  got $repo/$name at $tag"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          for core in mihomo sing-box xray; do
+            case "$core" in
+              mihomo)   repo="MetaCubeX/mihomo" ;;
+              sing-box) repo="SagerNet/sing-box" ;;
+              xray)     repo="XTLS/Xray-core" ;;
+            esac
+            tag=$(jq -r '.tag' "$cores/$core.json")
+            out="$cores/LICENSE-$core.txt"
+
+            echo "--- $core ($repo@$tag) ---"
+            if ! fetch_license "$repo" "$tag" "$out"; then
+              echo "::error::no licence text found for $core at $tag; refusing to ship an unlicensed binary"
+              exit 1
+            fi
+            size=$(wc -c < "$out")
+            if [ "$size" -lt 200 ] || grep -qiE '<!DOCTYPE|<html' "$out"; then
+              echo "::error::licence text for $core looks invalid ($size bytes)"
+              exit 1
+            fi
+            echo "  $size bytes"
+          done
+
+          cp LICENSE "$cores/LICENSE-GPL-3.0.txt"
+
+      - name: Generate third-party notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          cores="src-tauri/resources/cores"
+          out="$cores/THIRD-PARTY-NOTICES.txt"
+
+          {
+            echo "TriProxy — bundled third-party proxy cores"
+            echo
+            echo "This build of TriProxy ships the proxy cores listed below. They are"
+            echo "independent works, distributed under their own licences. The full"
+            echo "licence text for each is bundled next to it as LICENSE-<core>.txt."
+            echo
+            for core in mihomo sing-box xray; do
+              case "$core" in
+                mihomo)   repo="MetaCubeX/mihomo";  lic="GPL-3.0" ;;
+                sing-box) repo="SagerNet/sing-box"; lic="GPL-3.0-or-later" ;;
+                xray)     repo="XTLS/Xray-core";    lic="MPL-2.0" ;;
+              esac
+              tag=$(jq -r '.tag' "$cores/$core.json")
+              sha=$(jq -r '.sha256' "$cores/$core.json")
+              echo "$core"
+              echo "  version:  $tag"
+              echo "  licence:  $lic"
+              echo "  source:   https://github.com/$repo/tree/$tag"
+              echo "  sha256:   $sha"
+              echo
+            done
+            echo "The GNU GPL v3 full text is included as LICENSE-GPL-3.0.txt."
+          } > "$out"
+
+          cat "$out"
+
+      - name: Build the full installer
         shell: bash
         run: |
           set -euo pipefail
@@ -347,15 +195,15 @@ jobs:
              "dist/TriProxy_${version}_x64-setup-full.exe"
           ls -l dist/
 
-      - name: Verify both installers exist and differ in size
+      - name: Verify both variants were produced
         shell: bash
         run: |
           set -euo pipefail
           lite=$(stat -c%s dist/*-lite.exe)
           full=$(stat -c%s dist/*-full.exe)
           echo "lite=$lite full=$full"
-          # The full build carries ~180 MB of cores; if the two are the same
-          # size the resource override silently did nothing.
+          # The full build carries ~180 MB of cores. Equal sizes would mean the
+          # resource override silently did nothing.
           test "$full" -gt "$lite"
 
       - uses: actions/upload-artifact@v4
@@ -366,7 +214,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [build, desktop]
+    needs: desktop
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:

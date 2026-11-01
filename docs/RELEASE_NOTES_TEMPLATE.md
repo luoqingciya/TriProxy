@@ -57,7 +57,7 @@ Controls v6 的依赖声明**。没有它，Windows 加载的是旧版 comctl32�
 
 ## 下载哪一个？
 
-### Windows（推荐）
+发布里只有桌面安装包，两个变体：
 
 | 包 | 内容 | 适用 |
 |---|---|---|
@@ -68,29 +68,24 @@ Controls v6 的依赖声明**。没有它，Windows 加载的是旧版 comctl32�
 
 - **所有数据都在安装目录下的 `data\`**（配置、日志、下载的核心）。卸载时会一并删除，
   需要保留请先备份该目录
+- **命令行也在同一个包里**：安装目录下的 `triproxy.exe`，与图形界面共用同一份数据
 - 启动时请求管理员权限：TUN 模式需要
-- 命令行用法：在安装目录里直接运行 `triproxy.exe`，与图形界面共用同一份数据
 
 > 安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」。
 > 点「更多信息 → 仍要运行」即可。
-
-### macOS / Linux
-
-桌面构建尚未提供，这两个平台暂时只有命令行压缩包：
-
-| 包 | 内容 |
-|---|---|
-| `*-lite` | 仅 `triproxy` 可执行文件 |
-| `*-full` | `triproxy` + `cores/` 内已校验的三个核心 |
 
 `full` 版的核心由 CI 通过 TriProxy 自身的下载与校验流程获取，SHA256 与上游 Release
 一致，未经修改。程序优先使用用户自行安装的更新版本（`triproxy core install`），
 其次才用随包的 `cores/`。
 
-`full` 版同时附带完整的许可材料：顶层 `LICENSE` 与 `ADDITIONAL-TERMS.md`（TriProxy 自身），
-`cores/LICENSE-<core>.txt`（各核心的许可文本，取自与二进制相同的 tag），
-`cores/LICENSE-GPL-3.0.txt`（GPLv3 正文），以及 `cores/THIRD-PARTY-NOTICES.txt`
-（版本、来源、对应源码地址、sha256）。
+随包核心是独立作品，许可文本在 `cores/LICENSE-<core>.txt`，版本、来源与对应源码地址
+见 `cores/THIRD-PARTY-NOTICES.txt`。
+
+### macOS / Linux
+
+**本版暂不提供。** 这两个平台的桌面构建还需要单独适配——macOS 的 .app 把资源放在
+`Contents/Resources` 而不是可执行文件旁边，与本版「数据全部在安装目录」的布局冲突。
+与其发一个找不到自己数据的包，不如不发；适配完成后会单独提供。
 
 ## 首次运行
 
