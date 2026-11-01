@@ -14,6 +14,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/triproxy-core", "crates/triproxy-cli"]
+# The Tauri shell is its own workspace: it needs platform webview toolchains
+# that the library and CLI must not depend on.
+exclude = ["src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

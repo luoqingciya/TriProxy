@@ -441,7 +441,59 @@ SQLite 会在有**真正需要查询的数据**时才有价值——连接历史
 一个坏文件让用户看不到其余 30 份订阅是不可接受的失败模式。
 索引里的悬空 `active` 指向也会被自动清理。
 
-## 10. 尚未实现（明确的边界）
+## 10. Phase 5 — Tauri GUI
+
+```text
+React + TypeScript + Tailwind   (src/)
+        ↓  invoke()
+Tauri commands                  (src-tauri/src/commands.rs)
+        ↓
+triproxy-core                   （与 CLI 完全相同的代码）
+```
+
+### 10.1 后端命令层刻意很薄
+
+`src-tauri/src/commands.rs` 里每个命令只对应一个 core 操作，没有业务规则。
+选核、编译、独占性、崩溃恢复全在 `triproxy-core` 里——否则 CLI 与 GUI 会各自演化出
+不同的行为，而用户会认为它们是同一个产品。
+
+### 10.2 Tauri 应用是独立的 Cargo workspace
+
+根工作区 `exclude = ["src-tauri"]`。原因：GUI 依赖平台 webview 工具链
+（WebView2 / WebKitGTK），如果把它并入根工作区，`cargo test --all` 和 CI 都会被迫安装这些依赖，
+而单元测试根本不需要它们。
+
+### 10.3 前端可以在浏览器里开发
+
+`npm run dev` 打开的是一个普通网页，没有 Rust 后端。因此 `services/api.ts` 判断
+`__TAURI_INTERNALS__` 是否存在：不在 Tauri 里就走 `services/mock.ts` 的假数据。
+这让界面可以在不构建桌面程序的情况下迭代与评审，桌面版永远走真实命令。
+
+### 10.4 界面验证方式
+
+本轮不是「构建成功就算完成」：用 Edge headless 对每个页面截图后逐一检查排版
+（列对齐、文字裁切、明暗主题对比度），据此修了三处真实缺陷——仪表盘底部大片空白、
+日志页高度没撑满、核心表格列宽把「监听」推得过远。
+
+### 10.5 与规划书的差异
+
+- **没有用 React Router**。桌面窗口没有地址栏，5 个页面不需要路由库；
+  页面状态放在 store 里并同步到 URL hash，这样刷新后仍停在原页面。
+- **没有虚拟列表**。当前节点数量在几十到几百，普通列表足够；
+  等真的出现数千节点再上虚拟化（规划书 24 章的建议针对的是那种规模）。
+- **规则 / 连接两个页面未实现**。它们需要 Phase 10 的后端能力，
+  放一个空页面比不放更糟。
+
+### 10.6 设置放在 core 而不是 GUI
+
+`AppSettings`（主题、核心偏好、TUN/rule-set/proxy-groups、allow_lan、日志级别）位于
+`triproxy-core`，读写 `<data>/settings.json`。这样 GUI 里打开的 TUN 会同样影响
+`triproxy start`——两个前端共用一份设置，不会各说各话。
+
+其中 `NetworkRequirements` 就是 Phase 4 特意留出的接口：设置页的 TUN / rule-set 开关
+直接决定选核时淘汰哪些核心。
+
+## 11. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 

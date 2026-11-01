@@ -16,9 +16,15 @@
 **/*.rs.bk
 *.pdb
 
-# Node (added in Phase 5 when the Tauri frontend lands)
+# Node / frontend
 /node_modules
 /.vite
+*.local
+npm-debug.log*
+
+# Tauri shell (own workspace, own target dir)
+/src-tauri/target
+/src-tauri/gen
 
 # Release staging and archives (produced by .github/workflows/release.yml)
 /dist
