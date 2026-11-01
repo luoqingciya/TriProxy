@@ -1,3 +1,18 @@
+<!--
+  TriProxy — a modern multi-core proxy client.
+  Copyright (C) 2026 luoqingci
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+  This program is free software: you can redistribute it and/or modify it under
+  the terms of the GNU General Public License as published by the Free Software
+  Foundation, either version 3 of the License, or (at your option) any later
+  version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+  PARTICULAR PURPOSE. See LICENSE for the full text.
+
+  Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+-->
+
 # TriProxy
 
 一个基于 Rust 的现代化代理客户端，统一管理 **Mihomo / sing-box / Xray** 三个核心。
@@ -43,7 +58,8 @@ cd TriProxy
 cargo build --release
 ```
 
-首次使用需要下载核心二进制（不随包分发，见 [`NOTICE.md`](NOTICE.md)）：
+首次使用需要核心二进制。`lite` 版不含核心，需下载（校验和来源见 [`NOTICE.md`](NOTICE.md)）；
+`full` 版已随包附带，可跳过此步：
 
 ```bash
 triproxy core install mihomo
@@ -68,6 +84,27 @@ triproxy logs -f           # 跟踪日志
 ```
 
 ---
+
+## 两种发行包
+
+每次发布由 GitHub Actions 构建两种压缩包（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)）：
+
+| 包 | 内容 | 适用场景 |
+|---|---|---|
+| `triproxy-<target>-lite` | 仅可执行文件 | 想自行管理核心版本、或需自行指定镜像/代理下载 |
+| `triproxy-<target>-full` | 可执行文件 + `cores/` 内三个已校验核心 | 开箱即用，首次运行无需联网 |
+
+`full` 版的核心由 CI 调用 TriProxy 自身的下载与校验流程获取，SHA256 与上游 Release 一致，
+未经修改，并随包附带 `cores/THIRD-PARTY-NOTICES.txt`（版本、授权、对应源码地址）。
+
+核心解析顺序（`triproxy core path <core>` 可查看实际来源）：
+
+```text
+环境变量 TRIPROXY_*_BIN  →  用户安装的 bin/（managed）  →  随包的 cores/（bundled）  →  PATH
+```
+
+`managed` 优先于 `bundled`，因此用户用 `triproxy core install` 更新过核心后，
+不会悄悄回落到随包的旧版本。
 
 ## 命令
 
@@ -101,6 +138,8 @@ triproxy logs -f           # 跟踪日志
 **校验和不妥协**：二进制从官方 Release 下载，SHA256 取自 `api.github.com` 的 asset digest（回退 `.dgst` / `checksums.txt`），取不到校验和则拒绝安装（除非显式 `--allow-unverified`）。因此镜像只能造成失败，无法投毒。
 
 **日志跨调用可见**：内存环形缓冲随进程消失，所以核心输出同时落到 `logs/<core>.log`，`triproxy logs` 读文件、`-f` 轮询追加。
+
+**随包核心只读**：`cores/` 目录由发行包提供，程序运行时从不写入；所有安装与更新都进 `bin/`。
 
 ---
 
@@ -141,7 +180,21 @@ cargo clippy --all-targets
 
 ## 授权
 
-代码授权待定（建议 GPL-3.0-or-later，与上游核心生态一致）。
-三个核心二进制不随本项目分发，其授权与来源见 [`NOTICE.md`](NOTICE.md)。
+本项目以 **GNU General Public License v3.0 或更新版本**（GPL-3.0-or-later）发布，
+全文见 [`LICENSE`](LICENSE)。
 
-Copyright © luoqingci
+依据 GPLv3 第 7 条附加以下条款（详见 [`ADDITIONAL-TERMS.md`](ADDITIONAL-TERMS.md)）：
+
+1. **保留声明**：任何分发（源码或二进制、修改与否）须完整保留版权声明、GPLv3 许可声明、
+   SPDX 标识与第三方组件归属声明，不得删除或遮蔽。
+2. **修改版须改名**：分发修改版须使用与 "TriProxy" 明显不同的名称，不得以本项目名称、
+   标识、图标作为修改版的名称或品牌，并须明确标注该版本已被修改及修改者。
+3. **不得暗示背书**：未经书面许可，不得声称或暗示原版作者对您的分发版本提供背书或存在关联。
+
+每个源文件头部均带版权与 SPDX 声明；`triproxy --version` 输出包含版权、许可与无担保声明。
+`LICENSE` 为 GPLv3 全文，"How to Apply" 附录中的模板字段已填入本项目信息。
+
+三个核心二进制是独立作品，适用各自授权（Mihomo GPL-3.0、sing-box GPL-3.0-or-later、
+Xray MPL-2.0），来源与合规说明见 [`NOTICE.md`](NOTICE.md)。
+
+Copyright © 2026 luoqingci

@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -45,8 +58,11 @@ impl CoreHealth {
 pub async fn probe_tcp(port: u16) -> Option<u64> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let started = std::time::Instant::now();
-    match tokio::time::timeout(Duration::from_millis(800), tokio::net::TcpStream::connect(addr))
-        .await
+    match tokio::time::timeout(
+        Duration::from_millis(800),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
     {
         Ok(Ok(_)) => Some(started.elapsed().as_millis() as u64),
         _ => None,
@@ -74,7 +90,9 @@ mod tests {
 
     #[tokio::test]
     async fn probe_succeeds_against_a_bound_listener() {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             let _ = listener.accept().await;

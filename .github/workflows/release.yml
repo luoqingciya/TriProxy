@@ -1,0 +1,217 @@
+# TriProxy — a modern multi-core proxy client.
+# Copyright (C) 2026 luoqingci
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# This program is free software: you can redistribute it and/or modify it under
+# the terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later
+# version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+# PARTICULAR PURPOSE. See LICENSE for the full text.
+#
+# Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # Native runners only: `triproxy core install` downloads cores for the
+      # host platform, so cross-compiling would bundle the wrong architecture.
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            pack: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            pack: tar
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            pack: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            pack: tar
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage both variants
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUFFIX=""
+          if [ "${{ runner.os }}" = "Windows" ]; then SUFFIX=".exe"; fi
+          BIN="target/${{ matrix.target }}/release/triproxy${SUFFIX}"
+
+          # Variant 1 — "lite": binary only, cores are downloaded on first run.
+          LITE="dist/lite"
+          mkdir -p "$LITE"
+          cp "$BIN" "$LITE/"
+          cp README.md LICENSE NOTICE.md ADDITIONAL-TERMS.md "$LITE/"
+
+          # Variant 2 — "full": same binary plus verified cores in cores/.
+          # Downloading is done by TriProxy itself, so the same SHA256 checks
+          # that protect end users also protect the release pipeline.
+          FULL="dist/full"
+          mkdir -p "$FULL/cores"
+          cp "$BIN" "$FULL/"
+          cp README.md LICENSE NOTICE.md ADDITIONAL-TERMS.md "$FULL/"
+
+          DATA="$RUNNER_TEMP/triproxy-data"
+          for core in mihomo sing-box xray; do
+            "$BIN" core install "$core" --data-dir "$DATA"
+          done
+          cp -p "$DATA"/bin/* "$FULL/cores/"
+
+          echo "--- staged ---"
+          ls -l "$FULL/cores"
+
+      - name: Generate third-party notices for the bundled cores
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FULL="dist/full"
+          OUT="$FULL/cores/THIRD-PARTY-NOTICES.txt"
+
+          {
+            echo "TriProxy — bundled third-party proxy cores"
+            echo "=========================================="
+            echo
+            echo "This build of TriProxy ships the proxy cores listed below."
+            echo "Each core is an independent work under its own license and is"
+            echo "distributed unmodified. TriProxy only starts, stops and"
+            echo "supervises them."
+            echo
+            echo "Corresponding source for every core is available at the exact"
+            echo "tag listed here, from the upstream repository. No modifications"
+            echo "have been made to these binaries."
+            echo
+
+            for core in mihomo sing-box xray; do
+              REC="$FULL/cores/$core.json"
+              case "$core" in
+                mihomo)   repo="MetaCubeX/mihomo";  lic="GPL-3.0" ;;
+                sing-box) repo="SagerNet/sing-box"; lic="GPL-3.0-or-later" ;;
+                xray)     repo="XTLS/Xray-core";    lic="MPL-2.0" ;;
+              esac
+
+              tag=$(jq -r '.tag' "$REC")
+              ver=$(jq -r '.version' "$REC")
+              sha=$(jq -r '.sha256' "$REC")
+
+              echo "----------------------------------------------------------"
+              echo "$core $ver"
+              echo "  upstream: https://github.com/$repo"
+              echo "  license:  $lic"
+              echo "  source:   https://github.com/$repo/tree/$tag"
+              echo "  release:  https://github.com/$repo/releases/tag/$tag"
+              echo "  sha256:   $sha"
+              echo
+            done
+
+            echo "----------------------------------------------------------"
+            echo "Full license texts: see NOTICE.md and each upstream repository."
+          } > "$OUT"
+
+          cat "$OUT"
+
+      - name: Smoke-test the bundled variant
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUFFIX=""
+          if [ "${{ runner.os }}" = "Windows" ]; then SUFFIX=".exe"; fi
+          SMOKE="$RUNNER_TEMP/smoke"
+
+          # A fresh data directory proves the cores are discovered next to the
+          # executable rather than from any earlier install.
+          OUT=$(./dist/full/triproxy${SUFFIX} cores --data-dir "$SMOKE")
+          echo "$OUT"
+          echo "$OUT" | grep -q bundled
+
+          # Discovery is not enough: the shipped binaries must actually execute
+          # on this platform (wrong arch, missing exec bit, macOS signature).
+          # `doctor` runs each core's version probe and reports FAILED on error.
+          DOCTOR=$(./dist/full/triproxy${SUFFIX} doctor --data-dir "$SMOKE")
+          echo "$DOCTOR"
+          if echo "$DOCTOR" | grep -q "FAILED"; then
+            echo "::error::bundled cores are present but not executable on this runner"
+            exit 1
+          fi
+          echo "smoke: ok"
+
+      - name: Pack (Windows)
+        if: matrix.pack == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/lite/* -DestinationPath "triproxy-${{ matrix.target }}-lite.zip"
+          Compress-Archive -Path dist/full/* -DestinationPath "triproxy-${{ matrix.target }}-full.zip"
+
+      - name: Pack (Unix)
+        if: matrix.pack == 'tar'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C dist/lite -czf "triproxy-${{ matrix.target }}-lite.tar.gz" .
+          tar -C dist/full -czf "triproxy-${{ matrix.target }}-full.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: triproxy-${{ matrix.target }}
+          path: |
+            triproxy-${{ matrix.target }}-lite.*
+            triproxy-${{ matrix.target }}-full.*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ls -l dist
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "TriProxy ${GITHUB_REF_NAME}" \
+            --notes-file docs/RELEASE_NOTES_TEMPLATE.md

@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -173,7 +186,11 @@ impl LogBuffer {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).lines.len()
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .lines
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -221,9 +238,18 @@ mod tests {
 
     #[test]
     fn level_inference_prefers_fatal_markers() {
-        assert_eq!(infer_level(LogStream::Stderr, "FATAL bind failed"), LogLevel::Error);
-        assert_eq!(infer_level(LogStream::Stdout, "level=warning msg=deprecated"), LogLevel::Warn);
-        assert_eq!(infer_level(LogStream::Stdout, "inbound started"), LogLevel::Info);
+        assert_eq!(
+            infer_level(LogStream::Stderr, "FATAL bind failed"),
+            LogLevel::Error
+        );
+        assert_eq!(
+            infer_level(LogStream::Stdout, "level=warning msg=deprecated"),
+            LogLevel::Warn
+        );
+        assert_eq!(
+            infer_level(LogStream::Stdout, "inbound started"),
+            LogLevel::Info
+        );
     }
 
     #[test]

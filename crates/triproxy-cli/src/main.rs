@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -14,6 +27,14 @@ use triproxy_core::{CoreKind, CoreManager, CoreReport, Layout, ManagerStatus, Sw
 #[command(
     name = "triproxy",
     version,
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nCopyright (C) 2026 luoqingci\n",
+        "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n",
+        "This is free software: you are free to change and redistribute it.\n",
+        "There is NO WARRANTY, to the extent permitted by law.\n\n",
+        "Additional terms under GPLv3 section 7 apply; see ADDITIONAL-TERMS.md."
+    ),
     about = "TriProxy — one client, three cores (Mihomo / sing-box / Xray)"
 )]
 struct Cli {
@@ -169,8 +190,16 @@ async fn run(cli: Cli) -> Result<()> {
                 file,
                 mirror,
             } => {
-                cmd_core_install(&manager, &core, version, force, allow_unverified, file, mirror)
-                    .await
+                cmd_core_install(
+                    &manager,
+                    &core,
+                    version,
+                    force,
+                    allow_unverified,
+                    file,
+                    mirror,
+                )
+                .await
             }
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
         },
@@ -280,10 +309,7 @@ async fn cmd_core_install(
     let installed = manager.install(kind, &options).await?;
 
     if installed.already_installed {
-        println!(
-            "{} {} is already installed",
-            kind, installed.version
-        );
+        println!("{} {} is already installed", kind, installed.version);
     } else {
         println!("{} {} installed", kind, installed.version);
     }
@@ -443,7 +469,9 @@ fn print_core_table(cores: &[CoreReport]) {
             vec![
                 core.kind.as_str().to_string(),
                 core.state.to_string(),
-                core.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+                core.pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
                 core.listen_port
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "-".to_string()),
@@ -545,11 +573,7 @@ fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
 }
 
 fn first_line(text: &str) -> String {
-    text.lines()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string()
+    text.lines().next().unwrap_or("").trim().to_string()
 }
 
 // ---------------------------------------------------------------------------

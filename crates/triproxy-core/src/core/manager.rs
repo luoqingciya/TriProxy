@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -287,7 +300,8 @@ impl CoreManager {
         core.start(&config).await?;
 
         let pid = core.pid().await;
-        self.persist(Some(kind), pid, Some(core.listen_port())).await?;
+        self.persist(Some(kind), pid, Some(core.listen_port()))
+            .await?;
 
         Ok(StartReport {
             kind,
@@ -392,7 +406,10 @@ impl CoreManager {
         ));
 
         core.check_config(&config).await?;
-        steps.push(SwitchStep::ok("validate config", format!("{target} accepted the config")));
+        steps.push(SwitchStep::ok(
+            "validate config",
+            format!("{target} accepted the config"),
+        ));
 
         core.start(&config).await?;
         let health = core.health_check().await?;
@@ -427,7 +444,12 @@ impl CoreManager {
         let installed = self.binaries.install(kind, options).await?;
         // Register immediately so that a long-lived host (the future GUI) does
         // not need a restart after installing a core.
-        let core = build_core(kind, installed.path.clone(), self.logs.clone(), &self.layout);
+        let core = build_core(
+            kind,
+            installed.path.clone(),
+            self.logs.clone(),
+            &self.layout,
+        );
         self.cores_write().insert(kind, core);
         Ok(installed)
     }
@@ -543,12 +565,19 @@ impl CoreManager {
         self.cores.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn cores_write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<CoreKind, Arc<dyn ProxyCore>>> {
+    fn cores_write(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, BTreeMap<CoreKind, Arc<dyn ProxyCore>>> {
         self.cores.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-fn build_core(kind: CoreKind, path: PathBuf, logs: Arc<LogBuffer>, layout: &Layout) -> Arc<dyn ProxyCore> {
+fn build_core(
+    kind: CoreKind,
+    path: PathBuf,
+    logs: Arc<LogBuffer>,
+    layout: &Layout,
+) -> Arc<dyn ProxyCore> {
     let log_file = Some(layout.core_log_file(kind.as_str()));
     match kind {
         CoreKind::Mihomo => adapters::mihomo::new(path, logs, log_file),
@@ -562,7 +591,8 @@ mod tests {
     use super::*;
 
     fn temp_layout(name: &str) -> Layout {
-        let root = std::env::temp_dir().join(format!("triproxy-test-{name}-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("triproxy-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         Layout::new(root)
     }

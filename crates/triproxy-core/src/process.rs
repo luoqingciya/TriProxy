@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -106,10 +119,7 @@ pub async fn run_capture(binary: &Path, args: &[OsString]) -> Result<CommandOutp
 
     detach_inherited_std_handles();
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| Error::io(binary, e))?;
+    let output = cmd.output().await.map_err(|e| Error::io(binary, e))?;
     Ok(CommandOutput {
         success: output.status.success(),
         code: output.status.code(),
@@ -460,8 +470,7 @@ impl Supervisor {
                     guard.state = CoreState::Failed;
                     let reason = format!("process {pid} is no longer alive");
                     guard.last_error = Some(reason.clone());
-                    self.logs
-                        .push(self.kind.as_str(), LogStream::App, reason);
+                    self.logs.push(self.kind.as_str(), LogStream::App, reason);
                 }
             }
             return guard.state;
@@ -479,8 +488,7 @@ impl Supervisor {
             guard.state = CoreState::Failed;
             let reason = format!("process exited unexpectedly ({status})");
             guard.last_error = Some(reason.clone());
-            self.logs
-                .push(self.kind.as_str(), LogStream::App, reason);
+            self.logs.push(self.kind.as_str(), LogStream::App, reason);
             if previous.is_running() {
                 tracing::warn!(core = self.kind.as_str(), "core exited unexpectedly");
             }
@@ -638,8 +646,7 @@ pub fn pid_alive(pid: u32) -> bool {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout);
             // The CSV row is: "image.exe","1234","Console","1","12,345 K"
-            text.split('"')
-                .any(|field| field.trim() == pid.to_string())
+            text.split('"').any(|field| field.trim() == pid.to_string())
         }
         Err(_) => false,
     }

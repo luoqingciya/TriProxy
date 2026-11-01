@@ -1,3 +1,18 @@
+<!--
+  TriProxy — a modern multi-core proxy client.
+  Copyright (C) 2026 luoqingci
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+  This program is free software: you can redistribute it and/or modify it under
+  the terms of the GNU General Public License as published by the Free Software
+  Foundation, either version 3 of the License, or (at your option) any later
+  version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+  WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+  PARTICULAR PURPOSE. See LICENSE for the full text.
+
+  Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+-->
+
 # ARCHITECTURE — Phase 1 实现说明
 
 本文记录 Phase 1（Rust 多核心管理器 MVP）的实际架构，以及与 `PROJECT_PLAN.md` 的差异和原因。
@@ -64,23 +79,41 @@ Phase 1 需要真实可用的配置才能验收「三个核心能稳定启停」
 生成的配置会先经过各核心自己的校验命令（`mihomo -t` / `sing-box check` / `xray -test`），
 校验失败即视为启动失败，不做「先跑起来再说」。
 
-### 2.4 二进制不随包分发，且校验失败即拒绝
+### 2.4 核心二进制：默认不带，发布时可选带
 
-规划书 6 章把二进制放在 `src-tauri/binaries/`。实际改为**首次运行下载 + 强制校验**：
+规划书 6 章把二进制放在 `src-tauri/binaries/`。实际拆成两种发行形态：
 
-- 安装包体积从 100–200 MB 降到可接受范围；
-- 不承担再分发 GPL/MPL 二进制的合规义务；
-- 校验和取自 `api.github.com` 的 asset `digest`（回退 `.dgst` / `checksums.txt`），
-  取不到就拒绝安装（`--allow-unverified` 是显式逃生舱，不是默认值）。
+- **`lite`（默认）**：不随包分发，首次运行下载 + 强制校验。安装包小，不承担再分发义务。
+- **`full`**：由 GitHub Actions 在打包时下载并校验后放入 `cores/`，随包分发未修改的上游构建。
 
-### 2.5 下载必须支持镜像与卡死检测
+校验和始终取自 `api.github.com` 的 asset `digest`（回退 `.dgst` / `checksums.txt`），
+取不到就拒绝安装（`--allow-unverified` 是显式逃生舱，不是默认值）。
+发布流水线复用同一套下载与校验代码，因此 CI 打包与终端用户下载受同等保护。
+
+配套的解析顺序（`BinarySource`）：
+
+```text
+env(TRIPROXY_*_BIN) → managed(<data>/bin) → bundled(<exe_dir>/cores) → PATH
+```
+
+`managed` 排在 `bundled` 之前：用户用 `core install` 更新过核心后，不应悄悄回落到
+随包的旧版本。`cores/` 在运行时只读，所有写入都进 `bin/`。
+版本展示不需要执行核心——`full` 包同时附带安装记录（`cores/<core>.json`），
+`status` 直接读记录即可显示版本与来源。
+
+### 2.5 下载必须支持镜像、卡死检测与吞吐下限
 
 实测（2026-11，中国大陆网络）：直连 GitHub Release 资源约 90 B/s，22 MB 的 Mihomo 包
 180 秒只下到 16 KB。因此：
 
 - 引入 `--mirror` / `TRIPROXY_GITHUB_MIRROR`，候选顺序为「用户镜像 → 直连 → 内置镜像」；
-- 下载改为流式 + 15 秒无进展即放弃并换下一个源（否则单次尝试就能挂几分钟，回退形同虚设）；
+- 下载改为流式 + 15 秒无进展即放弃并换下一个源；
+- **额外加 40 kB/s 的平均吞吐下限**（20 秒宽限期后生效），300 秒为兜底上限；
 - 额外提供 `--file`，允许用户用任意方式下载后交给 TriProxy 安装。
+
+吞吐下限是发布流水线干跑时补上的：最初只有「无进展」判定，结果一个 90 B/s 的源
+每 14 秒还能挤出几个字节，卡死计时器永远不触发，单次尝试被整体超时拖了 10 分钟，
+回退链形同虚设。只判断「有没有数据」不够，必须判断「速率是否可用」。
 
 由于校验和来自 `api.github.com` 而非镜像，镜像只能造成失败，无法投毒。
 
@@ -160,7 +193,34 @@ Xray 缺少原生 TUN 这一条会直接影响 Smart 模式的选型结果，是
 
 ---
 
-## 5. 尚未实现（明确的边界）
+## 5. 发布流水线
+
+`.github/workflows/release.yml`，推送 `v*` tag 或手动触发。
+
+矩阵只使用**原生 runner**：`triproxy core install` 按 `std::env::consts` 判断目标平台，
+交叉编译会把错误架构的核心打进包，所以不做交叉构建。
+
+```text
+windows-latest  → x86_64-pc-windows-msvc
+ubuntu-latest   → x86_64-unknown-linux-gnu
+macos-latest    → aarch64-apple-darwin
+macos-13        → x86_64-apple-darwin
+```
+
+每个任务产出两个包：
+
+1. 编译 → `dist/lite/`（二进制 + README/LICENSE/NOTICE/ADDITIONAL-TERMS）
+2. 用刚编译出的二进制执行 `core install mihomo|sing-box|xray --data-dir <tmp>`，
+   把 `bin/` 下的二进制与安装记录复制进 `dist/full/cores/`
+3. 用 `jq` 读安装记录生成 `cores/THIRD-PARTY-NOTICES.txt`（版本 / 授权 / 源码 tag 地址 / sha256）
+4. **冒烟验证**：用全新数据目录运行 `dist/full/triproxy cores`，断言输出含 `bundled`。
+   这一步能拦住「包做出来了但程序找不到核心」这类只在发布后才暴露的问题
+5. 打包（Windows `zip` / Unix `tar.gz`）并上传 artifact
+
+release 任务汇总所有 artifact，`gh release create` 发布，说明取自
+`docs/RELEASE_NOTES_TEMPLATE.md`（两种包的取舍、lite 版安装指引、授权与随包核心的合规说明）。
+
+## 6. 尚未实现（明确的边界）
 
 Phase 1 刻意不做，避免半成品：
 

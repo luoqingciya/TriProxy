@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -38,9 +51,8 @@ impl Layout {
                 return Ok(Self::new(PathBuf::from(custom)));
             }
         }
-        let base = dirs::data_dir().ok_or_else(|| {
-            Error::Other("cannot determine platform data directory".to_string())
-        })?;
+        let base = dirs::data_dir()
+            .ok_or_else(|| Error::Other("cannot determine platform data directory".to_string()))?;
         Ok(Self::new(base.join(APP_DIR_NAME)))
     }
 
@@ -93,12 +105,28 @@ impl Layout {
 
     /// Path of a managed binary inside `bin/`.
     pub fn managed_binary(&self, stem: &str) -> PathBuf {
-        self.bin_dir().join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+        binary_in(&self.bin_dir(), stem)
     }
 
     pub fn install_record(&self, stem: &str) -> PathBuf {
         self.bin_dir().join(format!("{stem}.json"))
     }
+}
+
+/// Path of a core executable inside an arbitrary directory.
+pub fn binary_in(dir: &Path, stem: &str) -> PathBuf {
+    dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Directory next to the executable that ships pre-bundled cores.
+///
+/// The "with cores" release archive places verified cores (plus their install
+/// records) in `cores/` beside the binary, so that build works offline with no
+/// first-run download. Nothing is ever written here at runtime — updates always
+/// go to the managed `bin/` directory, which takes precedence.
+pub fn bundled_core_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("cores"))
 }
 
 /// Look up an executable on `PATH` without pulling in an extra dependency.
@@ -129,13 +157,19 @@ mod tests {
             layout.core_config_dir("sing-box"),
             Path::new("/tmp/triproxy-test/configs/sing-box")
         );
-        assert_eq!(layout.state_file(), Path::new("/tmp/triproxy-test/state.json"));
+        assert_eq!(
+            layout.state_file(),
+            Path::new("/tmp/triproxy-test/state.json")
+        );
     }
 
     #[test]
     fn managed_binary_carries_platform_suffix() {
         let layout = Layout::new("/tmp/triproxy-test");
         let expected = format!("xray{}", std::env::consts::EXE_SUFFIX);
-        assert_eq!(layout.managed_binary("xray").file_name().unwrap(), expected.as_str());
+        assert_eq!(
+            layout.managed_binary("xray").file_name().unwrap(),
+            expected.as_str()
+        );
     }
 }

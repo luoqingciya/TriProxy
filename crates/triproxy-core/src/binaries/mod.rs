@@ -1,3 +1,16 @@
+// TriProxy — a modern multi-core proxy client.
+// Copyright (C) 2026 luoqingci
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+// WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+// PARTICULAR PURPOSE. See LICENSE for the full text.
+//
+// Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+
 pub mod extract;
 pub mod manifest;
 
@@ -12,7 +25,7 @@ use crate::adapters::first_version_token;
 use crate::core::CoreKind;
 use crate::error::{Error, Result};
 use crate::logging::now_ms;
-use crate::paths::{find_on_path, Layout};
+use crate::paths::{self, find_on_path, Layout};
 use crate::process::run_capture;
 
 pub use manifest::{ReleaseAsset, ReleaseInfo, Target};
@@ -21,6 +34,17 @@ const GITHUB_API: &str = "https://api.github.com";
 const USER_AGENT: &str = "TriProxy/0.1 (+https://github.com/luoqingciya/TriProxy)";
 /// Abort a download when the transfer makes no progress for this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
+/// Minimum average throughput once the grace period is over.
+///
+/// A throttled source can trickle a few bytes per second forever: the per-chunk
+/// stall timer never fires, so without a throughput floor the fallback chain
+/// would sit on one bad mirror for minutes. 40 kB/s still clears a legitimate
+/// download at a usable speed while rejecting the ~90 B/s direct route.
+const MIN_THROUGHPUT_BYTES_PER_SEC: u64 = 40 * 1024;
+/// How long a transfer may run before the throughput floor is enforced.
+const THROUGHPUT_GRACE: Duration = Duration::from_secs(20);
+/// Backstop ceiling for a single attempt, regardless of progress.
+const MAX_DOWNLOAD_TIME: Duration = Duration::from_secs(300);
 /// Environment variable that overrides the GitHub release mirror.
 pub const MIRROR_ENV: &str = "TRIPROXY_GITHUB_MIRROR";
 /// Fallback mirrors, tried only after a direct download fails.
@@ -37,8 +61,10 @@ const DEFAULT_MIRRORS: [&str; 2] = ["https://ghfast.top/", "https://gh-proxy.com
 pub enum BinarySource {
     /// `TRIPROXY_*_BIN` environment override.
     Env,
-    /// Downloaded and verified into `<data>/bin`.
+    /// Downloaded and verified into `<data>/bin` (wins over bundled).
     Managed,
+    /// Shipped inside the release archive, in `cores/` next to the executable.
+    Bundled,
     /// Found on `PATH`.
     Path,
 }
@@ -48,6 +74,7 @@ impl BinarySource {
         match self {
             BinarySource::Env => "env",
             BinarySource::Managed => "managed",
+            BinarySource::Bundled => "bundled",
             BinarySource::Path => "path",
         }
     }
@@ -117,11 +144,13 @@ impl BinaryManager {
     pub fn new(layout: Layout) -> Result<Self> {
         let client = reqwest::Client::builder()
             .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(600))
+            .timeout(MAX_DOWNLOAD_TIME)
             .connect_timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| Error::Network(format!("cannot build http client: {e}")))?;
-        let mirror = std::env::var(MIRROR_ENV).ok().and_then(|v| normalize_mirror(&v));
+        let mirror = std::env::var(MIRROR_ENV)
+            .ok()
+            .and_then(|v| normalize_mirror(&v));
         Ok(Self {
             layout,
             client,
@@ -133,7 +162,11 @@ impl BinaryManager {
         &self.layout
     }
 
-    /// Resolve the binary to use: env override, then managed install, then `PATH`.
+    /// Resolve the binary to use.
+    ///
+    /// Order: environment override → managed install → bundled (`cores/` next to
+    /// the executable) → `PATH`. Managed comes before bundled so that a user who
+    /// updated a core does not silently fall back to the shipped build.
     pub fn resolve(&self, kind: CoreKind) -> Option<(PathBuf, BinarySource)> {
         if let Some(value) = std::env::var_os(kind.bin_env_var()) {
             if !value.is_empty() {
@@ -149,12 +182,27 @@ impl BinaryManager {
             return Some((managed, BinarySource::Managed));
         }
 
+        if let Some(dir) = paths::bundled_core_dir() {
+            let bundled = paths::binary_in(&dir, kind.exe_stem());
+            if bundled.is_file() {
+                return Some((bundled, BinarySource::Bundled));
+            }
+        }
+
         find_on_path(kind.exe_stem()).map(|path| (path, BinarySource::Path))
     }
 
     pub fn read_record(&self, kind: CoreKind) -> Option<InstallRecord> {
-        let path = self.layout.install_record(kind.exe_stem());
-        let text = std::fs::read_to_string(path).ok()?;
+        let managed = self.layout.install_record(kind.exe_stem());
+        if let Ok(text) = std::fs::read_to_string(managed) {
+            if let Ok(record) = serde_json::from_str(&text) {
+                return Some(record);
+            }
+        }
+        // The bundled variant ships the same record files, which is how
+        // `triproxy status` can show a version without executing the core.
+        let bundled = paths::bundled_core_dir()?.join(format!("{}.json", kind.exe_stem()));
+        let text = std::fs::read_to_string(bundled).ok()?;
         serde_json::from_str(&text).ok()
     }
 
@@ -411,12 +459,27 @@ impl BinaryManager {
         )))
     }
 
-    /// Stream a download with a no-progress timeout.
+    /// Stream a download with both a no-progress timeout and a total deadline.
     ///
     /// GitHub release assets are routinely throttled to a few kB/s on mainland
     /// Chinese networks. Without stall detection a single attempt can hang for
     /// minutes before failing, which makes mirror fallback useless.
     async fn download_streaming(&self, url: &str, expected_size: u64) -> Result<Vec<u8>> {
+        match tokio::time::timeout(
+            MAX_DOWNLOAD_TIME,
+            self.download_with_stall_guard(url, expected_size),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::Network(format!(
+                "gave up after {}s",
+                MAX_DOWNLOAD_TIME.as_secs()
+            ))),
+        }
+    }
+
+    async fn download_with_stall_guard(&self, url: &str, expected_size: u64) -> Result<Vec<u8>> {
         use futures_util::StreamExt;
 
         let response = self
@@ -434,6 +497,7 @@ impl BinaryManager {
 
         let mut buffer: Vec<u8> = Vec::with_capacity(expected_size as usize);
         let mut stream = response.bytes_stream();
+        let started = std::time::Instant::now();
         loop {
             match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
                 Err(_) => {
@@ -451,6 +515,17 @@ impl BinaryManager {
                     )))
                 }
                 Ok(Some(Ok(chunk))) => buffer.extend_from_slice(&chunk),
+            }
+
+            let elapsed = started.elapsed();
+            if throughput_too_low(buffer.len(), elapsed) {
+                return Err(Error::Network(format!(
+                    "too slow: {:.0} kB/s after {}s ({} of {} bytes)",
+                    buffer.len() as f64 / elapsed.as_secs_f64() / 1024.0,
+                    elapsed.as_secs(),
+                    buffer.len(),
+                    expected_size
+                )));
             }
         }
 
@@ -553,8 +628,7 @@ impl BinaryManager {
         {
             use std::os::unix::fs::PermissionsExt;
             let permissions = std::fs::Permissions::from_mode(0o755);
-            std::fs::set_permissions(&staging, permissions)
-                .map_err(|e| Error::io(&staging, e))?;
+            std::fs::set_permissions(&staging, permissions).map_err(|e| Error::io(&staging, e))?;
         }
 
         if path.exists() {
@@ -568,6 +642,18 @@ impl BinaryManager {
         std::fs::rename(&staging, path).map_err(|e| Error::io(path, e))?;
         Ok(())
     }
+}
+
+/// Should this transfer be abandoned as unusably slow?
+///
+/// Judged on average throughput rather than instantaneous progress: a throttled
+/// route can keep dribbling bytes forever, which keeps a "no data" timer happy.
+fn throughput_too_low(bytes: usize, elapsed: Duration) -> bool {
+    if elapsed <= THROUGHPUT_GRACE {
+        return false;
+    }
+    let rate = bytes as f64 / elapsed.as_secs_f64();
+    rate < MIN_THROUGHPUT_BYTES_PER_SEC as f64
 }
 
 /// Accept `ghfast.top`, `https://ghfast.top` and `https://ghfast.top/` alike.
@@ -588,7 +674,8 @@ fn normalize_mirror(value: &str) -> Option<String> {
     })
 }
 
-fn compare_digest(kind: CoreKind, expected: &str, actual: &str) -> Result<()> {    if expected.eq_ignore_ascii_case(actual) {
+fn compare_digest(kind: CoreKind, expected: &str, actual: &str) -> Result<()> {
+    if expected.eq_ignore_ascii_case(actual) {
         return Ok(());
     }
     Err(Error::ChecksumMismatch {
@@ -661,6 +748,19 @@ SHA512 = 0123456789abcdef
         let expected = "ABCdef0000000000000000000000000000000000000000000000000000000000";
         assert!(compare_digest(CoreKind::Xray, expected, &expected.to_ascii_lowercase()).is_ok());
         assert!(compare_digest(CoreKind::Xray, expected, "deadbeef").is_err());
+    }
+
+    #[test]
+    fn throughput_guard_rejects_a_trickling_source() {
+        // The measured direct-route behaviour: ~90 B/s for a minute.
+        assert!(throughput_too_low(90 * 60, Duration::from_secs(60)));
+        // A usable mirror: ~200 kB/s.
+        assert!(!throughput_too_low(
+            200 * 1024 * 60,
+            Duration::from_secs(60)
+        ));
+        // Inside the grace period nothing is judged yet.
+        assert!(!throughput_too_low(1024, Duration::from_secs(5)));
     }
 
     #[test]
