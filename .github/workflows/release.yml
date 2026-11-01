@@ -99,6 +99,16 @@ jobs:
           mkdir -p src-tauri/resources
           cp "target/release/${{ matrix.cli }}" "src-tauri/resources/${{ matrix.cli }}"
           ls -l src-tauri/resources/
+          # The resource is passed to `tauri build` on the command line rather
+          # than declared in tauri.conf.json: it only exists during a release
+          # build, and declaring it statically broke every `cargo check` in CI.
+          # That means nothing enforces its presence except this assertion.
+          size=$(stat -c%s "src-tauri/resources/${{ matrix.cli }}" 2>/dev/null \
+                 || stat -f%z "src-tauri/resources/${{ matrix.cli }}")
+          if [ "$size" -lt 1000000 ]; then
+            echo "::error::staged CLI looks wrong ($size bytes); the installer would ship without it"
+            exit 1
+          fi
 
       - name: Build the lite installer
         shell: bash

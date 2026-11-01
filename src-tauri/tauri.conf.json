@@ -50,9 +50,6 @@
     ],
     "category": "Utility",
     "shortDescription": "三核代理客户端",
-    "longDescription": "TriProxy 统一管理 Mihomo、sing-box 与 Xray 三个核心，自动选择最合适的核心。",
-    "resources": {
-      "resources/triproxy.exe": "triproxy.exe"
-    }
+    "longDescription": "TriProxy 统一管理 Mihomo、sing-box 与 Xray 三个核心，自动选择最合适的核心。"
   }
 }
