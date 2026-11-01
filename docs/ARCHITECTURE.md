@@ -822,7 +822,56 @@ mihomo    up to date (1.19.33)
 GUI 目前没有核心管理界面（安装/卸载/更新都不在），只加一个「更新」按钮会显得孤立。
 核心管理仍以 CLI 为主，等 GUI 有完整核心页时再一起做。
 
-## 18. 尚未实现（明确的边界）
+## 18. Phase 10 — 控制器 API（连接 / 流量）
+
+### 18.1 一套 API，两个核心，一个例外
+
+Mihomo 与 sing-box 都实现 Clash 兼容的 HTTP API（Mihomo 叫 `external-controller`，
+sing-box 叫 `clash_api`），端口都是我们生成的配置里那个 `api_port`。
+
+**Xray 没有等价物**——它用自家的 gRPC API，形态不同、面更大。所以基于这套 API 的功能
+（连接列表、流量、真实代理延迟）**只在两个核心下可用**。界面必须说清楚，
+而不是显示一个空面板让人以为是 bug。连接页底部就写着这句。
+
+### 18.2 实测发现的两个真实细节
+
+**空连接时返回 `null` 而不是 `[]`**：
+
+```json
+{"downloadTotal":0,"uploadTotal":0,"connections":null,"memory":0}
+```
+
+`Vec` 直接反序列化会失败，让一个空闲的核心看起来像坏了。用
+`deserialize_with = "null_as_empty"` 把 null 当成空列表。
+
+**`/traffic` 是流式端点**，每秒推一个 JSON 对象、永不关闭。取一次采样意味着读第一个
+完整对象然后断开连接，而不是让调用方拿着一条它没要求的流。
+
+### 18.3 真实代理延迟（`proxy_delay`）
+
+`GET /proxies/{name}/delay?url=...&timeout=...` 让**核心自己**通过节点发一次 HTTP 请求。
+这是唯一能证明「代理可用」的测量——凭据错、协议错都会失败，而 TCP 握手不会。
+
+它和 Phase 10 的 TCP 延迟是**两个不同的指标**，不能互相冒充。CLI 目前暴露的是 TCP 那个；
+`proxy_delay` 已在客户端实现，尚未接到界面上。
+
+### 18.4 实测
+
+```text
+$ curl http://127.0.0.1:9090/version
+{"meta":true,"version":"v1.19.33"}
+
+$ triproxy connections
+no live connections
+
+$ triproxy traffic
+↑ 0 B /s    ↓ 0 B /s
+```
+
+连接与流量为 0 是真实的：配置里的节点是假地址，请求在解析阶段就失败了。
+API 链路本身已被验证——三个端点都返回了可解析的数据，包括上面那个 `null` 的边界情况。
+
+## 19. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 

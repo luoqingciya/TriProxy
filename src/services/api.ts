@@ -18,7 +18,9 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   AppliedProxy,
   CoreKind,
+  ConnectionsSnapshot,
   LatencySample,
+  TrafficSample,
   LogEntry,
   ManagerStatus,
   NodeSummary,
@@ -69,6 +71,13 @@ export const api = {
   switchCore: (target: string) => call<ManagerStatus>('switch_core', { target }),
 
   recentLogs: (limit: number) => call<LogEntry[]>('recent_logs', { limit }),
+
+  traffic: () => call<TrafficSample | null>('traffic'),
+
+  connections: () => call<ConnectionsSnapshot | null>('connections'),
+
+  closeConnection: (id: string | null) =>
+    call<void>('close_connection', { id }),
 
   testLatency: (timeoutSecs: number) =>
     call<LatencySample[]>('test_latency', { timeoutSecs }),

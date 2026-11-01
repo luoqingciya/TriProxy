@@ -23,8 +23,9 @@ use tauri::State;
 use triproxy_core::compiler::compile;
 use triproxy_core::profile::{parse_payload, Node};
 use triproxy_core::{
-    AppSettings, AppliedProxy, CompiledConfig, CoreKind, CorePreference, LogLevel, LogLine,
-    ManagerStatus, ProfileStore, Selection, Selector, StoredProfile, SystemProxyManager,
+    AppSettings, AppliedProxy, CompiledConfig, ControllerClient, CoreKind, CorePreference,
+    LogLevel, LogLine, ManagerStatus, ProfileStore, Selection, Selector, StoredProfile,
+    SystemProxyManager,
 };
 
 use crate::AppState;
@@ -320,6 +321,33 @@ fn to_view(line: LogLine) -> LogEntryView {
         }
         .to_string(),
         text: line.text,
+    }
+}
+
+#[tauri::command]
+pub async fn traffic(
+    state: State<'_, AppState>,
+) -> CmdResult<Option<triproxy_core::TrafficSample>> {
+    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    // The controller is only present for Mihomo and sing-box; a missing API is
+    // a normal state, not an error worth a banner.
+    Ok(client.traffic_once().await.ok())
+}
+
+#[tauri::command]
+pub async fn connections(
+    state: State<'_, AppState>,
+) -> CmdResult<Option<triproxy_core::ConnectionsSnapshot>> {
+    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    Ok(client.connections().await.ok())
+}
+
+#[tauri::command]
+pub async fn close_connection(state: State<'_, AppState>, id: Option<String>) -> CmdResult<()> {
+    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    match id {
+        Some(id) => client.close_connection(&id).await.map_err(err),
+        None => client.close_all().await.map_err(err),
     }
 }
 
