@@ -4007,7 +4007,7 @@ dependencies = [
 
 [[package]]
 name = "triproxy-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "triproxy-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
