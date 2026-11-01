@@ -38,6 +38,7 @@ use crate::error::{Error, Result};
 use crate::logging::now_ms;
 use crate::paths::Layout;
 use crate::profile::{InputFormat, Profile};
+use crate::subscription::Subscription;
 
 const INDEX_FILE: &str = "index.json";
 
@@ -53,6 +54,9 @@ pub struct StoredProfile {
     /// Content fingerprint of the stored profile (see [`Profile::id`]).
     pub content_id: String,
     pub updated_at_ms: u64,
+    /// Present when the profile came from a URL and can be refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<Subscription>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -67,6 +71,19 @@ struct Record {
     id: String,
     stored_at_ms: u64,
     profile: Profile,
+    /// Refresh state, present for URL-sourced profiles. Optional so records
+    /// written before subscriptions existed still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription: Option<Subscription>,
+}
+
+/// A record as stored on disk, including refresh state.
+#[derive(Debug, Clone)]
+pub struct StoredRecord {
+    pub id: String,
+    pub stored_at_ms: u64,
+    pub profile: Profile,
+    pub subscription: Option<Subscription>,
 }
 
 pub struct ProfileStore {
@@ -167,7 +184,29 @@ impl ProfileStore {
     /// Passing an existing `id` updates that record (a subscription refresh);
     /// omitting it creates a new record whose id is derived from the name and
     /// the moment of first import.
+    ///
+    /// An existing subscription is preserved: refreshing a URL profile must not
+    /// silently turn it into a manual one.
     pub fn save(&self, profile: &Profile, id: Option<&str>) -> Result<StoredProfile> {
+        self.save_inner(profile, id, None)
+    }
+
+    /// Store a profile together with the subscription it came from.
+    pub fn save_subscription(
+        &self,
+        profile: &Profile,
+        id: Option<&str>,
+        subscription: Subscription,
+    ) -> Result<StoredProfile> {
+        self.save_inner(profile, id, Some(subscription))
+    }
+
+    fn save_inner(
+        &self,
+        profile: &Profile,
+        id: Option<&str>,
+        subscription: Option<Subscription>,
+    ) -> Result<StoredProfile> {
         self.ensure()?;
 
         let id = match id {
@@ -175,15 +214,93 @@ impl ProfileStore {
             None => new_record_id(&profile.name),
         };
 
+        let subscription = match subscription {
+            Some(subscription) => Some(subscription),
+            None => self
+                .record(&id)
+                .ok()
+                .and_then(|existing| existing.subscription),
+        };
+
         let record = Record {
             id: id.clone(),
             stored_at_ms: now_ms(),
             profile: profile.clone(),
+            subscription,
         };
         let text = serde_json::to_string_pretty(&record)?;
         write_atomic(&self.record_path(&id), &text)?;
 
         Ok(summarise(&record))
+    }
+
+    /// Full record, including refresh state.
+    pub fn record(&self, id: &str) -> Result<StoredRecord> {
+        let path = self.record_path(id);
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::Other(format!("no profile with id `{id}`"))
+            } else {
+                Error::io(&path, error)
+            }
+        })?;
+        let record: Record = serde_json::from_str(&text)?;
+        Ok(StoredRecord {
+            id: record.id,
+            stored_at_ms: record.stored_at_ms,
+            profile: record.profile,
+            subscription: record.subscription,
+        })
+    }
+
+    /// Every readable record, including refresh state.
+    pub fn records(&self) -> Result<Vec<StoredRecord>> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(Error::io(&self.root, error)),
+        };
+
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) == Some(INDEX_FILE) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<Record>(&text) else {
+                continue;
+            };
+            out.push(StoredRecord {
+                id: record.id,
+                stored_at_ms: record.stored_at_ms,
+                profile: record.profile,
+                subscription: record.subscription,
+            });
+        }
+
+        out.sort_by(|a, b| b.stored_at_ms.cmp(&a.stored_at_ms).then(a.id.cmp(&b.id)));
+        Ok(out)
+    }
+
+    /// Persist a record verbatim (used after a refresh attempt updates the
+    /// subscription state without changing the profile).
+    pub fn save_record(&self, record: &StoredRecord) -> Result<StoredProfile> {
+        self.ensure()?;
+        let stored = Record {
+            id: record.id.clone(),
+            stored_at_ms: record.stored_at_ms,
+            profile: record.profile.clone(),
+            subscription: record.subscription.clone(),
+        };
+        let text = serde_json::to_string_pretty(&stored)?;
+        write_atomic(&self.record_path(&record.id), &text)?;
+        Ok(summarise(&stored))
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
@@ -255,6 +372,7 @@ fn summarise(record: &Record) -> StoredProfile {
         node_count: record.profile.nodes.len(),
         content_id: record.profile.id.clone(),
         updated_at_ms: record.stored_at_ms,
+        subscription: record.subscription.clone(),
     }
 }
 

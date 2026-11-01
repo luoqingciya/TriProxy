@@ -49,6 +49,8 @@ pub mod selector;
 pub mod settings;
 pub mod state;
 pub mod store;
+pub mod subscription;
+pub mod subscription_service;
 
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
@@ -76,4 +78,6 @@ pub use selector::{
 };
 pub use settings::{AppSettings, Theme};
 pub use state::CoreState;
-pub use store::{ProfileStore, StoredProfile};
+pub use store::{ProfileStore, StoredProfile, StoredRecord};
+pub use subscription::{FetchOutcome, Subscription, SubscriptionClient};
+pub use subscription_service::{RefreshOutcome, RefreshStatus, SubscriptionService};

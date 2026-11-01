@@ -123,6 +123,39 @@ pub async fn set_active_profile(state: State<'_, AppState>, id: String) -> CmdRe
     store.set_active(Some(&id)).map_err(err)
 }
 
+#[derive(Serialize)]
+pub struct RefreshResult {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn refresh_profile(state: State<'_, AppState>, id: String) -> CmdResult<RefreshResult> {
+    let store = ProfileStore::new(state.manager.layout());
+    let service = triproxy_core::SubscriptionService::new(&store).map_err(err)?;
+    let outcome = service.refresh(&id).await.map_err(err)?;
+    Ok(match outcome.status {
+        triproxy_core::RefreshStatus::Updated { node_count } => RefreshResult {
+            kind: "updated".to_string(),
+            node_count: Some(node_count),
+            error: None,
+        },
+        triproxy_core::RefreshStatus::NotModified => RefreshResult {
+            kind: "not_modified".to_string(),
+            node_count: None,
+            error: None,
+        },
+        triproxy_core::RefreshStatus::Failed { error } => RefreshResult {
+            kind: "failed".to_string(),
+            node_count: None,
+            error: Some(error),
+        },
+    })
+}
+
 #[tauri::command]
 pub async fn delete_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let store = ProfileStore::new(state.manager.layout());

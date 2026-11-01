@@ -13,7 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Check, Plus, Trash2 } from 'lucide-react'
+import { Check, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
@@ -26,6 +26,7 @@ export function Profiles() {
   const importProfile = useApp((state) => state.importProfile)
   const useProfile = useApp((state) => state.useProfile)
   const removeProfile = useApp((state) => state.removeProfile)
+  const refreshProfile = useApp((state) => state.refreshProfile)
 
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
@@ -114,6 +115,7 @@ export function Profiles() {
                         {profile.name}
                       </span>
                       {active && <Badge tone="accent">活动</Badge>}
+                      {profile.subscription && <Badge>订阅</Badge>}
                     </div>
                     <div className="mt-1 text-[12.5px] text-muted tabular">
                       {profile.node_count} 个节点 ·{' '}
@@ -133,6 +135,16 @@ export function Profiles() {
                     </span>
                   ) : (
                     <Button onClick={() => useProfile(profile.id)}>设为活动</Button>
+                  )}
+                  {profile.subscription && (
+                    <Button
+                      className="px-2.5"
+                      disabled={busy}
+                      onClick={() => refreshProfile(profile.id)}
+                      title="立即刷新订阅"
+                    >
+                      <RefreshCw size={14} />
+                    </Button>
                   )}
                   <Button
                     variant="danger"
