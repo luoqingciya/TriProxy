@@ -269,9 +269,50 @@ jobs:
             triproxy-${{ matrix.target }}-full.*
           if-no-files-found: error
 
+  # The desktop shell is a separate deliverable: the `build` job ships the CLI,
+  # this one ships the GUI installer. Without it the release contained no
+  # runnable application at all — only archives of a command-line tool.
+  desktop:
+    name: desktop (windows installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # `tauri build` runs `beforeBuildCommand` (npm run build) itself, so the
+      # frontend is built as part of this step.
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build NSIS installer
+        run: npx tauri build --bundles nsis
+
+      - name: Verify the installer exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l src-tauri/target/release/bundle/nsis/
+          test -n "$(ls src-tauri/target/release/bundle/nsis/*.exe)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: triproxy-desktop-windows
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
   release:
     name: publish release
-    needs: build
+    needs: [build, desktop]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
