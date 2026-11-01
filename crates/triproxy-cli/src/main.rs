@@ -23,7 +23,8 @@ use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, parse_payload, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport,
-    Diagnostic, Layout, ManagerStatus, Node, SwitchReport,
+    Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile, Selector,
+    SwitchReport,
 };
 
 #[derive(Parser)]
@@ -169,6 +170,17 @@ enum CoreCommand {
         /// mihomo | sing-box | xray
         core: String,
     },
+    /// Evaluate which core should serve a profile (Smart Engine)
+    Select {
+        /// File path, or `-` to read stdin
+        source: String,
+        /// Treat TUN as required (eliminates cores without native TUN)
+        #[arg(long)]
+        tun: bool,
+        /// Print the evaluation as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -255,6 +267,7 @@ async fn run(cli: Cli) -> Result<i32> {
                 .await
             }
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
+            CoreCommand::Select { source, tun, json } => cmd_core_select(&source, tun, json),
         },
         Command::Profile { command } => match command {
             ProfileCommand::Parse { source, json } => cmd_profile_parse(&source, json),
@@ -300,14 +313,14 @@ async fn cmd_start(
     core: Option<&str>,
     profile: Option<&Path>,
 ) -> Result<i32> {
-    let kind = match core {
-        Some(name) => parse_core(name)?,
-        None => resolve_default_core(manager).await?,
+    let choice = match core {
+        Some(name) => parse_core_choice(name)?,
+        None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
+    let (kind, compiled) = resolve_target(choice, profile)?;
 
-    let report = match profile {
-        Some(path) => {
-            let compiled = compile_profile(path, kind)?;
+    let report = match compiled {
+        Some(compiled) => {
             manager
                 .start_with_config(kind, &compiled.text, compiled.file_name)
                 .await?
@@ -359,10 +372,11 @@ async fn cmd_restart(manager: &CoreManager) -> Result<i32> {
 }
 
 async fn cmd_switch(manager: &CoreManager, core: &str, profile: Option<&Path>) -> Result<i32> {
-    let kind = parse_core(core)?;
-    let report = match profile {
-        Some(path) => {
-            let compiled = compile_profile(path, kind)?;
+    let choice = parse_core_choice(core)?;
+    let (kind, compiled) = resolve_target(choice, profile)?;
+
+    let report = match compiled {
+        Some(compiled) => {
             manager
                 .switch_with_config(kind, &compiled.text, compiled.file_name)
                 .await?
@@ -570,18 +584,6 @@ fn cmd_profile_check(source: &str, json: bool) -> Result<i32> {
 }
 
 /// Read, parse and compile a profile for one core, reporting skipped nodes.
-fn compile_profile(path: &Path, kind: CoreKind) -> Result<CompiledConfig> {
-    let label = path.display().to_string();
-    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {label}"))?;
-    let parsed = parse_payload(&text, &profile_name_from_source(&label), &label);
-    let compiled = compile(kind, &parsed.profile, &CompileOptions::default())
-        .map_err(|error| anyhow!("{error}"))?;
-    for skipped in &compiled.skipped {
-        eprintln!("skipped `{}`: {}", skipped.name, skipped.reason);
-    }
-    Ok(compiled)
-}
-
 async fn cmd_profile_compile(
     manager: &CoreManager,
     source: &str,
@@ -638,6 +640,171 @@ async fn cmd_profile_compile(
         }
     }
 
+    Ok(0)
+}
+
+/// Read and parse a profile from disk.
+fn load_profile(path: &Path) -> Result<ParsedProfile> {
+    let label = path.display().to_string();
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {label}"))?;
+    Ok(parse_payload(
+        &text,
+        &profile_name_from_source(&label),
+        &label,
+    ))
+}
+
+/// Compile for one core, reporting skipped nodes on stderr.
+fn compile_for(kind: CoreKind, profile: &Profile) -> Result<CompiledConfig> {
+    let compiled =
+        compile(kind, profile, &CompileOptions::default()).map_err(|error| anyhow!("{error}"))?;
+    for skipped in &compiled.skipped {
+        eprintln!("skipped `{}`: {}", skipped.name, skipped.reason);
+    }
+    Ok(compiled)
+}
+
+/// What the user asked for: let the selector decide, or pin a core.
+#[derive(Debug, Clone, Copy)]
+enum CoreChoice {
+    Smart,
+    Fixed(CoreKind),
+}
+
+fn parse_core_choice(value: &str) -> Result<CoreChoice> {
+    let lowered = value.trim().to_ascii_lowercase();
+    if lowered == "smart" || lowered == "auto" {
+        return Ok(CoreChoice::Smart);
+    }
+    Ok(CoreChoice::Fixed(parse_core(value)?))
+}
+
+/// Resolve the core to run and, when a profile was supplied, its compiled config.
+fn resolve_target(
+    choice: CoreChoice,
+    profile: Option<&Path>,
+) -> Result<(CoreKind, Option<CompiledConfig>)> {
+    match (choice, profile) {
+        (CoreChoice::Smart, None) => {
+            bail!("`--core smart` needs `--profile`: there is no profile to choose a core for")
+        }
+        (CoreChoice::Smart, Some(path)) => {
+            let parsed = load_profile(path)?;
+            let selection = Selector::smart()
+                .select(&parsed.profile, NetworkRequirements::default())
+                .map_err(|error| anyhow!("{error}"))?;
+            eprintln!(
+                "smart: selected `{}` — {}",
+                selection.selected, selection.reason
+            );
+            let compiled = compile_for(selection.selected, &parsed.profile)?;
+            Ok((selection.selected, Some(compiled)))
+        }
+        (CoreChoice::Fixed(kind), Some(path)) => {
+            let parsed = load_profile(path)?;
+            let compiled = compile_for(kind, &parsed.profile)?;
+            Ok((kind, Some(compiled)))
+        }
+        (CoreChoice::Fixed(kind), None) => Ok((kind, None)),
+    }
+}
+
+fn cmd_core_select(source: &str, tun: bool, json: bool) -> Result<i32> {
+    let (text, label) = read_profile_source(source)?;
+    let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
+    let network = NetworkRequirements {
+        tun,
+        ..Default::default()
+    };
+
+    let selection = match Selector::smart().select(&parsed.profile, network) {
+        Ok(selection) => selection,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Ok(1);
+        }
+    };
+
+    if json {
+        let payload = serde_json::json!({
+            "profile": parsed.profile.name,
+            "nodes": parsed.profile.nodes.len(),
+            "network": { "tun": network.tun },
+            "selected": selection.selected.as_str(),
+            "overridden": selection.overridden,
+            "reason": selection.reason,
+            "evaluations": selection.evaluations,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    let requirement = Selector::requirement(&parsed.profile, network);
+    let protocols = requirement
+        .protocols
+        .iter()
+        .map(|protocol| protocol.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut needs = Vec::new();
+    if requirement.requires_reality {
+        needs.push("reality");
+    }
+    if requirement.requires_vision {
+        needs.push("vision");
+    }
+    if requirement.requires_tun {
+        needs.push("tun");
+    }
+    if requirement.requires_rule_set {
+        needs.push("rule-set");
+    }
+    if requirement.requires_proxy_groups {
+        needs.push("proxy-groups");
+    }
+
+    println!(
+        "profile   {}  ({} nodes)",
+        parsed.profile.name,
+        parsed.profile.nodes.len()
+    );
+    println!("protocols {protocols}");
+    if !needs.is_empty() {
+        println!("needs     {}", needs.join(", "));
+    }
+    println!();
+
+    let headers = ["CORE", "VERDICT", "DETAIL"];
+    let rows: Vec<Vec<String>> = selection
+        .evaluations
+        .iter()
+        .map(|evaluation| {
+            let verdict = if evaluation.core == selection.selected {
+                "selected"
+            } else if evaluation.eligible {
+                "eligible"
+            } else {
+                "ineligible"
+            };
+            let detail = if evaluation.eligible {
+                if evaluation.native_features.is_empty() {
+                    "-".to_string()
+                } else {
+                    format!("native {}", evaluation.native_features.join(" + "))
+                }
+            } else {
+                format!("missing {}", evaluation.unmet.join(", "))
+            };
+            vec![
+                evaluation.core.as_str().to_string(),
+                verdict.to_string(),
+                detail,
+            ]
+        })
+        .collect();
+    print!("{}", render_table(&headers, &rows));
+
+    println!("\nReason: {}", selection.reason);
     Ok(0)
 }
 

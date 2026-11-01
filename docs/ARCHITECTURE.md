@@ -350,7 +350,64 @@ triproxy switch xray --profile sub.txt
 `bootstrap.rs` 仍然保留：不带 `--profile` 的 `start` 还没有 Profile 可用（订阅存储属于 Phase 9），
 所以「直连最小配置」仍是默认路径。Phase 9 落地后这条路径应被删除。
 
-## 8. 尚未实现（明确的边界）
+## 8. Phase 4 — Smart Core Selector
+
+### 8.1 没有实现规划书的加权公式，原因如下
+
+规划书 13 章给出 `Compatibility 50% / Feature Match 25% / Performance 15% / User Preference 10%`。
+这个公式没有落地，因为它有两个站不住的地方：
+
+- **兼容性不能是权重**。跑不了这份 Profile 的核心不是「90% 兼容」，而是不可用。
+  硬约束淘汰在前，留下的候选兼容性都是 100%，那 50% 的权重贡献恒为常数。
+- **性能没有测量依据**。给一个没人测过的数字配 15% 权重，只会让结果看起来精确，实则任意。
+
+### 8.2 实际采用的字典序排序
+
+1. **硬兼容性淘汰**（`ProfileRequirement::unmet_by`）
+2. **原生特性数量**：Profile 要求的可选特性里，该核心有几个是一等公民
+3. **默认顺序**：sing-box → mihomo → xray
+
+第 3 条不是性能排名，而是照搬规划书 10 章自己的定位：sing-box 是「通用现代核心」，
+mihomo 面向 Clash 生态，Xray 面向 V2Ray/Xray 生态。没有生态偏好的 Profile，
+默认给通用核心是更稳妥的选择。这三条全部写死在代码与文档里，同一个 Profile 永远选出同一个核心。
+
+### 8.3 只有「差异化」特性才计分
+
+Reality 与 Vision 三个核心都支持，把它们算作「原生特性」会给每个候选加同一个常数，
+不携带任何信息。只有 `rule-set`（仅 sing-box 原生）与 `proxy-groups`（sing-box、mihomo）
+参与比较。
+
+### 8.4 应用侧需求必须单独建模
+
+`Profile::requirement()` 只能从节点推导出协议、Reality、Vision、WireGuard。
+TUN、DNS、rule-set 属于应用设置，节点里没有这些信息。如果只吃 Profile，
+`requires_tun` 恒为 false，Xray 永远看起来同样合适——选型就退化成纯 tie-break。
+
+因此引入 `NetworkRequirements { tun, dns, rule_set, proxy_groups }`，
+由调用方（未来的 GUI 设置页）提供，`Selector::requirement()` 把它并进 Profile 需求。
+`core select --tun` 就是这条路径的演示：打开 TUN 后 Xray 立刻被判为 ineligible。
+
+### 8.5 解释必须包含被淘汰者
+
+```text
+  CORE      VERDICT     DETAIL
+  sing-box  selected    -
+  mihomo    eligible    -
+  xray      ineligible  missing TUN
+
+Reason: sing-box is the default general-purpose core; no candidate needed a
+specialisation; eliminated: xray (TUN)
+```
+
+只说「为什么是它」不够，还要说「为什么不是另外两个」。核心从列表里安静消失，
+正是最需要解释的那类决策（规划书 23 章）。
+
+### 8.6 手动覆盖
+
+`CorePreference::Fixed(kind)` 仍然会跑兼容性检查：用户手选一个跑不了这份 Profile 的核心时
+直接报错并说明缺什么，而不是悄悄回退到别的核心——回退会让用户以为自己选的生效了。
+
+## 9. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 
