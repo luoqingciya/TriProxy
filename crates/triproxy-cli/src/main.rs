@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use triproxy_core::binaries::InstallOptions;
+use triproxy_core::binaries::{InstallOptions, UpdateStatus};
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
@@ -295,6 +295,20 @@ enum CoreCommand {
         #[arg(long, value_name = "PREFIX")]
         mirror: Option<String>,
     },
+    /// Check for newer core releases and install them
+    Update {
+        /// mihomo | sing-box | xray; omit with --all
+        core: Option<String>,
+        /// Check every core
+        #[arg(long)]
+        all: bool,
+        /// Only report, do not install
+        #[arg(long)]
+        check: bool,
+        /// Print the results as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the resolved binary path for a core
     Path {
         /// mihomo | sing-box | xray
@@ -454,6 +468,12 @@ async fn run(cli: Cli) -> Result<i32> {
                 )
                 .await
             }
+            CoreCommand::Update {
+                core,
+                all,
+                check,
+                json,
+            } => cmd_core_update(&manager, core.as_deref(), all, check, json).await,
             CoreCommand::Path { core } => cmd_core_path(&manager, &core),
             CoreCommand::Select { source, tun, json } => cmd_core_select(&source, tun, json),
         },
@@ -691,6 +711,75 @@ async fn cmd_core_install(
     println!("  tag      {}", installed.tag);
     println!("  path     {}", installed.path.display());
     println!("  sha256   {}", installed.sha256);
+    Ok(0)
+}
+
+async fn cmd_core_update(
+    manager: &CoreManager,
+    core: Option<&str>,
+    all: bool,
+    check_only: bool,
+    json: bool,
+) -> Result<i32> {
+    let kinds: Vec<CoreKind> = if all {
+        CoreKind::ALL.to_vec()
+    } else {
+        let name = core.ok_or_else(|| anyhow!("specify a core, or pass --all"))?;
+        vec![parse_core(name)?]
+    };
+
+    let mut results = Vec::new();
+    for kind in kinds {
+        match manager.binaries().check_update(kind).await {
+            Ok(outcome) => results.push(outcome),
+            Err(error) => {
+                // A network failure must not be reported as "up to date".
+                eprintln!("{kind}: cannot check for updates — {error}");
+            }
+        }
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "checks": results.iter().map(|outcome| serde_json::json!({
+                "core": outcome.core.as_str(),
+                "installed": outcome.installed,
+                "latest": outcome.latest,
+                "status": outcome.status.as_str(),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    for outcome in &results {
+        let installed = outcome.installed.as_deref().unwrap_or("not installed");
+        let latest = outcome.latest.as_deref().unwrap_or("?");
+        match outcome.status {
+            UpdateStatus::UpToDate => {
+                println!("{:<9} up to date ({installed})", outcome.core.as_str())
+            }
+            UpdateStatus::NotInstalled => println!(
+                "{:<9} not installed — latest is {latest}, run `core install`",
+                outcome.core.as_str()
+            ),
+            UpdateStatus::UpdateAvailable => {
+                println!("{:<9} {installed} → {latest}", outcome.core.as_str());
+                if !check_only {
+                    let options = InstallOptions {
+                        version: Some(latest.to_string()),
+                        force: true,
+                        ..Default::default()
+                    };
+                    match manager.binaries().install(outcome.core, &options).await {
+                        Ok(binary) => println!("          installed {}", binary.version),
+                        Err(error) => eprintln!("          install failed: {error}"),
+                    }
+                }
+            }
+        }
+    }
+
     Ok(0)
 }
 

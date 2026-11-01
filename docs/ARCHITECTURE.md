@@ -778,7 +778,51 @@ tar.gz 分支也改成**扫描完整个归档再返回**，否则数据文件排
 同样的原因，`1.1.1.1:443` 与 `8.8.8.8:443` 在本机也超时：这是网络现状，不是探针的 bug——
 `127.0.0.1:1` 能立刻返回「连接被拒绝」，说明逻辑本身是通的。
 
-## 17. 尚未实现（明确的边界）
+## 17. Phase 10 — 核心更新
+
+### 17.1 版本比较不能用字符串
+
+三个项目的版本号形态不同（`1.19.33`、`1.14.4`、`26.10.31`，有的还带 `v` 前缀或 `-beta.1` 后缀）。
+按字符串比较会把 `1.19.4` 判成比 `1.19.33` 新——这是最典型的版本号 bug。
+
+`compare_versions()` 逐段按数字比较，并且**遇到非纯数字的段就停止**：
+`1.15.0-beta.1` 的段是 `[1, 15, 0]` 加一个「预发布」标记，因此它比 `1.15.0` **低**。
+这一点是写测试时才发现的：最初把 `-beta.1` 当成第 4 段解析，结果每个 beta 都被判成可更新。
+
+### 17.2 网络失败不能报成「已是最新」
+
+`check_update()` 把网络错误原样抛出，CLI 打印「cannot check for updates」。
+如果吞掉错误返回「已是最新」，用户会基于一个假结论做决定。
+
+### 17.3 实测
+
+```text
+$ triproxy core update --all --check
+mihomo    up to date (1.19.33)
+sing-box  up to date (1.14.4)
+xray      up to date (26.10.31)
+
+# 降级后
+$ triproxy core install mihomo --version 1.19.20 --force
+$ triproxy core update mihomo --check
+mihomo    1.19.20 → 1.19.33
+$ triproxy core update mihomo
+mihomo    1.19.20 → 1.19.33
+ INFO downloading core binary tag=v1.19.33 asset=mihomo-windows-amd64-compatible-v1.19.33.zip
+ WARN download attempt failed ... （直连失败，镜像回退成功）
+          installed 1.19.33
+$ triproxy core update mihomo --check
+mihomo    up to date (1.19.33)
+```
+
+那条 WARN 是镜像回退机制在工作，不是错误。
+
+### 17.4 没有 GUI 入口
+
+GUI 目前没有核心管理界面（安装/卸载/更新都不在），只加一个「更新」按钮会显得孤立。
+核心管理仍以 CLI 为主，等 GUI 有完整核心页时再一起做。
+
+## 18. 尚未实现（明确的边界）
 
 刻意不做，避免半成品：
 
