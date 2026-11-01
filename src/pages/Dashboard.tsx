@@ -1,0 +1,314 @@
+/*
+ * TriProxy — a modern multi-core proxy client.
+ * Copyright (C) 2026 luoqingci
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option) any later
+ * version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+ * PARTICULAR PURPOSE. See LICENSE for the full text.
+ *
+ * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+ */
+
+import { ChevronDown, ChevronRight, Power, Zap } from 'lucide-react'
+import { useState } from 'react'
+
+import { useApp } from '../store/app'
+import { CORE_LABEL, STATE_LABEL, type Selection } from '../types'
+import { Badge, Button, Card, SectionTitle, StateDot } from '../components/ui'
+import { PageHeader } from '../components/Sidebar'
+
+function formatUptime(seconds: number | null | undefined): string {
+  if (!seconds) return '—'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `${h} 小时 ${m} 分`
+  if (m > 0) return `${m} 分钟`
+  return `${seconds} 秒`
+}
+
+/**
+ * Render the selection rationale in the UI language.
+ *
+ * The backend's `reason` is a canonical English sentence intended for logs and
+ * `--json`; showing it verbatim in a Chinese interface reads like a leaked
+ * debug string. The structured evaluations carry everything needed to phrase it
+ * locally.
+ */
+function describeSelection(selection: Selection): string {
+  const winner = selection.evaluations.find((entry) => entry.core === selection.selected)
+  const parts: string[] = []
+
+  if (winner && winner.native_features.length > 0) {
+    parts.push(
+      `${CORE_LABEL[selection.selected]} 原生支持 ${winner.native_features.join(' + ')}`,
+    )
+  } else {
+    parts.push(`${CORE_LABEL[selection.selected]} 是默认的通用核心，没有候选需要特殊能力`)
+  }
+
+  const eliminated = selection.evaluations.filter((entry) => !entry.eligible)
+  if (eliminated.length > 0) {
+    parts.push(
+      `已排除 ${eliminated
+        .map((entry) => `${CORE_LABEL[entry.core]}（缺少 ${entry.unmet.join('、')}）`)
+        .join('、')}`,
+    )
+  }
+
+  return parts.join('；')
+}
+
+export function Dashboard() {
+  const status = useApp((state) => state.status)
+  const library = useApp((state) => state.library)
+  const selection = useApp((state) => state.selection)
+  const settings = useApp((state) => state.settings)
+  const busy = useApp((state) => state.busy)
+  const start = useApp((state) => state.start)
+  const switchTo = useApp((state) => state.switchTo)
+  const stop = useApp((state) => state.stop)
+  const [showWhy, setShowWhy] = useState(false)
+
+  const running = status?.cores.find((core) => core.state === 'running')
+  const connected = Boolean(running)
+  const activeProfile = library.profiles.find((entry) => entry.id === library.active)
+
+  return (
+    <div>
+      <PageHeader
+        title="仪表盘"
+        description="一眼看清当前连接、核心与配置"
+        actions={
+          <Button
+            variant={connected ? 'ghost' : 'primary'}
+            disabled={busy}
+            onClick={() => (connected ? stop() : start(null))}
+          >
+            <Power size={15} strokeWidth={2.2} />
+            {connected ? '断开' : '连接'}
+          </Button>
+        }
+      />
+
+      {/* Connection hero */}
+      <Card className="mb-4">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="flex items-center gap-2">
+              <StateDot state={running?.state ?? 'stopped'} />
+              <span className="text-[13px] font-medium text-muted">
+                {connected ? '已连接' : '未连接'}
+              </span>
+            </div>
+            <div className="mt-3 text-[26px] leading-none font-semibold tracking-tight text-fg">
+              {activeProfile?.name ?? '未选择配置'}
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted tabular">
+              {connected ? (
+                <>
+                  <span>{CORE_LABEL[running!.kind]}</span>
+                  <span className="text-faint">·</span>
+                  <span>127.0.0.1:{running!.listen_port ?? 7890}</span>
+                  <span className="text-faint">·</span>
+                  <span>{running!.latency_ms ?? '—'} ms</span>
+                  <span className="text-faint">·</span>
+                  <span>已运行 {formatUptime(running!.uptime_secs)}</span>
+                </>
+              ) : (
+                <span>选择一个配置后即可连接</span>
+              )}
+            </div>
+          </div>
+
+          {running && (
+            <div className="flex flex-col items-end gap-2">
+              <Badge tone="success">{STATE_LABEL[running.state]}</Badge>
+              {running.binary_version && (
+                <span className="text-[11.5px] text-faint tabular">
+                  v{running.binary_version}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <div className="mb-4 grid grid-cols-2 gap-4">
+        <Card>
+          <SectionTitle title="当前配置" />
+          {activeProfile ? (
+            <div className="space-y-1.5 text-[13px]">
+              <Row label="名称" value={activeProfile.name} />
+              <Row label="节点" value={`${activeProfile.node_count}`} />
+              <Row label="来源" value={activeProfile.source || '—'} />
+            </div>
+          ) : (
+            <p className="text-[13px] text-faint">还没有配置，去「配置」页导入订阅</p>
+          )}
+        </Card>
+
+        <Card>
+          <SectionTitle title="网络模式" />
+          <div className="space-y-1.5 text-[13px]">
+            <Row
+              label="系统代理"
+              value="未启用"
+              hint="Phase 6"
+            />
+            <Row label="TUN" value={settings?.tun ? '已启用' : '未启用'} hint="Phase 7" />
+            <Row label="分流规则" value={settings?.rule_set ? '已启用' : '未启用'} />
+          </div>
+        </Card>
+      </div>
+
+      {/* Smart Engine */}
+      <Card>
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft">
+              <Zap size={15} className="text-accent" strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[14px] font-medium text-fg">Smart Engine</span>
+                {selection && <Badge tone="accent">{CORE_LABEL[selection.selected]}</Badge>}
+              </div>
+              <p className="mt-1 max-w-[560px] text-[12.5px] leading-relaxed text-muted">
+                {selection ? describeSelection(selection) : '没有可用的配置，无法评估核心'}
+              </p>
+            </div>
+          </div>
+
+          {selection && (
+            <button
+              onClick={() => setShowWhy((value) => !value)}
+              className="flex shrink-0 items-center gap-1 text-[12.5px] text-accent hover:underline"
+            >
+              {showWhy ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              为什么是这个核心？
+            </button>
+          )}
+        </div>
+
+        {showWhy && selection && (
+          <div className="mt-4 border-t border-line pt-4">
+            <div className="grid grid-cols-[88px_92px_1fr] gap-y-2 text-[12.5px]">
+              <div className="text-[11px] font-semibold tracking-wide text-faint uppercase">核心</div>
+              <div className="text-[11px] font-semibold tracking-wide text-faint uppercase">结论</div>
+              <div className="text-[11px] font-semibold tracking-wide text-faint uppercase">说明</div>
+              {selection.evaluations.map((evaluation) => (
+                <EvaluationRow key={evaluation.core} evaluation={evaluation} />
+              ))}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Core roster: this is a multi-core client, so the state of all three
+          cores is first-class information, and switching is one click away. */}
+      <Card className="mt-4">
+        <SectionTitle title="核心" hint="同一时刻只有一个核心运行" />
+        <div className="grid grid-cols-[92px_110px_1fr_1fr_72px] gap-3 border-b border-line pb-2 text-[11px] font-semibold tracking-wide text-faint uppercase">
+          <div>核心</div>
+          <div>状态</div>
+          <div>版本</div>
+          <div>监听</div>
+          <div className="text-right">操作</div>
+        </div>
+        {status?.cores.map((core) => {
+          const running = core.state === 'running'
+          return (
+            <div
+              key={core.kind}
+              className="grid grid-cols-[92px_110px_1fr_1fr_72px] items-center gap-3 border-b border-line py-2.5 text-[13px] last:border-b-0"
+            >
+              <div className={running ? 'font-medium text-fg' : 'text-muted'}>
+                {CORE_LABEL[core.kind]}
+              </div>
+              <div className="flex items-center gap-2">
+                <StateDot state={core.state} />
+                <span className="text-[12.5px] text-muted">{STATE_LABEL[core.state]}</span>
+              </div>
+              <div className="text-muted tabular">
+                {core.binary_version ? `v${core.binary_version}` : '未安装'}
+              </div>
+              <div className="text-muted tabular">
+                {running ? `127.0.0.1:${core.listen_port ?? '—'}` : '—'}
+              </div>
+              <div className="text-right">
+                {running ? (
+                  <span className="text-[12px] text-accent">当前</span>
+                ) : (
+                  <button
+                    disabled={busy || !core.binary}
+                    onClick={() => switchTo(core.kind)}
+                    className="text-[12px] text-muted hover:text-accent disabled:opacity-40"
+                  >
+                    切换
+                  </button>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </Card>
+    </div>
+  )
+}
+
+function Row({
+  label,
+  value,
+  hint,
+}: {
+  label: string
+  value: string
+  hint?: string
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <span className="text-muted">
+        {label}
+        {hint && <span className="ml-1.5 text-[11px] text-faint">{hint}</span>}
+      </span>
+      <span className="truncate text-fg">{value}</span>
+    </div>
+  )
+}
+
+function EvaluationRow({
+  evaluation,
+}: {
+  evaluation: {
+    core: 'mihomo' | 'sing-box' | 'xray'
+    eligible: boolean
+    unmet: string[]
+    native_features: string[]
+  }
+}) {
+  const selected = useApp((state) => state.selection?.selected === evaluation.core)
+  const verdict = selected ? '已选中' : evaluation.eligible ? '可用' : '不可用'
+  const detail = evaluation.eligible
+    ? evaluation.native_features.length > 0
+      ? `原生支持 ${evaluation.native_features.join(' + ')}`
+      : '无需特殊能力'
+    : `缺少 ${evaluation.unmet.join('、')}`
+
+  return (
+    <>
+      <div className={selected ? 'font-medium text-fg' : 'text-muted'}>
+        {CORE_LABEL[evaluation.core]}
+      </div>
+      <div>
+        <Badge tone={selected ? 'accent' : evaluation.eligible ? 'neutral' : 'danger'}>
+          {verdict}
+        </Badge>
+      </div>
+      <div className="text-muted">{detail}</div>
+    </>
+  )
+}

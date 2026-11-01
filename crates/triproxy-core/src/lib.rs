@@ -45,6 +45,7 @@ pub mod paths;
 pub mod process;
 pub mod profile;
 pub mod selector;
+pub mod settings;
 pub mod state;
 pub mod store;
 
@@ -67,5 +68,6 @@ pub use profile::{
 pub use selector::{
     CoreEvaluation, CorePreference, NetworkRequirements, SelectError, Selection, Selector,
 };
+pub use settings::{AppSettings, Theme};
 pub use state::CoreState;
 pub use store::{ProfileStore, StoredProfile};
