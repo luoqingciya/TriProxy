@@ -44,6 +44,7 @@ pub mod logging;
 pub mod paths;
 pub mod process;
 pub mod profile;
+pub mod selector;
 pub mod state;
 
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
@@ -61,5 +62,8 @@ pub use paths::Layout;
 pub use profile::{
     parse_payload, parse_uri, Credentials, Diagnostic, InputFormat, Node, ParsedProfile, Profile,
     Severity, Transport, VlessFlow,
+};
+pub use selector::{
+    CoreEvaluation, CorePreference, NetworkRequirements, SelectError, Selection, Selector,
 };
 pub use state::CoreState;
