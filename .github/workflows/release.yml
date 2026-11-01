@@ -93,6 +93,58 @@ jobs:
           echo "--- staged ---"
           ls -l "$FULL/cores"
 
+      - name: Fetch upstream license texts for the bundled cores
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FULL="dist/full"
+
+          # Redistributing a binary requires shipping its license text. Fetch the
+          # exact text at the pinned tag, not from the default branch, so the
+          # license matches the bytes actually bundled.
+          fetch_license() {
+            local repo="$1" tag="$2" out="$3" name
+            for name in LICENSE LICENSE.txt LICENSE.md COPYING COPYING.txt; do
+              if curl -fsSL --retry 3 --retry-delay 2 --max-time 60 \
+                   "https://raw.githubusercontent.com/$repo/$tag/$name" -o "$out" \
+                 && [ -s "$out" ] && ! grep -q '^404: Not Found' "$out"; then
+                echo "  got $repo/$name at $tag"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          for core in mihomo sing-box xray; do
+            case "$core" in
+              mihomo)   repo="MetaCubeX/mihomo" ;;
+              sing-box) repo="SagerNet/sing-box" ;;
+              xray)     repo="XTLS/Xray-core" ;;
+            esac
+            tag=$(jq -r '.tag' "$FULL/cores/$core.json")
+            out="$FULL/cores/LICENSE-$core.txt"
+
+            echo "--- $core ($repo@$tag) ---"
+            if ! fetch_license "$repo" "$tag" "$out"; then
+              echo "::error::no license text found for $core at $tag; refusing to ship an unlicensed binary"
+              exit 1
+            fi
+            # Some projects ship a short GPL notice instead of the full text
+            # (sing-box: ~800 bytes), so only reject obvious non-licenses.
+            size=$(wc -c < "$out")
+            if [ "$size" -lt 200 ] || grep -qiE '<!DOCTYPE|<html' "$out"; then
+              echo "::error::license text for $core looks invalid ($size bytes)"
+              exit 1
+            fi
+            head -1 "$out"
+            echo "  $size bytes"
+          done
+
+          # sing-box points at the GPL instead of embedding it. Include the body
+          # once; it is the same document as this package's own LICENSE.
+          cp LICENSE "$FULL/cores/LICENSE-GPL-3.0.txt"
+
       - name: Generate third-party notices for the bundled cores
         shell: bash
         run: |
@@ -112,7 +164,8 @@ jobs:
             echo
             echo "Corresponding source for every core is available at the exact"
             echo "tag listed here, from the upstream repository. No modifications"
-            echo "have been made to these binaries."
+            echo "have been made to these binaries. The full license text of each"
+            echo "core is bundled next to it, as LICENSE-<core>.txt."
             echo
 
             for core in mihomo sing-box xray; do
@@ -134,11 +187,17 @@ jobs:
               echo "  source:   https://github.com/$repo/tree/$tag"
               echo "  release:  https://github.com/$repo/releases/tag/$tag"
               echo "  sha256:   $sha"
+              echo "  license:  see cores/LICENSE-$core.txt"
               echo
             done
 
             echo "----------------------------------------------------------"
-            echo "Full license texts: see NOTICE.md and each upstream repository."
+            echo "The GNU GPL v3 full text is included as cores/LICENSE-GPL-3.0.txt"
+            echo "(identical to the top-level LICENSE of this package), because some"
+            echo "cores ship only a short GPL notice rather than the license body."
+            echo
+            echo "TriProxy itself is licensed GPL-3.0-or-later; see LICENSE"
+            echo "and ADDITIONAL-TERMS.md at the top level of this package."
           } > "$OUT"
 
           cat "$OUT"
@@ -167,6 +226,22 @@ jobs:
             echo "::error::bundled cores are present but not executable on this runner"
             exit 1
           fi
+
+          # Licensing artefacts are part of the deliverable, so assert them.
+          for f in dist/lite/LICENSE dist/lite/ADDITIONAL-TERMS.md \
+                   dist/full/LICENSE dist/full/ADDITIONAL-TERMS.md \
+                   dist/full/NOTICE.md \
+                   dist/full/cores/THIRD-PARTY-NOTICES.txt; do
+            [ -s "$f" ] || { echo "::error::missing or empty: $f"; exit 1; }
+          done
+          for core in mihomo sing-box xray; do
+            f="dist/full/cores/LICENSE-$core.txt"
+            [ -s "$f" ] || { echo "::error::missing upstream license: $f"; exit 1; }
+            echo "  $f: $(wc -c < "$f") bytes"
+          done
+          [ -s dist/full/cores/LICENSE-GPL-3.0.txt ] \
+            || { echo "::error::missing the GPLv3 body in the bundle"; exit 1; }
+
           echo "smoke: ok"
 
       - name: Pack (Windows)

@@ -92,10 +92,12 @@ triproxy logs -f           # 跟踪日志
 | 包 | 内容 | 适用场景 |
 |---|---|---|
 | `triproxy-<target>-lite` | 仅可执行文件 | 想自行管理核心版本、或需自行指定镜像/代理下载 |
-| `triproxy-<target>-full` | 可执行文件 + `cores/` 内三个已校验核心 | 开箱即用，首次运行无需联网 |
+| `triproxy-<target>-full` | 可执行文件 + `cores/` 内三个已校验核心 + 各核心许可全文 | 开箱即用，首次运行无需联网 |
 
 `full` 版的核心由 CI 调用 TriProxy 自身的下载与校验流程获取，SHA256 与上游 Release 一致，
-未经修改，并随包附带 `cores/THIRD-PARTY-NOTICES.txt`（版本、授权、对应源码地址）。
+未经修改，并随包附带 `cores/THIRD-PARTY-NOTICES.txt`（版本、授权、对应源码地址）与
+`cores/LICENSE-<core>.txt`（取自与二进制相同的 tag 的许可全文）。两种包都包含 TriProxy
+自身的 `LICENSE` 与 `ADDITIONAL-TERMS.md`。
 
 核心解析顺序（`triproxy core path <core>` 可查看实际来源）：
 

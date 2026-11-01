@@ -58,6 +58,22 @@ mihomo 1.19.33
 该文件由发布流水线根据实际下载的版本自动生成，与包内二进制一一对应，不会出现
 「声明版本与实际不符」的情况。
 
+同时，`full` 包内直接附带各核心的许可全文（取自与二进制**相同的 tag**，不是默认分支）：
+
+| 文件 | 内容 |
+|---|---|
+| `cores/LICENSE-mihomo.txt` | Mihomo 的 GPL-3.0 全文 |
+| `cores/LICENSE-sing-box.txt` | sing-box 的 GPLv3 声明（约 800 字节，**不是全文**） |
+| `cores/LICENSE-xray.txt` | Xray 的 MPL-2.0 全文 |
+| `cores/LICENSE-GPL-3.0.txt` | GNU GPL v3 正文（与本包顶层 `LICENSE` 相同） |
+
+需要特别说明：sing-box 的 LICENSE 只给出 GPLv3 声明与指向，未内嵌正文，并且带有它自己的
+附加条款——「未经事先同意，任何衍生作品不得使用本应用的名称或暗示关联」。因此包内额外附上
+GPLv3 正文，用户才能读到完整条款。TriProxy 以未修改的官方构建形式分发 sing-box，
+不构成衍生作品。
+
+若某个核心取不到许可文本，发布流水线会直接失败，而不是打出一个缺少许可的包。
+
 ## 校验和来源
 
 - 首选：GitHub Releases API 返回的 asset `digest` 字段（`sha256:...`）。

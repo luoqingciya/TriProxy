@@ -17,6 +17,11 @@
 一致，未经修改。程序优先使用用户自行安装的更新版本（`triproxy core install`），
 其次才用随包的 `cores/`。
 
+`full` 版同时附带完整的许可材料：顶层 `LICENSE` 与 `ADDITIONAL-TERMS.md`（TriProxy 自身），
+`cores/LICENSE-<core>.txt`（各核心的许可文本，取自与二进制相同的 tag），
+`cores/LICENSE-GPL-3.0.txt`（GPLv3 正文），以及 `cores/THIRD-PARTY-NOTICES.txt`
+（版本、来源、对应源码地址、sha256）。
+
 ## 首次运行
 
 ```bash
