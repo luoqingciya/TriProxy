@@ -295,6 +295,7 @@ triproxy traffic                     # 读一次流量采样
 ```bash
 triproxy profile test              # 测试活动配置的所有节点
 triproxy profile test --json       # 机器可读
+triproxy profile test --http       # 真实延迟：由核心通过节点发请求（需核心在跑）
 ```
 
 测的是到节点 `server:port` 的 **TCP 握手**：回答「能不能连上、有多远」，

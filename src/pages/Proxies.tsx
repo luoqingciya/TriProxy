@@ -39,6 +39,7 @@ export function Proxies() {
   const latency = useApp((state) => state.latency)
   const testing = useApp((state) => state.testing)
   const testLatency = useApp((state) => state.testLatency)
+  const testProxyDelay = useApp((state) => state.testProxyDelay)
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
 
@@ -73,10 +74,25 @@ export function Proxies() {
             : '还没有活动配置'
         }
         actions={
-          <Button onClick={() => testLatency()} disabled={testing || nodes.length === 0}>
-            <Activity size={15} strokeWidth={2.2} />
-            {testing ? '测试中…' : '测试延迟'}
-          </Button>
+          <>
+            <Button
+              onClick={() => testLatency()}
+              disabled={testing || nodes.length === 0}
+              title="TCP 握手：只说明端点可达"
+            >
+              <Activity size={15} strokeWidth={2.2} />
+              TCP 延迟
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => testProxyDelay()}
+              disabled={testing || nodes.length === 0}
+              title="由核心通过节点发起请求：能证明代理真的可用"
+            >
+              <Activity size={15} strokeWidth={2.2} />
+              {testing ? '测试中…' : '真实延迟'}
+            </Button>
+          </>
         }
       />
 
@@ -152,7 +168,8 @@ export function Proxies() {
       </Card>
 
       <p className="mt-3 text-[12px] text-faint">
-        延迟为 TCP 握手时间，只说明端点可达，不代表代理可用（凭据错误也会握手成功）。
+        TCP 延迟只说明端点可达（凭据错误也会握手成功）；真实延迟由核心通过节点发起请求，
+        能证明代理真的可用，但需要运行中的 Mihomo 或 sing-box（Xray 没有控制器 API）。
       </p>
     </div>
   )
