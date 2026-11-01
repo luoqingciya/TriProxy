@@ -46,6 +46,7 @@ pub mod process;
 pub mod profile;
 pub mod selector;
 pub mod state;
+pub mod store;
 
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
@@ -67,3 +68,4 @@ pub use selector::{
     CoreEvaluation, CorePreference, NetworkRequirements, SelectError, Selection, Selector,
 };
 pub use state::CoreState;
+pub use store::{ProfileStore, StoredProfile};

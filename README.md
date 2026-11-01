@@ -128,6 +128,12 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 | `triproxy profile parse <file\|-> [--json]` | 解析订阅/分享链接，列出节点 |
 | `triproxy profile compile <file\|-> --core X [-o PATH] [--check]` | 编译成核心配置；`--check` 交给核心校验 |
 | `triproxy profile check <file\|-> [--json]` | 校验并报告问题（有错误时退出码 1） |
+| `triproxy profile add <file\|-> [--name N] [--use]` | 导入到本地库（同名则更新） |
+| `triproxy profile list [--json]` | 列出已存 Profile |
+| `triproxy profile show <id\|name> [--json]` | 查看某个 Profile 的节点 |
+| `triproxy profile use <id\|name>` | 设为活动 Profile |
+| `triproxy profile current [--json]` | 查看活动 Profile |
+| `triproxy profile remove <id\|name>` | 删除 |
 | `triproxy core install <core> [--version V] [--force] [--mirror P] [--file PATH]` | 下载、校验、安装核心 |
 | `triproxy core path <core>` | 打印实际使用的二进制路径 |
 | `triproxy core select <file\|-> [--tun] [--json]` | 评估哪个核心最适合这份 Profile（Smart Engine） |
@@ -194,6 +200,19 @@ triproxy core select ./sub.txt          # 评估三个核心，给出结论与�
 triproxy core select ./sub.txt --tun    # 把 TUN 作为硬需求（Xray 会被淘汰）
 triproxy switch smart --profile ./sub.txt
 ```
+
+## Profile 库
+
+导入一次，之后 `start` / `switch` 直接使用活动 Profile，不必每次带 `--profile`：
+
+```bash
+triproxy profile add ./sub.txt --name jp-sub --use
+triproxy profile list
+triproxy start mihomo      # 用活动 Profile 编译后启动
+triproxy switch smart      # 用活动 Profile + 智能选核
+```
+
+解析优先级：`--profile <file>` → 活动 Profile → 无 Profile 时退回 Phase 1 的直连最小配置。
 
 排序采用字典序而非加权评分：**硬约束淘汰 → 原生特性数量 → 文档化的默认顺序**。
 规划书里的 50/25/15/10 权重没有实现——兼容性一旦不满足就该出局（不是"90% 兼容"），

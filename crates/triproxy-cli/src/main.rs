@@ -23,8 +23,8 @@ use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, parse_payload, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport,
-    Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile, Selector,
-    SwitchReport,
+    Diagnostic, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile,
+    ProfileStore, Selector, StoredProfile, SwitchReport,
 };
 
 #[derive(Parser)]
@@ -138,6 +138,47 @@ enum ProfileCommand {
         /// File path, or `-` to read stdin
         source: String,
         /// Print the diagnostics as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import a profile into the local library
+    Add {
+        /// File path, or `-` to read stdin
+        source: String,
+        /// Display name (defaults to the file name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Make it the active profile
+        #[arg(long = "use")]
+        use_it: bool,
+    },
+    /// List stored profiles
+    List {
+        /// Print the listing as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a stored profile's nodes
+    Show {
+        /// Profile id or name
+        target: String,
+        /// Print the profile as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a stored profile
+    Remove {
+        /// Profile id or name
+        target: String,
+    },
+    /// Mark a stored profile as active
+    Use {
+        /// Profile id or name
+        target: String,
+    },
+    /// Show the active profile
+    Current {
+        /// Print the profile as JSON
         #[arg(long)]
         json: bool,
     },
@@ -279,6 +320,16 @@ async fn run(cli: Cli) -> Result<i32> {
                 json,
             } => cmd_profile_compile(&manager, &source, &core, output, check, json).await,
             ProfileCommand::Check { source, json } => cmd_profile_check(&source, json),
+            ProfileCommand::Add {
+                source,
+                name,
+                use_it,
+            } => cmd_profile_add(&manager, &source, name, use_it),
+            ProfileCommand::List { json } => cmd_profile_list(&manager, json),
+            ProfileCommand::Show { target, json } => cmd_profile_show(&manager, &target, json),
+            ProfileCommand::Remove { target } => cmd_profile_remove(&manager, &target),
+            ProfileCommand::Use { target } => cmd_profile_use(&manager, &target),
+            ProfileCommand::Current { json } => cmd_profile_current(&manager, json),
         },
         Command::Doctor => cmd_doctor(&manager).await,
     }
@@ -317,7 +368,7 @@ async fn cmd_start(
         Some(name) => parse_core_choice(name)?,
         None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
-    let (kind, compiled) = resolve_target(choice, profile)?;
+    let (kind, compiled) = resolve_target(manager, choice, profile)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -373,7 +424,7 @@ async fn cmd_restart(manager: &CoreManager) -> Result<i32> {
 
 async fn cmd_switch(manager: &CoreManager, core: &str, profile: Option<&Path>) -> Result<i32> {
     let choice = parse_core_choice(core)?;
-    let (kind, compiled) = resolve_target(choice, profile)?;
+    let (kind, compiled) = resolve_target(manager, choice, profile)?;
 
     let report = match compiled {
         Some(compiled) => {
@@ -496,6 +547,27 @@ fn print_diagnostics(diagnostics: &[Diagnostic]) {
     }
 }
 
+/// Shared node table used by `profile parse`, `show` and `current`.
+fn print_profile_nodes(profile: &Profile) {
+    let headers = ["#", "NAME", "PROTOCOL", "ENDPOINT", "TRANSPORT", "SECURITY"];
+    let rows: Vec<Vec<String>> = profile
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            vec![
+                (index + 1).to_string(),
+                node.name.clone(),
+                node.protocol.as_str().to_string(),
+                node.endpoint(),
+                node.transport.label().to_string(),
+                security_label(node),
+            ]
+        })
+        .collect();
+    print!("{}", render_table(&headers, &rows));
+}
+
 fn cmd_profile_parse(source: &str, json: bool) -> Result<i32> {
     let (text, label) = read_profile_source(source)?;
     let parsed = parse_payload(&text, &profile_name_from_source(source), &label);
@@ -525,23 +597,7 @@ fn cmd_profile_parse(source: &str, json: bool) -> Result<i32> {
     }
     println!();
 
-    let headers = ["#", "NAME", "PROTOCOL", "ENDPOINT", "TRANSPORT", "SECURITY"];
-    let rows: Vec<Vec<String>> = profile
-        .nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| {
-            vec![
-                (index + 1).to_string(),
-                node.name.clone(),
-                node.protocol.as_str().to_string(),
-                node.endpoint(),
-                node.transport.label().to_string(),
-                security_label(node),
-            ]
-        })
-        .collect();
-    print!("{}", render_table(&headers, &rows));
+    print_profile_nodes(profile);
 
     println!(
         "\n{} errors, {} warnings",
@@ -679,33 +735,58 @@ fn parse_core_choice(value: &str) -> Result<CoreChoice> {
     Ok(CoreChoice::Fixed(parse_core(value)?))
 }
 
-/// Resolve the core to run and, when a profile was supplied, its compiled config.
+/// Resolve the core to run and, when a profile is available, its compiled config.
+///
+/// Precedence: explicit `--profile` file → stored active profile → bootstrap
+/// config (Phase 1 behaviour, kept for the case where no profile exists yet).
 fn resolve_target(
+    manager: &CoreManager,
     choice: CoreChoice,
     profile: Option<&Path>,
 ) -> Result<(CoreKind, Option<CompiledConfig>)> {
-    match (choice, profile) {
-        (CoreChoice::Smart, None) => {
-            bail!("`--core smart` needs `--profile`: there is no profile to choose a core for")
-        }
-        (CoreChoice::Smart, Some(path)) => {
-            let parsed = load_profile(path)?;
+    if let Some(path) = profile {
+        let parsed = load_profile(path)?;
+        return finish_target(choice, parsed.profile);
+    }
+
+    let store = ProfileStore::new(manager.layout());
+    if let Some((stored, active)) = store.active()? {
+        eprintln!(
+            "using active profile `{}` ({} nodes)",
+            stored.name,
+            active.nodes.len()
+        );
+        return finish_target(choice, active);
+    }
+
+    match choice {
+        CoreChoice::Smart => bail!(
+            "`--core smart` needs a profile: import one with `triproxy profile add <file>` or pass `--profile`"
+        ),
+        CoreChoice::Fixed(kind) => Ok((kind, None)),
+    }
+}
+
+fn finish_target(
+    choice: CoreChoice,
+    profile: Profile,
+) -> Result<(CoreKind, Option<CompiledConfig>)> {
+    match choice {
+        CoreChoice::Smart => {
             let selection = Selector::smart()
-                .select(&parsed.profile, NetworkRequirements::default())
+                .select(&profile, NetworkRequirements::default())
                 .map_err(|error| anyhow!("{error}"))?;
             eprintln!(
                 "smart: selected `{}` — {}",
                 selection.selected, selection.reason
             );
-            let compiled = compile_for(selection.selected, &parsed.profile)?;
+            let compiled = compile_for(selection.selected, &profile)?;
             Ok((selection.selected, Some(compiled)))
         }
-        (CoreChoice::Fixed(kind), Some(path)) => {
-            let parsed = load_profile(path)?;
-            let compiled = compile_for(kind, &parsed.profile)?;
+        CoreChoice::Fixed(kind) => {
+            let compiled = compile_for(kind, &profile)?;
             Ok((kind, Some(compiled)))
         }
-        (CoreChoice::Fixed(kind), None) => Ok((kind, None)),
     }
 }
 
@@ -805,6 +886,190 @@ fn cmd_core_select(source: &str, tun: bool, json: bool) -> Result<i32> {
     print!("{}", render_table(&headers, &rows));
 
     println!("\nReason: {}", selection.reason);
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
+// profile library (storage)
+// ---------------------------------------------------------------------------
+
+fn format_datetime(ts_ms: u64) -> String {
+    use time::{OffsetDateTime, UtcOffset};
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    match OffsetDateTime::from_unix_timestamp_nanos(i128::from(ts_ms) * 1_000_000) {
+        Ok(datetime) => {
+            let local = datetime.to_offset(offset);
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}",
+                local.year(),
+                u8::from(local.month()),
+                local.day(),
+                local.hour(),
+                local.minute()
+            )
+        }
+        Err(_) => "-".to_string(),
+    }
+}
+
+/// Accept either a record id or a profile name, because ids are not memorable.
+fn resolve_stored(store: &ProfileStore, key: &str) -> Result<StoredProfile> {
+    if let Some(found) = store.find(key)? {
+        return Ok(found);
+    }
+    if let Some(found) = store.find_by_name(key)? {
+        return Ok(found);
+    }
+    bail!("no profile with id or name `{key}`")
+}
+
+fn cmd_profile_add(
+    manager: &CoreManager,
+    source: &str,
+    name: Option<String>,
+    use_it: bool,
+) -> Result<i32> {
+    let (text, label) = read_profile_source(source)?;
+    let name = name.unwrap_or_else(|| profile_name_from_source(source));
+    let mut parsed = parse_payload(&text, &name, &label);
+    parsed.profile.name = name.clone();
+
+    let store = ProfileStore::new(manager.layout());
+    // Re-importing under an existing name updates that record instead of
+    // creating a second entry with the same title.
+    let existing = store.find_by_name(&name)?;
+    let saved = store.save(
+        &parsed.profile,
+        existing.as_ref().map(|entry| entry.id.as_str()),
+    )?;
+
+    println!(
+        "{} `{}` — {} nodes ({})",
+        if existing.is_some() {
+            "updated"
+        } else {
+            "added"
+        },
+        saved.name,
+        saved.node_count,
+        saved.id
+    );
+    if parsed.errors() > 0 {
+        println!(
+            "  {} errors, {} warnings — run `profile check` for details",
+            parsed.errors(),
+            parsed.warnings()
+        );
+    }
+    if use_it {
+        store.set_active(Some(&saved.id))?;
+        println!("  active profile is now `{}`", saved.name);
+    }
+    Ok(0)
+}
+
+fn cmd_profile_list(manager: &CoreManager, json: bool) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let profiles = store.list()?;
+    let active = store.active_id()?;
+
+    if json {
+        let payload = serde_json::json!({ "active": active, "profiles": profiles });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    if profiles.is_empty() {
+        println!("no stored profiles — import one with `triproxy profile add <file>`");
+        return Ok(0);
+    }
+
+    let headers = ["ID", "NAME", "NODES", "FORMAT", "UPDATED", "ACTIVE"];
+    let rows: Vec<Vec<String>> = profiles
+        .iter()
+        .map(|stored| {
+            vec![
+                stored.id.clone(),
+                stored.name.clone(),
+                stored.node_count.to_string(),
+                stored.format.as_str().to_string(),
+                format_datetime(stored.updated_at_ms),
+                if active.as_deref() == Some(stored.id.as_str()) {
+                    "*".to_string()
+                } else {
+                    String::new()
+                },
+            ]
+        })
+        .collect();
+    print!("{}", render_table(&headers, &rows));
+    Ok(0)
+}
+
+fn cmd_profile_show(manager: &CoreManager, target: &str, json: bool) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let stored = resolve_stored(&store, target)?;
+    let profile = store.load(&stored.id)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&profile)?);
+        return Ok(0);
+    }
+
+    println!("profile   {}  ({})", profile.name, stored.id);
+    println!("source    {}", profile.metadata.source);
+    println!("format    {}", profile.metadata.format.as_str());
+    println!("nodes     {}", profile.nodes.len());
+    println!();
+    print_profile_nodes(&profile);
+    Ok(0)
+}
+
+fn cmd_profile_remove(manager: &CoreManager, target: &str) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let stored = resolve_stored(&store, target)?;
+    store.delete(&stored.id)?;
+    println!("removed `{}` ({})", stored.name, stored.id);
+    Ok(0)
+}
+
+fn cmd_profile_use(manager: &CoreManager, target: &str) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let stored = resolve_stored(&store, target)?;
+    store.set_active(Some(&stored.id))?;
+    println!(
+        "active profile: `{}` ({} nodes)",
+        stored.name, stored.node_count
+    );
+    Ok(0)
+}
+
+fn cmd_profile_current(manager: &CoreManager, json: bool) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+    let Some((stored, profile)) = store.active()? else {
+        if json {
+            println!("null");
+        } else {
+            println!("no active profile — pick one with `triproxy profile use <id|name>`");
+        }
+        return Ok(0);
+    };
+
+    if json {
+        let payload = serde_json::json!({
+            "id": stored.id,
+            "name": stored.name,
+            "profile": profile,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(0);
+    }
+
+    println!("active    {}  ({})", profile.name, stored.id);
+    println!("source    {}", profile.metadata.source);
+    println!("nodes     {}", profile.nodes.len());
+    println!();
+    print_profile_nodes(&profile);
     Ok(0)
 }
 
