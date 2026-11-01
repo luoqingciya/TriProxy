@@ -1,0 +1,207 @@
+/*
+ * TriProxy — a modern multi-core proxy client.
+ * Copyright (C) 2026 luoqingci
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify it under
+ * the terms of the GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option) any later
+ * version. It is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+ * PARTICULAR PURPOSE. See LICENSE for the full text.
+ *
+ * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
+ */
+
+import { create } from 'zustand'
+
+import { api } from '../services/api'
+import type {
+  CoreKind,
+  ManagerStatus,
+  NodeSummary,
+  ProfileLibrary,
+  Selection,
+  Settings,
+  StoredProfile,
+} from '../types'
+
+export type Page = 'dashboard' | 'proxies' | 'profiles' | 'logs' | 'settings'
+
+const PAGES: Page[] = ['dashboard', 'proxies', 'profiles', 'logs', 'settings']
+
+/**
+ * The active page lives in the URL hash.
+ *
+ * The shell has no router (a desktop window has no address bar), but keeping the
+ * page in the hash means a dev-server reload — or a crash the webview recovers
+ * from — lands on the page the user was on instead of resetting to the dashboard.
+ */
+function initialPage(): Page {
+  const hash = window.location.hash.replace('#', '')
+  return PAGES.includes(hash as Page) ? (hash as Page) : 'dashboard'
+}
+
+interface AppState {
+  page: Page
+  status: ManagerStatus | null
+  library: ProfileLibrary
+  nodes: NodeSummary[]
+  selection: Selection | null
+  settings: Settings | null
+  busy: boolean
+  error: string | null
+
+  setPage: (page: Page) => void
+  refresh: () => Promise<void>
+  loadSettings: () => Promise<void>
+
+  start: (core: CoreKind | null) => Promise<void>
+  stop: () => Promise<void>
+  switchTo: (target: string) => Promise<void>
+
+  importProfile: (text: string, name: string) => Promise<StoredProfile | null>
+  useProfile: (id: string) => Promise<void>
+  removeProfile: (id: string) => Promise<void>
+
+  updateSettings: (patch: Partial<Settings>) => Promise<void>
+  clearError: () => void
+}
+
+const emptyLibrary: ProfileLibrary = { active: null, profiles: [] }
+
+export const useApp = create<AppState>((set, get) => ({
+  page: initialPage(),
+  status: null,
+  library: emptyLibrary,
+  nodes: [],
+  selection: null,
+  settings: null,
+  busy: false,
+  error: null,
+
+  setPage: (page) => {
+    window.history.replaceState(null, '', `#${page}`)
+    set({ page })
+  },
+
+  /**
+   * One round trip for everything the shell shows.
+   *
+   * The backend is a single process with an in-memory manager, so a combined
+   * refresh is cheaper and keeps every panel consistent with each other.
+   */
+  refresh: async () => {
+    try {
+      const [status, library, nodes, selection] = await Promise.all([
+        api.status(),
+        api.profiles(),
+        api.activeNodes(),
+        api.previewSelection(),
+      ])
+      set({ status, library, nodes, selection, error: null })
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  loadSettings: async () => {
+    try {
+      const settings = await api.settings()
+      set({ settings })
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  start: async (core) => {
+    set({ busy: true })
+    try {
+      const status = await api.startCore(core)
+      set({ status, error: null })
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  stop: async () => {
+    set({ busy: true })
+    try {
+      await api.stopCore()
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  switchTo: async (target) => {
+    set({ busy: true })
+    try {
+      const status = await api.switchCore(target)
+      set({ status, error: null })
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  importProfile: async (text, name) => {
+    set({ busy: true })
+    try {
+      const stored = await api.importProfile(text, name)
+      await get().refresh()
+      return stored
+    } catch (error) {
+      set({ error: describe(error) })
+      return null
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  useProfile: async (id) => {
+    try {
+      await api.setActiveProfile(id)
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  removeProfile: async (id) => {
+    try {
+      await api.deleteProfile(id)
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  updateSettings: async (patch) => {
+    const current = get().settings
+    if (!current) return
+    const next = { ...current, ...patch }
+    // Optimistic: toggles should feel instant, and a failure rolls back below.
+    set({ settings: next })
+    try {
+      await api.saveSettings(next)
+    } catch (error) {
+      set({ settings: current, error: describe(error) })
+    }
+  },
+
+  clearError: () => set({ error: null }),
+}))
+
+function describe(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (error instanceof Error) return error.message
+  return String(error)
+}

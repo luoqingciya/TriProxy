@@ -32,7 +32,8 @@
 | **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks）** |
 | **Phase 3** | **Config Compiler** | **已完成（三核心配置均通过各自核心校验）** |
 | **Phase 4** | **Smart Core Selector** | **已完成（硬约束淘汰 + 可解释排序）** |
-| Phase 5 | Tauri GUI | 未开始 |
+| **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 配置 / 日志 / 设置）** |
+| Phase 6 | 系统代理 | 未开始 |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -245,6 +246,32 @@ specialisation; eliminated: xray (TUN)
 **随包核心只读**：`cores/` 目录由发行包提供，程序运行时从不写入；所有安装与更新都进 `bin/`。
 
 ---
+
+## 桌面客户端（Phase 5）
+
+```bash
+npm install
+npm run tauri dev        # 开发模式（自动启动 Vite + 桌面窗口）
+npm run tauri build      # 产出安装包
+```
+
+也可以在浏览器里只跑界面（无后端，使用假数据）：
+
+```bash
+npm run dev              # http://localhost:1420
+```
+
+界面包含五个页面：
+
+| 页面 | 内容 |
+|---|---|
+| 仪表盘 | 连接状态、当前配置、三个核心的状态与一键切换、Smart Engine 决策解释 |
+| 节点 | 活动配置的节点列表，按名称/地址搜索、按协议筛选 |
+| 配置 | 导入订阅、设为活动、删除 |
+| 日志 | 核心输出实时刷新，按级别筛选 |
+| 设置 | 主题、核心偏好、TUN / rule-set / 代理组、允许局域网、日志级别 |
+
+规则与连接两个页面依赖 Phase 10 的后端能力，暂不提供——留空页面比放一个假页面更糟。
 
 ## 目录结构
 
