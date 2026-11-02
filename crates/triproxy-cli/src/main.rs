@@ -640,8 +640,15 @@ async fn cmd_start(
     let saved = AppSettings::load(manager.layout());
     let mut options = saved.compile_options(saved.listen_port, DEFAULT_API_PORT);
     options.tun = tun;
-    options.dns = parse_dns_mode(dns.as_deref())?;
-    options.rules = parse_rule_mode(rules.as_deref())?;
+    // Only override what the command line actually said: falling back to the
+    // parser default here would silently replace the saved settings with
+    // "off"/"global" on every run that did not repeat them as flags.
+    if dns.is_some() {
+        options.dns = parse_dns_mode(dns.as_deref())?;
+    }
+    if rules.is_some() {
+        options.rules = parse_rule_mode(rules.as_deref())?;
+    }
     // Only when running from the stored active profile: an explicit --profile
     // path is a different profile and its selection is unknown.
     options.selected_node = if profile.is_none() {
@@ -738,8 +745,15 @@ async fn cmd_switch(
     let saved = AppSettings::load(manager.layout());
     let mut options = saved.compile_options(saved.listen_port, DEFAULT_API_PORT);
     options.tun = tun;
-    options.dns = parse_dns_mode(dns.as_deref())?;
-    options.rules = parse_rule_mode(rules.as_deref())?;
+    // Only override what the command line actually said: falling back to the
+    // parser default here would silently replace the saved settings with
+    // "off"/"global" on every run that did not repeat them as flags.
+    if dns.is_some() {
+        options.dns = parse_dns_mode(dns.as_deref())?;
+    }
+    if rules.is_some() {
+        options.rules = parse_rule_mode(rules.as_deref())?;
+    }
     // Only when running from the stored active profile: an explicit --profile
     // path is a different profile and its selection is unknown.
     options.selected_node = if profile.is_none() {

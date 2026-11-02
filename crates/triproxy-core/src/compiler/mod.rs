@@ -38,7 +38,10 @@ pub mod singbox;
 pub mod xray;
 pub mod yaml;
 
-pub use rules::{parse_rules, CustomRule, RuleError, RuleKind, RuleTarget};
+pub use rules::{
+    parse_rule_sets, parse_rules, CustomRule, RuleError, RuleKind, RuleSet, RuleSetBehavior,
+    RuleSetFormat, RuleTarget,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -94,6 +97,9 @@ pub struct CompileOptions {
     /// User-written rules, applied before the presets so they can override them.
     #[serde(default)]
     pub custom_rules: Vec<CustomRule>,
+    /// Remote rule-sets, emitted only to the cores that can read their format.
+    #[serde(default)]
+    pub rule_sets: Vec<RuleSet>,
 }
 
 /// Routing strategy.
@@ -164,6 +170,7 @@ impl Default for CompileOptions {
             selected_node: None,
             selected_name: None,
             custom_rules: Vec::new(),
+            rule_sets: Vec::new(),
         }
     }
 }
@@ -606,6 +613,48 @@ mod tests {
             "{}",
             xray.text
         );
+    }
+
+    /// The two families read different files, so an entry goes to exactly one
+    /// core. Sending a `.srs` to Mihomo would make it refuse the whole config.
+    #[test]
+    fn rule_sets_go_only_to_the_core_that_can_read_them() {
+        let node = node(Protocol::Trojan, "a.example.com");
+        let profile = Profile::new("p", vec![node]);
+        let options = CompileOptions {
+            rule_sets: parse_rule_sets(
+                "DIRECT,domain,https://example.com/cn.mrs\nPROXY,domain,https://example.com/us.srs",
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        assert!(
+            mihomo.text.contains("\"rule-providers\""),
+            "{}",
+            mihomo.text
+        );
+        assert!(
+            mihomo.text.contains("RULE-SET,cn,DIRECT"),
+            "{}",
+            mihomo.text
+        );
+        assert!(!mihomo.text.contains("us.srs"), "{}", mihomo.text);
+
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&singbox.text).unwrap();
+        let tags: Vec<&str> = document["route"]["rule_set"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["tag"].as_str().unwrap())
+            .collect();
+        assert_eq!(tags, vec!["us"], "{tags:?}");
+
+        // Xray has no rule-set concept at all; the entry must not leak into it.
+        let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
+        assert!(!xray.text.contains("cn.mrs"), "{}", xray.text);
     }
 
     #[test]

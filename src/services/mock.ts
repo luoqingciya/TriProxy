@@ -88,6 +88,7 @@ let settings: Settings = {
   auto_connect: false,
   proxy_bypass: null,
   custom_rules: null,
+  rule_sets: null,
 }
 
 const nodes: NodeSummary[] = [
@@ -211,6 +212,8 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
     case 'set_autostart':
       return Boolean(args?.enabled) as T
     case 'validate_rules':
+      return undefined as T
+    case 'validate_rule_sets':
       return undefined as T
     case 'export_backup':
       return null as T

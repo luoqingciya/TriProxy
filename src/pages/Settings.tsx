@@ -47,10 +47,13 @@ export function Settings() {
   // would flag a half-typed line as an error the user is still writing.
   const [rulesText, setRulesText] = useState(settings?.custom_rules ?? '')
   const [rulesError, setRulesError] = useState<string | null>(null)
+  const [ruleSetsText, setRuleSetsText] = useState(settings?.rule_sets ?? '')
+  const [ruleSetsError, setRuleSetsError] = useState<string | null>(null)
 
   useEffect(() => {
     setRulesText(settings?.custom_rules ?? '')
-  }, [settings?.custom_rules])
+    setRuleSetsText(settings?.rule_sets ?? '')
+  }, [settings?.custom_rules, settings?.rule_sets])
 
   async function commitRules() {
     setRulesError(null)
@@ -61,6 +64,17 @@ export function Settings() {
       return
     }
     await update({ custom_rules: rulesText.trim() === '' ? null : rulesText })
+  }
+
+  async function commitRuleSets() {
+    setRuleSetsError(null)
+    try {
+      await api.validateRuleSets(ruleSetsText)
+    } catch (error) {
+      setRuleSetsError(String(error))
+      return
+    }
+    await update({ rule_sets: ruleSetsText.trim() === '' ? null : ruleSetsText })
   }
 
   async function exportBackup() {
@@ -271,6 +285,31 @@ export function Settings() {
           <p className="mt-2 text-[11.5px] text-faint">
             支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR，目标写 PROXY 或 DIRECT。
             改完点空白处保存，改动在下次启动核心时生效。
+          </p>
+        )}
+      </Card>
+
+      <Card className="mb-4">
+        <SectionTitle
+          title="规则集订阅"
+          hint="远程规则集：格式是「目标,类型,URL」。.mrs/.yaml 只对 Mihomo 生效，.srs 只对 sing-box 生效；Xray 不支持"
+        />
+        <textarea
+          value={ruleSetsText}
+          onChange={(event) => setRuleSetsText(event.target.value)}
+          onBlur={() => void commitRuleSets()}
+          spellCheck={false}
+          rows={4}
+          placeholder={
+            '# 目标,类型,URL\nDIRECT,domain,https://example.com/rules/cn.mrs\nPROXY,ipcidr,https://example.com/rules/remote.srs'
+          }
+          className="w-full resize-y rounded-lg border border-line bg-panel-2 px-3 py-2 font-mono text-[12.5px] leading-relaxed text-fg outline-none placeholder:text-faint"
+        />
+        {ruleSetsError ? (
+          <p className="mt-2 text-[12px] text-danger">{ruleSetsError}</p>
+        ) : (
+          <p className="mt-2 text-[11.5px] text-faint">
+            类型只能是 domain / ipcidr / classical。两个核心的规则集格式不通用，所以一条只对能读它的那个核心生效。
           </p>
         )}
       </Card>

@@ -20,8 +20,8 @@ use crate::profile::Profile;
 use super::yaml::{emit, Yaml};
 use super::{
     CompileError, CompileOptions, CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleKind,
-    RuleMode, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL,
-    PROXY_GROUP,
+    RuleMode, RuleSet, RuleSetFormat, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS,
+    AUTO_TEST_URL, PROXY_GROUP,
 };
 
 pub struct MihomoCompiler;
@@ -122,11 +122,51 @@ impl ConfigCompiler for MihomoCompiler {
 
         document = document
             .with("proxies", Yaml::List(proxies))
-            .with("proxy-groups", Yaml::list().push(auto).push(group))
-            .with(
-                "rules",
-                Yaml::strings(rule_lines(options.rules, &options.custom_rules)),
-            );
+            .with("proxy-groups", Yaml::list().push(auto).push(group));
+
+        // Remote rule-sets: only the Clash-family files, because a `.srs` would
+        // be rejected by the loader and take the whole config with it.
+        let clash_sets: Vec<&RuleSet> = options
+            .rule_sets
+            .iter()
+            .filter(|set| set.format == RuleSetFormat::Clash)
+            .collect();
+        if !clash_sets.is_empty() {
+            let mut providers = Yaml::map();
+            for set in &clash_sets {
+                let (format, extension) = if set.url.to_ascii_lowercase().contains(".yaml")
+                    || set.url.to_ascii_lowercase().contains(".yml")
+                {
+                    ("yaml", "yaml")
+                } else {
+                    ("mrs", "mrs")
+                };
+                providers = providers.with(
+                    set.name.clone(),
+                    Yaml::map()
+                        .with("type", Yaml::str("http"))
+                        .with("behavior", Yaml::str(set.behavior.as_str()))
+                        .with("format", Yaml::str(format))
+                        .with("url", Yaml::str(set.url.clone()))
+                        // Relative to the working directory the core runs in.
+                        .with(
+                            "path",
+                            Yaml::str(format!("./rules/{}.{extension}", set.name)),
+                        )
+                        .with("interval", Yaml::int(86_400)),
+                );
+            }
+            document = document.with("rule-providers", providers);
+        }
+
+        document = document.with(
+            "rules",
+            Yaml::strings(rule_lines(
+                options.rules,
+                &options.custom_rules,
+                &clash_sets,
+            )),
+        );
 
         Ok(CompiledConfig {
             core: CoreKind::Mihomo,
@@ -174,10 +214,20 @@ fn dns_block(mode: DnsMode) -> Yaml {
 /// Split mode keeps the local networks and Chinese destinations off the proxy.
 /// GEOSITE/GEOIP are evaluated against Mihomo own geo database, so no rule-set
 /// download is needed at runtime.
-fn rule_lines(mode: RuleMode, custom: &[CustomRule]) -> Vec<String> {
+fn rule_lines(mode: RuleMode, custom: &[CustomRule], rule_sets: &[&RuleSet]) -> Vec<String> {
     // Custom rules go first: they are the user's explicit intent, and a preset
     // that swallowed them would make the settings page look broken.
     let mut lines: Vec<String> = custom.iter().map(custom_line).collect();
+
+    // Remote rule-sets sit next to the custom rules, before the presets, for the
+    // same reason: they are something the user asked for by name.
+    for set in rule_sets {
+        let target = match set.target {
+            RuleTarget::Proxy => PROXY_GROUP,
+            RuleTarget::Direct => "DIRECT",
+        };
+        lines.push(format!("RULE-SET,{},{target}", set.name));
+    }
 
     match mode {
         RuleMode::Global => {}

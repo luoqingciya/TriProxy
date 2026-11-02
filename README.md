@@ -365,6 +365,19 @@ IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
 
 同一个解析器喂给三个编译器，各渲染成自己的方言。细节见 ARCHITECTURE 第 23 章。
 
+### 规则集订阅
+
+一行一条，`目标,类型,URL`：
+
+```text
+DIRECT,domain,https://example.com/rules/cn.mrs
+PROXY,ipcidr,https://example.com/rules/remote.srs
+```
+
+两个核心的规则集格式不通用：`.mrs`/`.yaml` 只对 Mihomo 生效，`.srs` 只对 sing-box 生效，
+**Xray 不支持规则集**。类型（`domain` / `ipcidr` / `classical`）必须写明——Mihomo 要求声明，
+猜错就是一份它拒绝加载的配置。
+
 ## 代理组（Phase 10）
 
 编译结果里有两个组：

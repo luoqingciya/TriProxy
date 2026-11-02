@@ -113,6 +113,9 @@ export const api = {
   /** Parse rule text without saving it; rejects with the offending line. */
   validateRules: (text: string) => call<void>('validate_rules', { text }),
 
+  /** Same for rule-sets: rejects with the offending line. */
+  validateRuleSets: (text: string) => call<void>('validate_rule_sets', { text }),
+
   /** Write a backup; null when the save dialog was dismissed. */
   exportBackup: () => call<string | null>('export_backup'),
 
