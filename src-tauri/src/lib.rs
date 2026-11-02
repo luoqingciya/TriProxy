@@ -18,10 +18,16 @@
 //! crate the CLI uses.
 
 pub mod commands;
+pub mod tray;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use triproxy_core::{CoreManager, Layout, SystemProxyManager};
+use triproxy_core::{AppSettings, CoreManager, Layout, SystemProxyManager};
+
+/// Guards the exit path: cleanup is asynchronous, so the app has to be held open
+/// once, then allowed through on the second exit request.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// Shared state handed to every command.
 pub struct AppState {
@@ -71,7 +77,27 @@ pub fn run() {
                     }
                 }
             });
+
+            // The tray must exist before the window can be closed, otherwise
+            // hiding it would leave the user with no way back. A failure is
+            // therefore non-fatal: the app simply behaves like a normal window.
+            if let Err(error) = tray::install(app) {
+                tracing::error!(%error, "could not create the tray icon");
+            }
             Ok(())
+        })
+        // Closing the window hides it; the proxy is supposed to keep running.
+        // Only an explicit quit (tray menu) or `close_to_tray = false` exits.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                use tauri::Manager;
+                let app = window.app_handle();
+                let settings = AppSettings::load(app.state::<AppState>().manager.layout());
+                if settings.close_to_tray && tray::is_ready() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
@@ -98,10 +124,49 @@ pub fn run() {
             commands::system_proxy_status,
             commands::set_system_proxy,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running TriProxy");
+        .build(tauri::generate_context!())
+        .expect("error while running TriProxy")
+        .run(|app, event| {
+            // Cleanup is asynchronous, so the exit is held once and released
+            // after it completes; the second request falls through the guard.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_exit();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    shutdown(&app).await;
+                    app.exit(0);
+                });
+            }
+        });
 }
 
+/// Stop every core and restore the system proxy before the process goes away.
+///
+/// Without this, quitting from the tray would leave a headless core holding the
+/// proxy port with the machine still pointed at it — the user would believe the
+/// proxy is off while their traffic kept flowing through it.
+async fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+
+    let manager = app.state::<AppState>().manager.clone();
+
+    match manager.stop().await {
+        Ok(kinds) if !kinds.is_empty() => tracing::info!(cores = kinds.len(), "stopped on exit"),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not stop the core on exit"),
+    }
+
+    let proxy = SystemProxyManager::new(manager.layout());
+    if proxy.status().is_some() {
+        match proxy.disable() {
+            Ok(_) => tracing::info!("system proxy restored on exit"),
+            Err(error) => tracing::warn!(%error, "could not restore the system proxy on exit"),
+        }
+    }
+}
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env()

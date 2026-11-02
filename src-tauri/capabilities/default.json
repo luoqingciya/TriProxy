@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions for the main window. Custom commands registered in invoke_handler do not need entries here; plugin commands do, which is why the updater is listed explicitly.",
   "windows": ["main"],
-  "permissions": ["core:default", "updater:default"]
+  "permissions": ["core:default", "core:event:default", "updater:default"]
 }

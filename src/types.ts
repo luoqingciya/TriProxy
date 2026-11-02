@@ -167,6 +167,8 @@ export interface Settings {
   /** Routing strategy baked into the generated config. */
   rule_mode: RuleMode
   log_level: string
+  /** Hide to the tray instead of quitting when the window is closed. */
+  close_to_tray: boolean
 }
 
 export const CORE_LABEL: Record<CoreKind, string> = {
