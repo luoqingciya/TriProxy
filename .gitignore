@@ -47,3 +47,4 @@ Thumbs.db
 # Build inputs staged by the release workflow (CLI binary, cores).
 # They are produced during the build, never committed.
 /src-tauri/resources/
+/artifacts/

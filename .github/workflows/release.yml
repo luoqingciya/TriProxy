@@ -122,20 +122,21 @@ jobs:
         run: |
           set -euo pipefail
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          mkdir -p dist
+          mkdir -p artifacts
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/*/*; do
+            [ -f "$f" ] || continue
             case "$f" in
-              */nsis/*.exe)  cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-lite.exe" ;;
-              */dmg/*.dmg)   cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-lite.dmg" ;;
-              */appimage/*)  cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-lite.AppImage" ;;
-              */deb/*.deb)   cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-lite.deb" ;;
+              */nsis/*.exe)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.exe" ;;
+              */dmg/*.dmg)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.dmg" ;;
+              */appimage/*)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.AppImage" ;;
+              */deb/*.deb)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.deb" ;;
             esac
           done
           # Clear the bundle directory so the full build cannot be collected
           # under the lite name.
           rm -rf src-tauri/target/release/bundle
-          ls -l dist/
+          ls -l artifacts/
 
       # Cores are fetched through TriProxy's own verified download path, so the
       # SHA256 recorded alongside them matches the upstream release.
@@ -240,21 +241,22 @@ jobs:
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/*/*; do
+            [ -f "$f" ] || continue
             case "$f" in
-              */nsis/*.exe)  cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-full.exe" ;;
-              */dmg/*.dmg)   cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-full.dmg" ;;
-              */appimage/*)  cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-full.AppImage" ;;
-              */deb/*.deb)   cp "$f" "dist/TriProxy_${version}_${{ matrix.arch }}-full.deb" ;;
+              */nsis/*.exe)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.exe" ;;
+              */dmg/*.dmg)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.dmg" ;;
+              */appimage/*)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.AppImage" ;;
+              */deb/*.deb)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.deb" ;;
             esac
           done
-          ls -l dist/
+          ls -l artifacts/
 
       - name: Verify both variants were produced
         shell: bash
         run: |
           set -euo pipefail
-          lite=$(ls dist/*-lite.* | head -1)
-          full=$(ls dist/*-full.* | head -1)
+          lite=$(ls artifacts/*-lite.* | head -1)
+          full=$(ls artifacts/*-full.* | head -1)
           lite_size=$(stat -c%s "$lite" 2>/dev/null || stat -f%z "$lite")
           full_size=$(stat -c%s "$full" 2>/dev/null || stat -f%z "$full")
           echo "$lite=$lite_size  $full=$full_size"
@@ -265,7 +267,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: triproxy-desktop-${{ matrix.label }}
-          path: dist/*
+          path: artifacts/*
           if-no-files-found: error
 
   release:
@@ -278,7 +280,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          path: dist
+          path: artifacts
           merge-multiple: true
 
       - name: Create GitHub release
@@ -286,8 +288,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          ls -l dist
-          gh release create "${GITHUB_REF_NAME}" dist/* \
+          ls -l artifacts
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "TriProxy ${GITHUB_REF_NAME}" \
             --notes-file docs/RELEASE_NOTES_TEMPLATE.md
