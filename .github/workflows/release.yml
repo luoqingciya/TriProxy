@@ -251,6 +251,34 @@ jobs:
           done
           ls -l artifacts/
 
+      # Check the payload itself, not just its size. A full build that silently
+      # omitted the cores still passes a size comparison; looking for the files
+      # where each platform actually puts resources does not.
+      - name: Verify the cores are inside the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.label }}" in
+            windows)
+              nsi=$(find src-tauri/target/release/nsis -name 'installer.nsi' | head -1)
+              grep -q 'cores\\xray.exe' "$nsi"
+              grep -q 'cores\\geosite.dat' "$nsi"
+              echo "installer script lists the cores"
+              ;;
+            macos)
+              res="src-tauri/target/release/bundle/macos/TriProxy.app/Contents/Resources"
+              ls -l "$res" | head -20
+              test -f "$res/cores/xray"
+              test -f "$res/cores/geosite.dat"
+              echo "app bundle contains the cores"
+              ;;
+            linux)
+              find src-tauri/target/release/bundle -name 'xray' -path '*cores*' | grep -q .
+              find src-tauri/target/release/bundle -name 'geosite.dat' | grep -q .
+              echo "bundle contains the cores"
+              ;;
+          esac
+
       - name: Verify both variants were produced
         shell: bash
         run: |
@@ -260,9 +288,14 @@ jobs:
           lite_size=$(stat -c%s "$lite" 2>/dev/null || stat -f%z "$lite")
           full_size=$(stat -c%s "$full" 2>/dev/null || stat -f%z "$full")
           echo "$lite=$lite_size  $full=$full_size"
-          # The full build carries ~180 MB of cores. Equal sizes would mean the
-          # resource override silently did nothing.
-          test "$full_size" -gt "$lite_size"
+          # The full build carries ~180 MB of cores. Requiring it to be at least
+          # twice the lite size catches a resource override that did nothing —
+          # a plain "greater than" passed a macOS build whose dmg was 13 MB
+          # against 9 MB, with no cores in it at all.
+          if [ "$full_size" -lt $((lite_size * 2)) ]; then
+            echo "::error::full ($full_size) is not meaningfully larger than lite ($lite_size); the cores are probably missing"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
