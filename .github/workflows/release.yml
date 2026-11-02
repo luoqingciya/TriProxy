@@ -144,6 +144,11 @@ jobs:
       # SHA256 recorded alongside them matches the upstream release.
       - name: Stage the cores
         shell: bash
+        env:
+          # Unauthenticated GitHub API calls are limited to 60 per hour per IP,
+          # and a shared runner IP runs out fast: the Windows job failed with
+          # 403 halfway through downloading the third core.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           stage="$RUNNER_TEMP/core-stage"
@@ -304,12 +309,13 @@ jobs:
           lite_size=$(stat -c%s "$lite" 2>/dev/null || stat -f%z "$lite")
           full_size=$(stat -c%s "$full" 2>/dev/null || stat -f%z "$full")
           echo "$lite=$lite_size  $full=$full_size"
-          # The full build carries ~180 MB of cores. Requiring it to be at least
-          # twice the lite size catches a resource override that did nothing —
-          # a plain "greater than" passed a macOS build whose dmg was 13 MB
-          # against 9 MB, with no cores in it at all.
-          if [ "$full_size" -lt $((lite_size * 2)) ]; then
-            echo "::error::full ($full_size) is not meaningfully larger than lite ($lite_size); the cores are probably missing"
+          # The payload check above is the authoritative one; this only catches
+          # the degenerate case where both variants are the same file. A fixed
+          # multiplier does not work across platforms — the Linux lite AppImage
+          # is already 90 MB, so requiring 2x rejected a bundle that did contain
+          # the cores.
+          if [ "$full_size" -le "$lite_size" ]; then
+            echo "::error::full ($full_size) is not larger than lite ($lite_size); the cores are missing"
             exit 1
           fi
 
