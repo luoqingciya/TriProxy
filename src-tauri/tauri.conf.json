@@ -50,6 +50,18 @@
     ],
     "category": "Utility",
     "shortDescription": "三核代理客户端",
-    "longDescription": "TriProxy 统一管理 Mihomo、sing-box 与 Xray 三个核心，自动选择最合适的核心。"
+    "longDescription": "TriProxy 统一管理 Mihomo、sing-box 与 Xray 三个核心，自动选择最合适的核心。",
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUzMDMyQzgyQUY3MjAyNzQKUldSMEFuS3ZnaXdEVTl6VE1aR243Y21jTGQ3amhrUXlVZGt1MEU4dWRzK3cvbktIN25KcDJRS2cK",
+      "endpoints": [
+        "https://github.com/luoqingciya/TriProxy/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

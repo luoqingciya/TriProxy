@@ -114,6 +114,12 @@ jobs:
 
       - name: Build the lite installer
         shell: bash
+        env:
+          # Produces the .sig files the updater verifies payloads against.
+          # Without this the release still builds, but no installed copy can
+          # accept the update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
           npx tauri build --bundles "${{ matrix.bundles }}" \
@@ -125,14 +131,26 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           mkdir -p artifacts
+
+          # Copy the payload and its signature together. A renamed payload with
+          # the signature left behind would produce a latest.json entry that
+          # every client rejects.
+          keep() {
+            cp "$1" "artifacts/$2"
+            if [ -f "$1.sig" ]; then cp "$1.sig" "artifacts/$2.sig"; fi
+          }
+
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/*/*; do
             [ -f "$f" ] || continue
             case "$f" in
-              */nsis/*.exe)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.exe" ;;
-              */dmg/*.dmg)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.dmg" ;;
-              */appimage/*)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.AppImage" ;;
-              */deb/*.deb)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-lite.deb" ;;
+              */nsis/*.exe)        keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.exe" ;;
+              */dmg/*.dmg)         keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.dmg" ;;
+              */appimage/*)        keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.AppImage" ;;
+              */deb/*.deb)         keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.deb" ;;
+              # macOS update payload: the updater replaces the .app bundle from
+              # this tarball, not from the dmg.
+              */macos/*.app.tar.gz) keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.app.tar.gz" ;;
             esac
           done
           # Clear the bundle directory so the full build cannot be collected
@@ -251,6 +269,9 @@ jobs:
 
       - name: Build the full installer
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
           npx tauri build --bundles "${{ matrix.bundles }}" \
@@ -337,6 +358,13 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Assemble latest.json for the updater
+        run: |
+          set -euo pipefail
+          node .github/scripts/latest-json.mjs \
+            artifacts "${GITHUB_REF_NAME#v}" "${GITHUB_REPOSITORY}" artifacts/latest.json
+          cat artifacts/latest.json
 
       - name: Create GitHub release
         env:
