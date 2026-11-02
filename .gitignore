@@ -48,3 +48,12 @@ Thumbs.db
 # They are produced during the build, never committed.
 /src-tauri/resources/
 /artifacts/
+
+# Local build output. Installers and bundles are produced by CI and attached to
+# releases; a copy of them in the repository is dead weight that every clone
+# pays for. dist-local is where a hand-run release build leaves them.
+/dist-local/
+*.msi
+*.dmg
+*.AppImage
+*.deb
