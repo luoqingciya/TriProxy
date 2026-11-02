@@ -47,6 +47,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `label` and `arch` are not just job labels: they are the two fields
+        # that go into every artifact name. One vocabulary for the whole
+        # matrix — `x64` everywhere, `arm64` for Apple Silicon — so a download
+        # never needs a decoder ring to say which machine it runs on.
         include:
           - label: windows
             os: windows-latest
@@ -57,14 +61,14 @@ jobs:
             os: ubuntu-latest
             cli: triproxy
             bundles: appimage,deb
-            arch: amd64
+            arch: x64
           - label: macos
             os: macos-latest
             cli: triproxy
             # app stays in the bundle directory so the verification step can
             # look inside it; dmg alone deletes it after packaging.
             bundles: app,dmg
-            arch: aarch64
+            arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -140,17 +144,22 @@ jobs:
             if [ -f "$1.sig" ]; then cp "$1.sig" "artifacts/$2.sig"; fi
           }
 
+          # Names carry platform, architecture and variant, in that order:
+          #   TriProxy-<version>-<os>-<arch>-<variant>.<ext>
+          # `TriProxy_0.2.3_x64-lite.exe` said neither which OS nor which
+          # architecture — "x64" only meant Windows because we said so.
+          # Keep in sync with .github/scripts/latest-json.mjs.
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/*/*; do
             [ -f "$f" ] || continue
             case "$f" in
-              */nsis/*.exe)        keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.exe" ;;
-              */dmg/*.dmg)         keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.dmg" ;;
-              */appimage/*.AppImage) keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.AppImage" ;;
-              */deb/*.deb)         keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.deb" ;;
+              */nsis/*.exe)        keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.exe" ;;
+              */dmg/*.dmg)         keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.dmg" ;;
+              */appimage/*.AppImage) keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.AppImage" ;;
+              */deb/*.deb)         keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.deb" ;;
               # macOS update payload: the updater replaces the .app bundle from
               # this tarball, not from the dmg.
-              */macos/*.app.tar.gz) keep "$f" "TriProxy_${version}_${{ matrix.arch }}-lite.app.tar.gz" ;;
+              */macos/*.app.tar.gz) keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.app.tar.gz" ;;
             esac
           done
           # Clear the bundle directory so the full build cannot be collected
@@ -281,10 +290,10 @@ jobs:
           for f in src-tauri/target/release/bundle/*/*; do
             [ -f "$f" ] || continue
             case "$f" in
-              */nsis/*.exe)  cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.exe" ;;
-              */dmg/*.dmg)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.dmg" ;;
-              */appimage/*.AppImage) cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.AppImage" ;;
-              */deb/*.deb)   cp "$f" "artifacts/TriProxy_${version}_${{ matrix.arch }}-full.deb" ;;
+              */nsis/*.exe)  cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.exe" ;;
+              */dmg/*.dmg)   cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.dmg" ;;
+              */appimage/*.AppImage) cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.AppImage" ;;
+              */deb/*.deb)   cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.deb" ;;
             esac
           done
           ls -l artifacts/
