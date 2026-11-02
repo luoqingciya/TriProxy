@@ -24,11 +24,17 @@ use triproxy_core::compiler::compile;
 use triproxy_core::profile::{parse_payload, Node};
 use triproxy_core::{
     AppSettings, AppliedProxy, CompiledConfig, ControllerClient, CoreKind, CorePreference,
-    LogLevel, LogLine, ManagerStatus, ProfileStore, Selection, Selector, StoredProfile,
-    SystemProxyManager,
+    InstallOptions, LogLevel, LogLine, ManagerStatus, ProfileStore, Selection, Selector,
+    StoredProfile, SystemProxyManager, UpdateCheck,
 };
 
 use crate::AppState;
+
+/// Port the cores expose their controller API on.
+///
+/// Separate from the inbound port: it is loopback-only and never user-facing,
+/// so it stays fixed rather than becoming another setting to get wrong.
+const API_PORT: u16 = triproxy_core::core::DEFAULT_API_PORT;
 
 type CmdResult<T> = Result<T, String>;
 
@@ -39,6 +45,62 @@ fn err(message: impl std::fmt::Display) -> String {
 #[tauri::command]
 pub async fn status(state: State<'_, AppState>) -> CmdResult<ManagerStatus> {
     Ok(state.manager.status().await)
+}
+
+/// Download and install a core binary.
+///
+/// The lite installer ships no cores, so without this a user who picked lite
+/// sees "未安装" and no way forward inside the app — the only documented path
+/// was `triproxy core install` on a terminal they may not have opened.
+#[tauri::command]
+pub async fn install_core(
+    state: State<'_, AppState>,
+    core: CoreKind,
+    mirror: Option<String>,
+) -> CmdResult<ManagerStatus> {
+    let options = InstallOptions {
+        version: None,
+        force: false,
+        allow_unverified: false,
+        local_file: None,
+        mirror,
+    };
+    state.manager.install(core, &options).await.map_err(err)?;
+    Ok(state.manager.status().await)
+}
+
+/// Compare the installed core against the latest upstream release.
+#[tauri::command]
+pub async fn check_core_update(
+    state: State<'_, AppState>,
+    core: CoreKind,
+) -> CmdResult<UpdateCheck> {
+    state.manager.binaries().check_update(core).await.map_err(err)
+}
+
+/// Whether the OS will launch TriProxy at login.
+///
+/// Read from the OS, not from `settings.json`: the user can remove the entry by
+/// hand, and a toggle that claims "on" while nothing is registered is a lie the
+/// user only discovers at the next reboot.
+#[tauri::command]
+pub async fn autostart_enabled(app: tauri::AppHandle) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(err)
+}
+
+/// Register or remove the login entry. Returns the state the OS reports after.
+#[tauri::command]
+pub async fn set_autostart(app: tauri::AppHandle, enabled: bool) -> CmdResult<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let launcher = app.autolaunch();
+    if enabled {
+        launcher.enable().map_err(err)?;
+    } else {
+        launcher.disable().map_err(err)?;
+    }
+    launcher.is_enabled().map_err(err)
 }
 
 #[derive(Serialize)]
@@ -204,7 +266,7 @@ fn compile_active(
     });
 
     let selection = selector.select(&profile, settings.network()).map_err(err)?;
-    let options = settings.compile_options(7890, 9090);
+    let options = settings.compile_options(settings.listen_port, API_PORT);
     let compiled = compile(selection.selected, &profile, &options).map_err(err)?;
     Ok((selection.selected, compiled))
 }

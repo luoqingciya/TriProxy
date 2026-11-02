@@ -55,6 +55,7 @@ pub mod store;
 pub mod subscription;
 pub mod subscription_service;
 
+pub use binaries::{InstallOptions, InstalledBinary, UpdateCheck, UpdateStatus};
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
     compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,

@@ -37,6 +37,8 @@ export function Settings() {
   const status = useApp((state) => state.status)
   const proxy = useApp((state) => state.proxy)
   const setSystemProxy = useApp((state) => state.setSystemProxy)
+  const autostart = useApp((state) => state.autostart)
+  const setAutostart = useApp((state) => state.setAutostart)
   const update = useApp((state) => state.updateSettings)
 
   if (!settings) {
@@ -103,6 +105,24 @@ export function Settings() {
             onChange={(close_to_tray) => update({ close_to_tray })}
           />
         </SettingRow>
+        <SettingRow
+          title="开机自启"
+          hint="登录时自动启动 TriProxy；Windows 上会请求一次管理员权限"
+        >
+          <Toggle
+            checked={autostart ?? false}
+            onChange={(enabled) => void setAutostart(enabled)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="启动后自动连接"
+          hint="有活动配置时，打开应用就启动核心，不用再点一次"
+        >
+          <Toggle
+            checked={settings.auto_connect}
+            onChange={(auto_connect) => update({ auto_connect })}
+          />
+        </SettingRow>
       </Card>
 
       <Card className="mb-4">
@@ -142,6 +162,26 @@ export function Settings() {
           <Toggle
             checked={settings.allow_lan}
             onChange={(allow_lan) => update({ allow_lan })}
+          />
+        </SettingRow>
+        <SettingRow
+          title="监听端口"
+          hint="本地混合代理端口；被别的程序占用时核心会启动失败，改完需要重启核心"
+        >
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={settings.listen_port}
+            onChange={(event) => {
+              const port = Number(event.target.value)
+              // An empty field parses as 0; saving that would make the next
+              // start fail with a port error the user did not ask for.
+              if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+                update({ listen_port: port })
+              }
+            }}
+            className="w-[104px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg tabular outline-none"
           />
         </SettingRow>
       </Card>

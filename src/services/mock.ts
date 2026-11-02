@@ -83,7 +83,9 @@ let settings: Settings = {
   dns_mode: 'off',
   rule_mode: 'global',
   log_level: 'info',
+  listen_port: 7890,
   close_to_tray: true,
+  auto_connect: false,
 }
 
 const nodes: NodeSummary[] = [
@@ -192,6 +194,20 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return undefined as T
     case 'refresh_profile':
       return { kind: 'not_modified' } as T
+    case 'install_core':
+      // Pretend the download worked: the browser mock has no cores at all.
+      return status() as T
+    case 'check_core_update':
+      return {
+        core: args?.core,
+        installed: null,
+        latest: null,
+        status: 'not-installed',
+      } as T
+    case 'autostart_enabled':
+      return false as T
+    case 'set_autostart':
+      return Boolean(args?.enabled) as T
     case 'delete_profile':
       library = {
         active: library.active === args?.id ? null : library.active,

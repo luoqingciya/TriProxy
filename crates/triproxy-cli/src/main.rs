@@ -23,10 +23,10 @@ use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, is_elevated, leftovers, measure_nodes, measure_proxy_delay, parse_payload,
-    CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport, Diagnostic, DnsMode, Layout,
-    ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile, ProfileStore, RefreshStatus,
-    RuleMode, Selector, StoredProfile, SubscriptionService, SwitchReport, SystemProxyManager,
-    DEFAULT_PROBE_URL,
+    AppSettings, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport, Diagnostic,
+    DnsMode, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile,
+    ProfileStore, RefreshStatus, RuleMode, Selector, StoredProfile, SubscriptionService,
+    SwitchReport, SystemProxyManager, DEFAULT_PROBE_URL,
 };
 use triproxy_core::{select_node, ApplyOutcome, ControllerClient};
 
@@ -645,6 +645,7 @@ async fn cmd_start(
         } else {
             None
         },
+        listen_port: AppSettings::load(manager.layout()).listen_port,
         ..Default::default()
     };
     let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
@@ -672,7 +673,10 @@ async fn cmd_start(
             .unwrap_or_default()
     );
     println!("  config  {}", report.config.display());
-    println!("  listen  127.0.0.1:{}", kind.default_listen_port());
+    println!(
+        "  listen  127.0.0.1:{}",
+        AppSettings::load(manager.layout()).listen_port
+    );
     if proxy && tun {
         eprintln!("note: TUN 模式已接管全部流量，跳过系统代理");
     } else if proxy {
@@ -737,6 +741,7 @@ async fn cmd_switch(
         } else {
             None
         },
+        listen_port: AppSettings::load(manager.layout()).listen_port,
         ..Default::default()
     };
     let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;

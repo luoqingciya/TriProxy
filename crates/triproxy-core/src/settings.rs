@@ -61,16 +61,34 @@ pub struct AppSettings {
     pub rule_mode: crate::compiler::RuleMode,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Local inbound port for the mixed listener.
+    ///
+    /// Fixed at 7890 until now, which made TriProxy unusable on a machine where
+    /// something else already holds that port — and there is no fallback, the
+    /// core simply fails to bind.
+    #[serde(default = "default_listen_port")]
+    pub listen_port: u16,
     /// Keep running in the system tray when the window is closed.
     ///
     /// Defaults to true: a proxy client that exits on close would cut the
     /// connection the user is in the middle of using.
     #[serde(default = "default_close_to_tray")]
     pub close_to_tray: bool,
+    /// Start a core as soon as the app launches.
+    ///
+    /// Off by default: an app that opens connections before the user asks is a
+    /// surprise, and on Windows it also means an elevated process starting
+    /// unattended at login.
+    #[serde(default)]
+    pub auto_connect: bool,
 }
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+fn default_listen_port() -> u16 {
+    7890
 }
 
 fn default_close_to_tray() -> bool {
@@ -90,7 +108,9 @@ impl Default for AppSettings {
             dns_mode: crate::compiler::DnsMode::Off,
             rule_mode: crate::compiler::RuleMode::Global,
             log_level: default_log_level(),
+            listen_port: default_listen_port(),
             close_to_tray: default_close_to_tray(),
+            auto_connect: false,
         }
     }
 }
@@ -197,7 +217,9 @@ mod tests {
             dns_mode: crate::compiler::DnsMode::Split,
             rule_mode: crate::compiler::RuleMode::Split,
             log_level: "debug".to_string(),
+            listen_port: 1080,
             close_to_tray: false,
+            auto_connect: true,
         };
         settings.save(&layout).unwrap();
 

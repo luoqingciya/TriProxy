@@ -18,6 +18,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   AppliedProxy,
   CoreKind,
+  CoreUpdate,
   ConnectionsSnapshot,
   LatencySample,
   TrafficSample,
@@ -67,6 +68,18 @@ export const api = {
   startCore: (core: CoreKind | null) => call<ManagerStatus>('start_core', { core }),
 
   stopCore: () => call<void>('stop_core'),
+
+  /** Download and install a core binary (the lite installer ships none). */
+  installCore: (core: CoreKind, mirror?: string) =>
+    call<ManagerStatus>('install_core', { core, mirror: mirror ?? null }),
+
+  checkCoreUpdate: (core: CoreKind) =>
+    call<CoreUpdate>('check_core_update', { core }),
+
+  autostartEnabled: () => call<boolean>('autostart_enabled'),
+
+  setAutostart: (enabled: boolean) =>
+    call<boolean>('set_autostart', { enabled }),
 
   switchCore: (target: string) => call<ManagerStatus>('switch_core', { target }),
 

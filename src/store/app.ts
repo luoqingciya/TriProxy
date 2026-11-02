@@ -16,6 +16,7 @@
 import { create } from 'zustand'
 
 import { api } from '../services/api'
+import { CORE_LABEL } from '../types'
 import type {
   AppliedProxy,
   ConnectionsSnapshot,
@@ -66,6 +67,8 @@ interface AppState {
   nodes: NodeSummary[]
   selection: Selection | null
   settings: Settings | null
+  /** Whether the OS will launch the app at login; `null` until read. */
+  autostart: boolean | null
   proxy: AppliedProxy | null
   latency: Record<string, LatencySample>
   traffic: TrafficSample | null
@@ -83,6 +86,8 @@ interface AppState {
   start: (core: CoreKind | null) => Promise<void>
   stop: () => Promise<void>
   switchTo: (target: string) => Promise<void>
+  installCore: (core: CoreKind) => Promise<void>
+  updateCore: (core: CoreKind) => Promise<void>
 
   importProfile: (text: string, name: string) => Promise<StoredProfile | null>
   useProfile: (id: string) => Promise<void>
@@ -95,6 +100,7 @@ interface AppState {
   closeConnection: (id: string | null) => Promise<void>
   selectNode: (nodeId: string | null) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
+  setAutostart: (enabled: boolean) => Promise<void>
   clearError: () => void
   clearNotice: () => void
 }
@@ -108,6 +114,7 @@ export const useApp = create<AppState>((set, get) => ({
   nodes: [],
   selection: null,
   settings: null,
+  autostart: null,
   proxy: null,
   latency: {},
   traffic: null,
@@ -157,8 +164,11 @@ export const useApp = create<AppState>((set, get) => ({
 
   loadSettings: async () => {
     try {
-      const settings = await api.settings()
-      set({ settings })
+      const [settings, autostart] = await Promise.all([
+        api.settings(),
+        api.autostartEnabled().catch(() => null),
+      ])
+      set({ settings, autostart })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -194,6 +204,50 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       const status = await api.switchCore(target)
       set({ status, error: null })
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  /**
+   * Download a core binary.
+   *
+   * The download runs in Rust and can take a while, so the busy flag is what
+   * tells the button to say "下载中" instead of looking dead.
+   */
+  installCore: async (core) => {
+    set({ busy: true, error: null })
+    try {
+      const status = await api.installCore(core)
+      set({ status, notice: `${CORE_LABEL[core]} 已安装` })
+      await get().refresh()
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false })
+    }
+  },
+
+  /** Check upstream for a newer build of one core, then install it. */
+  updateCore: async (core) => {
+    set({ busy: true, error: null })
+    try {
+      const check = await api.checkCoreUpdate(core)
+      if (check.status === 'up-to-date') {
+        set({ notice: `${CORE_LABEL[core]} 已是最新版本` })
+        return
+      }
+      const status = await api.installCore(core)
+      set({
+        status,
+        notice:
+          check.latest !== null
+            ? `${CORE_LABEL[core]} 已更新到 ${check.latest}`
+            : `${CORE_LABEL[core]} 已更新`,
+      })
       await get().refresh()
     } catch (error) {
       set({ error: describe(error) })
@@ -318,6 +372,21 @@ export const useApp = create<AppState>((set, get) => ({
       await api.saveSettings(next)
     } catch (error) {
       set({ settings: current, error: describe(error) })
+    }
+  },
+
+  /**
+   * Toggle the login entry.
+   *
+   * The OS is the source of truth, so the value comes back from the backend
+   * rather than being assumed from the click.
+   */
+  setAutostart: async (enabled) => {
+    try {
+      const state = await api.setAutostart(enabled)
+      set({ autostart: state, error: null })
+    } catch (error) {
+      set({ error: describe(error) })
     }
   },
 
