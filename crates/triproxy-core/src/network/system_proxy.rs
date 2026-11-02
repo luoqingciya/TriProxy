@@ -79,6 +79,9 @@ pub const DEFAULT_BYPASS: &str = "<local>;localhost;127.*;10.*;172.16.*;172.17.*
 
 pub struct SystemProxyManager {
     snapshot_path: PathBuf,
+    /// Kept so `enable` can read the user's bypass list at the moment it runs,
+    /// rather than freezing whatever settings existed when the manager was built.
+    layout: Layout,
     backend: Box<dyn ProxyBackend>,
 }
 
@@ -86,6 +89,7 @@ impl SystemProxyManager {
     pub fn new(layout: &Layout) -> Self {
         Self {
             snapshot_path: layout.root().join("system-proxy.json"),
+            layout: layout.clone(),
             backend: platform_backend(),
         }
     }
@@ -96,6 +100,18 @@ impl SystemProxyManager {
 
     pub fn supported(&self) -> bool {
         self.backend.supported()
+    }
+
+    /// The bypass list to install, honouring the user's override.
+    ///
+    /// Empty means "use the built-in list": a user who clears the field wants
+    /// the default back, not a proxy that captures localhost and breaks every
+    /// development server on the machine.
+    fn bypass(&self) -> String {
+        crate::settings::AppSettings::load(&self.layout)
+            .proxy_bypass
+            .filter(|list| !list.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_BYPASS.to_string())
     }
 
     /// The proxy TriProxy believes it has installed, if any.
@@ -148,7 +164,7 @@ impl SystemProxyManager {
             }
         };
 
-        self.backend.apply(endpoint, DEFAULT_BYPASS)?;
+        self.backend.apply(endpoint, &self.bypass())?;
 
         let snapshot = SnapshotFile {
             backend: self.backend.name().to_string(),
@@ -688,6 +704,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let manager = SystemProxyManager {
             snapshot_path: root.join("system-proxy.json"),
+            layout: Layout::new(&root),
             backend: Box::new(backend),
         };
         (manager, root)
@@ -712,6 +729,34 @@ mod tests {
         assert!(error.to_string().contains("nothing is listening"));
         // Nothing was applied and no snapshot was written.
         assert!(manager.status().is_none());
+    }
+
+    /// A user with a private network needs their own ranges in the list; the
+    /// built-in one cannot know them.
+    #[test]
+    fn a_custom_bypass_list_replaces_the_default() {
+        let (manager, root) = manager("bypass", FakeBackend::new(serde_json::json!({})));
+        let settings = crate::settings::AppSettings {
+            proxy_bypass: Some("localhost;*.corp.internal".to_string()),
+            ..Default::default()
+        };
+        settings.save(&Layout::new(&root)).unwrap();
+
+        assert_eq!(manager.bypass(), "localhost;*.corp.internal");
+    }
+
+    /// Clearing the field means "use the default", not "bypass nothing":
+    /// proxying localhost breaks every local development server on the machine.
+    #[test]
+    fn an_empty_bypass_list_falls_back_to_the_default() {
+        let (manager, root) = manager("bypass-empty", FakeBackend::new(serde_json::json!({})));
+        let settings = crate::settings::AppSettings {
+            proxy_bypass: Some("   ".to_string()),
+            ..Default::default()
+        };
+        settings.save(&Layout::new(&root)).unwrap();
+
+        assert_eq!(manager.bypass(), DEFAULT_BYPASS);
     }
 
     #[test]

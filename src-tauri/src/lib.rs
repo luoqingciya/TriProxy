@@ -95,6 +95,12 @@ pub fn run() {
             // therefore non-fatal: the app simply behaves like a normal window.
             if let Err(error) = tray::install(app) {
                 tracing::error!(%error, "could not create the tray icon");
+            } else {
+                // The menu opens with "未运行"; fill in what recovery found.
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    commands::sync_tray(&handle).await;
+                });
             }
 
             // Subscriptions used to refresh only when the user asked. A profile
@@ -221,7 +227,7 @@ async fn refresh_subscriptions_forever(manager: Arc<CoreManager>) {
 /// check, profile compilation and system-proxy handoff all live there, and an
 /// auto-connect path that skipped them would start a core that behaves
 /// differently from one the user started by hand.
-fn maybe_auto_connect<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+fn maybe_auto_connect(app: &tauri::AppHandle) {
     use tauri::Manager;
 
     let settings = AppSettings::load(app.state::<AppState>().manager.layout());
@@ -246,7 +252,7 @@ fn maybe_auto_connect<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             return;
         }
 
-        match commands::start_core(app.state::<AppState>(), None).await {
+        match commands::start_core(app.clone(), app.state::<AppState>(), None).await {
             Ok(status) => tracing::info!(
                 core = status.active_core.map(|kind| kind.as_str()).unwrap_or("-"),
                 "auto-connected on launch"
