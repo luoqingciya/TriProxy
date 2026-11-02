@@ -141,6 +141,15 @@ pub enum Credentials {
     Trojan {
         password: String,
     },
+    /// QUIC-based protocol. Always TLS; the obfuscation layer is optional and
+    /// only  is in scope.
+    Hysteria2 {
+        password: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        obfs: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        obfs_password: Option<String>,
+    },
 }
 
 fn default_vmess_security() -> String {
@@ -162,6 +171,15 @@ impl Credentials {
             } => format!("vmess:{uuid}:{alter_id}:{security}"),
             Credentials::Vless { uuid, flow } => format!("vless:{uuid}:{}", flow.as_str()),
             Credentials::Trojan { password } => format!("trojan:{password}"),
+            Credentials::Hysteria2 {
+                password,
+                obfs,
+                obfs_password,
+            } => format!(
+                "hysteria2:{password}:{}:{}",
+                obfs.clone().unwrap_or_default(),
+                obfs_password.clone().unwrap_or_default()
+            ),
         }
     }
 
@@ -171,6 +189,7 @@ impl Credentials {
             Credentials::Vmess { .. } => Protocol::Vmess,
             Credentials::Vless { .. } => Protocol::Vless,
             Credentials::Trojan { .. } => Protocol::Trojan,
+            Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
         }
     }
 }

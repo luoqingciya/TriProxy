@@ -83,6 +83,11 @@ struct ClashProxy {
     #[serde(rename = "reality-opts")]
     reality_opts: Option<RealityOpts>,
 
+    // Hysteria2
+    obfs: Option<String>,
+    #[serde(rename = "obfs-password")]
+    obfs_password: Option<String>,
+
     udp: Option<bool>,
 }
 
@@ -233,12 +238,23 @@ fn convert(proxy: ClashProxy) -> Result<Node, String> {
                 .clone()
                 .ok_or_else(|| format!("`{name}`: trojan without a password"))?,
         },
+        "hysteria2" => Credentials::Hysteria2 {
+            password: proxy
+                .password
+                .clone()
+                .ok_or_else(|| format!("`{name}`: hysteria2 without a password"))?,
+            obfs: proxy.obfs.clone(),
+            obfs_password: proxy.obfs_password.clone(),
+        },
         other => return Err(format!("`{name}`: proxy type `{other}` is not supported")),
     };
 
-    // Trojan is TLS-only in practice; Clash configs usually say so, but a missing
-    // `tls` key on a trojan entry means TLS, not plaintext.
-    let tls_wanted = proxy.tls.unwrap_or(proxy.kind == "trojan") || proxy.reality_opts.is_some();
+    // Trojan and Hysteria2 are TLS-only in practice; Clash configs often omit
+    // the key for both, and plaintext is not a thing either protocol has.
+    let tls_wanted = proxy
+        .tls
+        .unwrap_or(matches!(proxy.kind.as_str(), "trojan" | "hysteria2"))
+        || proxy.reality_opts.is_some();
 
     let tls = tls_wanted.then(|| TlsConfig {
         server_name: proxy.servername.clone().or_else(|| proxy.sni.clone()),
@@ -391,18 +407,26 @@ proxies:
     cipher: aes-256-gcm
     password: secret
     udp: true
+  - name: "Tuic"
+    type: tuic
+    server: tuic.example.com
+    port: 443
+    uuid: x
+    password: y
   - name: "Hy2"
     type: hysteria2
     server: hy.example.com
     port: 443
-    password: x
+    password: secret
+    obfs: salamander
+    obfs-password: obfspw
 "#;
 
     #[test]
     fn imports_supported_proxies_and_reports_the_rest() {
         let (nodes, diagnostics) = parse(SAMPLE);
 
-        assert_eq!(nodes.len(), 3, "hysteria2 should be skipped");
+        assert_eq!(nodes.len(), 4, "only the tuic entry should be skipped");
         assert_eq!(nodes[0].name, "JP Reality");
         assert!(nodes[0].uses_reality());
         assert_eq!(
@@ -421,13 +445,18 @@ proxies:
 
         assert_eq!(nodes[2].protocol, crate::capability::Protocol::Shadowsocks);
 
+        // Hysteria2 is supported now; it must come through with TLS attached,
+        // since the protocol has no plaintext mode.
+        assert_eq!(nodes[3].protocol, crate::capability::Protocol::Hysteria2);
+        assert!(nodes[3].tls.is_some());
+
         let skipped: Vec<_> = diagnostics
             .iter()
             .filter(|d| d.code == "clash.unsupported_proxy")
             .collect();
         assert_eq!(skipped.len(), 1);
         assert!(
-            skipped[0].message.contains("hysteria2"),
+            skipped[0].message.contains("tuic"),
             "{}",
             skipped[0].message
         );

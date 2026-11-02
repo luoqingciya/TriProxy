@@ -236,6 +236,12 @@ fn outbound(node: &Node) -> Result<Value, String> {
                 }),
             );
         }
+        // Unreachable in practice: the capability gate rejects a profile that
+        // needs hysteria2 before this compiler runs. Kept explicit so the reason
+        // stays readable if that gate is ever relaxed.
+        Credentials::Hysteria2 { .. } => {
+            return Err("Xray does not support hysteria2".to_string());
+        }
         Credentials::Trojan { password } => {
             outbound.insert("protocol".to_string(), json!("trojan"));
             outbound.insert(
