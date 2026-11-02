@@ -44,11 +44,19 @@ if (!dir || !version || !repo || !output) {
 const files = readdirSync(dir)
 const base = `https://github.com/${repo}/releases/download/v${version}`
 
-/** Platform key the updater asks for → payload file name. */
+/**
+ * Platform key the updater asks for → payload file name.
+ *
+ * The names mirror the packaging step in .github/workflows/release.yml:
+ * `TriProxy-<version>-<os>-<arch>-<variant>.<ext>`. They are spelled out rather
+ * than globbed so that a rename in the workflow fails here — with the missing
+ * name in the error — instead of producing a latest.json that points at a file
+ * that does not exist.
+ */
 const wanted = {
-  'windows-x86_64': `TriProxy_${version}_x64-lite.exe`,
-  'darwin-aarch64': `TriProxy_${version}_aarch64-lite.app.tar.gz`,
-  'linux-x86_64': `TriProxy_${version}_amd64-lite.AppImage`,
+  'windows-x86_64': `TriProxy-${version}-windows-x64-lite.exe`,
+  'darwin-aarch64': `TriProxy-${version}-macos-arm64-lite.app.tar.gz`,
+  'linux-x86_64': `TriProxy-${version}-linux-x64-lite.AppImage`,
 }
 
 const platforms = {}

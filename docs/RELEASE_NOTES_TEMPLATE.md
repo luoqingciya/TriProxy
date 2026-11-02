@@ -84,9 +84,12 @@ AppImage，Linux 用户拿到的是 400 字节的签名而不是 90MB 的安装�
 
 | 平台 | 文件 | 安装方式 |
 |---|---|---|
-| Windows | `TriProxy_<版本>_x64-{lite,full}.exe` | 双击安装到 `C:\Program Files\TriProxy` |
-| macOS (Apple Silicon) | `TriProxy_<版本>_aarch64-{lite,full}.dmg` | 打开后拖进「应用程序」 |
-| Linux | `TriProxy_<版本>_amd64-{lite,full}.AppImage` / `.deb` | AppImage 加执行权限直接运行；deb 用包管理器安装 |
+| Windows | `TriProxy-<版本>-windows-x64-{lite,full}.exe` | 双击安装到 `C:\Program Files\TriProxy` |
+| macOS (Apple Silicon) | `TriProxy-<版本>-macos-arm64-{lite,full}.dmg` | 打开后拖进「应用程序」 |
+| Linux | `TriProxy-<版本>-linux-x64-{lite,full}.AppImage` / `.deb` | AppImage 加执行权限直接运行；deb 用包管理器安装 |
+
+文件名读作「平台-架构-变体」：`windows-x64-lite` 就是 Windows / 64 位 Intel / 精简版，
+不用再靠扩展名反推系统。
 
 **命令行都在同一个包里**，与图形界面共用同一份数据，不需要单独下载。
 
