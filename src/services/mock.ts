@@ -256,6 +256,8 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return undefined as T
     case 'select_node':
       return { applied: false, node: 'mock', reason: 'mock mode' } as T
+    case 'set_favorite':
+      return Boolean(args?.favorite) as T
     case 'test_proxy_delay':
       return nodes.map((n, i) => ({
         node_id: n.id,

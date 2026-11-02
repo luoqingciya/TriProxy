@@ -97,6 +97,9 @@ export const api = {
       nodeId,
     }),
 
+  setFavorite: (nodeId: string, favorite: boolean) =>
+    call<boolean>('set_favorite', { nodeId, favorite }),
+
   testProxyDelay: (timeoutSecs: number) =>
     call<LatencySample[]>('test_proxy_delay', { timeoutSecs }),
 

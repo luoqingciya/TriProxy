@@ -191,6 +191,7 @@ pub fn run() {
             commands::autostart_enabled,
             commands::set_autostart,
             commands::select_node,
+            commands::set_favorite,
             commands::test_proxy_delay,
             commands::traffic,
             commands::connections,

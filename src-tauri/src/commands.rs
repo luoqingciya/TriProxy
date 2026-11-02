@@ -219,6 +219,23 @@ pub async fn set_active_profile(state: State<'_, AppState>, id: String) -> CmdRe
     store.set_active(Some(&id)).map_err(err)
 }
 
+/// Star or unstar a node in the active profile.
+#[tauri::command]
+pub async fn set_favorite(
+    state: State<'_, AppState>,
+    node_id: String,
+    favorite: bool,
+) -> CmdResult<bool> {
+    let store = ProfileStore::new(state.manager.layout());
+    let (stored, _) = store
+        .active()
+        .map_err(err)?
+        .ok_or_else(|| "还没有活动配置，请先在「配置」页导入并设为活动".to_string())?;
+    store
+        .set_favorite(&stored.id, &node_id, favorite)
+        .map_err(err)
+}
+
 #[derive(Serialize)]
 pub struct RefreshResult {
     kind: String,

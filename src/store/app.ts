@@ -111,6 +111,7 @@ interface AppState {
   testProxyDelay: () => Promise<void>
   closeConnection: (id: string | null) => Promise<void>
   selectNode: (nodeId: string | null) => Promise<void>
+  toggleFavorite: (nodeId: string) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   setAutostart: (enabled: boolean) => Promise<void>
   clearError: () => void
@@ -340,6 +341,19 @@ export const useApp = create<AppState>((set, get) => ({
       if (!result.applied && result.reason) {
         set({ notice: `已保存，下次启动生效（${result.reason}）` })
       }
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  toggleFavorite: async (nodeId) => {
+    const profile = get().library.profiles.find(
+      (entry) => entry.id === get().library.active,
+    )
+    const starred = profile?.favorites?.includes(nodeId) ?? false
+    try {
+      await api.setFavorite(nodeId, !starred)
+      await get().refresh()
     } catch (error) {
       set({ error: describe(error) })
     }

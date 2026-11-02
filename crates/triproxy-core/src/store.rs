@@ -60,6 +60,13 @@ pub struct StoredProfile {
     /// Node id the user picked, or  for the profile default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_node: Option<String>,
+    /// Node ids the user starred, in the order they were starred.
+    ///
+    /// Ids, not names: a subscription refresh rewrites names but keeps ids for
+    /// nodes whose endpoint did not change, and a star that silently moved to a
+    /// different node would be worse than losing it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub favorites: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -81,6 +88,9 @@ struct Record {
     /// Node id the user picked for this profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selected_node: Option<String>,
+    /// Starred node ids.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    favorites: Vec<String>,
 }
 
 /// A record as stored on disk, including refresh state.
@@ -91,6 +101,7 @@ pub struct StoredRecord {
     pub profile: Profile,
     pub subscription: Option<Subscription>,
     pub selected_node: Option<String>,
+    pub favorites: Vec<String>,
 }
 
 pub struct ProfileStore {
@@ -250,11 +261,13 @@ impl ProfileStore {
                 .and_then(|existing| existing.subscription),
         };
 
-        // Re-importing or refreshing must not forget which node the user picked.
-        let selected_node = self
-            .record(&id)
-            .ok()
-            .and_then(|existing| existing.selected_node);
+        // Re-importing or refreshing must not forget which node the user picked,
+        // nor which ones they starred.
+        let existing = self.record(&id).ok();
+        let selected_node = existing
+            .as_ref()
+            .and_then(|record| record.selected_node.clone());
+        let favorites = existing.map(|record| record.favorites).unwrap_or_default();
 
         let record = Record {
             id: id.clone(),
@@ -262,6 +275,7 @@ impl ProfileStore {
             profile: profile.clone(),
             subscription,
             selected_node,
+            favorites,
         };
         let text = serde_json::to_string_pretty(&record)?;
         write_atomic(&self.record_path(&id), &text)?;
@@ -286,6 +300,7 @@ impl ProfileStore {
             profile: record.profile,
             subscription: record.subscription,
             selected_node: record.selected_node,
+            favorites: record.favorites,
         })
     }
 
@@ -318,6 +333,7 @@ impl ProfileStore {
                 profile: record.profile,
                 subscription: record.subscription,
                 selected_node: record.selected_node,
+                favorites: record.favorites,
             });
         }
 
@@ -335,6 +351,7 @@ impl ProfileStore {
             profile: record.profile.clone(),
             subscription: record.subscription.clone(),
             selected_node: record.selected_node.clone(),
+            favorites: record.favorites.clone(),
         };
         let text = serde_json::to_string_pretty(&stored)?;
         write_atomic(&self.record_path(&record.id), &text)?;
@@ -375,6 +392,32 @@ impl ProfileStore {
         let text = serde_json::to_string_pretty(&index)?;
         write_atomic(&self.index_path(), &text)?;
         Ok(())
+    }
+
+    /// Star or unstar a node.
+    ///
+    /// Returns the new state. The id is validated like a selection: starring a
+    /// node that no longer exists would keep a dead entry forever, and the UI
+    /// would show a count that never matches the list.
+    pub fn set_favorite(&self, profile_id: &str, node_id: &str, favorite: bool) -> Result<bool> {
+        let mut record = self.record(profile_id)?;
+
+        if !record.profile.nodes.iter().any(|node| node.id == node_id) {
+            return Err(Error::Other(format!(
+                "no node with id `{node_id}` in profile `{}`",
+                record.profile.name
+            )));
+        }
+
+        let was_favorite = record.favorites.iter().any(|id| id == node_id);
+        if favorite && !was_favorite {
+            record.favorites.push(node_id.to_string());
+        } else if !favorite && was_favorite {
+            record.favorites.retain(|id| id != node_id);
+        }
+
+        self.save_record(&record)?;
+        Ok(favorite)
     }
 
     /// Record which node the user picked for a profile.
@@ -466,6 +509,7 @@ fn summarise(record: &Record) -> StoredProfile {
         updated_at_ms: record.stored_at_ms,
         subscription: record.subscription.clone(),
         selected_node: record.selected_node.clone(),
+        favorites: record.favorites.clone(),
     }
 }
 
@@ -525,6 +569,47 @@ mod tests {
 
     fn profile(name: &str, servers: &[&str]) -> Profile {
         Profile::new(name, servers.iter().map(|s| node(s)).collect())
+    }
+
+    /// Stars are the user's opinion about a node, and a subscription refresh
+    /// rewrites the record — losing them there would make the feature useless.
+    #[test]
+    fn favourites_survive_a_resave_and_a_refresh() {
+        let layout = layout("favorites");
+        let store = ProfileStore::new(&layout);
+        let saved = store
+            .save(&profile("p", &["a.example.com", "b.example.com"]), None)
+            .unwrap();
+        let node_id = store.load(&saved.id).unwrap().nodes[0].id.clone();
+
+        store.set_favorite(&saved.id, &node_id, true).unwrap();
+        assert_eq!(
+            store.find(&saved.id).unwrap().unwrap().favorites,
+            vec![node_id.clone()]
+        );
+
+        // Same profile re-saved (what a refresh does) must keep the star.
+        store
+            .save(
+                &profile("p", &["a.example.com", "b.example.com"]),
+                Some(&saved.id),
+            )
+            .unwrap();
+        assert_eq!(
+            store.find(&saved.id).unwrap().unwrap().favorites,
+            vec![node_id.clone()]
+        );
+
+        store.set_favorite(&saved.id, &node_id, false).unwrap();
+        assert!(store.find(&saved.id).unwrap().unwrap().favorites.is_empty());
+    }
+
+    #[test]
+    fn starring_a_node_that_is_not_there_is_refused() {
+        let layout = layout("favorites-missing");
+        let store = ProfileStore::new(&layout);
+        let saved = store.save(&profile("p", &["a.example.com"]), None).unwrap();
+        assert!(store.set_favorite(&saved.id, "no-such-node", true).is_err());
     }
 
     /// The reported bug: import a config, node list is empty because nothing

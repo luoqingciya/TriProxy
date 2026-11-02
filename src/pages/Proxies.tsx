@@ -13,7 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Activity, Check, Search, Zap } from 'lucide-react'
+import { Activity, Check, Search, Star, Zap } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
@@ -41,11 +41,14 @@ export function Proxies() {
   const testLatency = useApp((state) => state.testLatency)
   const testProxyDelay = useApp((state) => state.testProxyDelay)
   const selectNode = useApp((state) => state.selectNode)
+  const toggleFavorite = useApp((state) => state.toggleFavorite)
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
+  const [onlyFavorites, setOnlyFavorites] = useState(false)
 
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
   const selectedNodeId = activeProfile?.selected_node ?? null
+  const favorites = activeProfile?.favorites ?? []
   // No stored pick means the compiled config defaults to the automatic group.
   const autoSelected = selectedNodeId === null && nodes.length > 0
 
@@ -59,6 +62,7 @@ export function Proxies() {
     const needle = query.trim().toLowerCase()
     return nodes
       .filter((node) => (protocol === 'all' ? true : node.protocol === protocol))
+      .filter((node) => (onlyFavorites ? favorites.includes(node.id) : true))
       .filter((node) =>
         needle === ''
           ? true
@@ -66,7 +70,7 @@ export function Proxies() {
             node.server.toLowerCase().includes(needle),
       )
       .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes, protocol, query])
+  }, [nodes, protocol, query, onlyFavorites, favorites])
 
   return (
     <div>
@@ -128,6 +132,12 @@ export function Proxies() {
             />
           ))}
         </div>
+        {/* Starring is only useful if you can then look at just those. */}
+        <FilterChip
+          active={onlyFavorites}
+          onClick={() => setOnlyFavorites((value) => !value)}
+          label={`收藏 ${favorites.length}`}
+        />
       </div>
 
       <Card className="p-0">
@@ -178,6 +188,7 @@ export function Proxies() {
             </button>
             {visible.map((node) => {
               const isSelected = node.id === selectedNodeId
+              const starred = favorites.includes(node.id)
               return (
               <div
                 key={node.id}
@@ -193,6 +204,18 @@ export function Proxies() {
                   <span className={isSelected ? 'text-accent' : 'text-transparent'}>
                     <Check size={14} strokeWidth={2.6} />
                   </span>
+                  <button
+                    onClick={(event) => {
+                      // Starring must not also switch the node — the click is
+                      // inside the row that does exactly that.
+                      event.stopPropagation()
+                      void toggleFavorite(node.id)
+                    }}
+                    title={starred ? '取消收藏' : '收藏'}
+                    className={starred ? 'shrink-0 text-accent' : 'shrink-0 text-faint hover:text-accent'}
+                  >
+                    <Star size={14} strokeWidth={2.2} fill={starred ? 'currentColor' : 'none'} />
+                  </button>
                   <span className="truncate text-fg">{node.name}</span>
                 </div>
                 <div>
