@@ -83,6 +83,12 @@ struct ClashProxy {
     #[serde(rename = "reality-opts")]
     reality_opts: Option<RealityOpts>,
 
+    // TUIC
+    #[serde(rename = "congestion-controller")]
+    congestion_controller: Option<String>,
+    #[serde(rename = "udp-relay-mode")]
+    udp_relay_mode: Option<String>,
+
     // Hysteria2
     obfs: Option<String>,
     #[serde(rename = "obfs-password")]
@@ -237,6 +243,19 @@ fn convert(proxy: ClashProxy) -> Result<Node, String> {
                 .password
                 .clone()
                 .ok_or_else(|| format!("`{name}`: trojan without a password"))?,
+        },
+        "tuic" => Credentials::Tuic {
+            uuid: proxy
+                .uuid
+                .clone()
+                .ok_or_else(|| format!("`{name}`: tuic without a uuid"))?,
+            password: proxy
+                .password
+                .clone()
+                .ok_or_else(|| format!("`{name}`: tuic without a password"))?,
+            // Clash spells these with hyphens, the link format with underscores.
+            congestion_control: proxy.congestion_controller.clone(),
+            udp_relay_mode: proxy.udp_relay_mode.clone(),
         },
         "hysteria2" => Credentials::Hysteria2 {
             password: proxy
@@ -407,12 +426,10 @@ proxies:
     cipher: aes-256-gcm
     password: secret
     udp: true
-  - name: "Tuic"
-    type: tuic
-    server: tuic.example.com
-    port: 443
-    uuid: x
-    password: y
+  - name: "Socks"
+    type: socks5
+    server: socks.example.com
+    port: 1080
   - name: "Hy2"
     type: hysteria2
     server: hy.example.com
@@ -426,7 +443,7 @@ proxies:
     fn imports_supported_proxies_and_reports_the_rest() {
         let (nodes, diagnostics) = parse(SAMPLE);
 
-        assert_eq!(nodes.len(), 4, "only the tuic entry should be skipped");
+        assert_eq!(nodes.len(), 4, "only the socks5 entry should be skipped");
         assert_eq!(nodes[0].name, "JP Reality");
         assert!(nodes[0].uses_reality());
         assert_eq!(
@@ -456,7 +473,7 @@ proxies:
             .collect();
         assert_eq!(skipped.len(), 1);
         assert!(
-            skipped[0].message.contains("tuic"),
+            skipped[0].message.contains("socks5"),
             "{}",
             skipped[0].message
         );
