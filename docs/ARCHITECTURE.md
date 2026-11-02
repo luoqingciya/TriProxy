@@ -1044,41 +1044,219 @@ sni: www.bing.com
 TUIC 的拥塞控制（`bbr` / `cubic` / `new_reno`）和 UDP 中继模式（`native` / `quic`）
 都是可选字段，未知值在校验阶段给警告——它们不影响能否连接，只影响传输表现。
 
-## 22. 尚未实现（明确的边界）
+## 22. 代理组（自动 / 手动）
+
+编译结果里有两个组，而不是一个：
+
+```text
+AUTO   url-test，300s 一轮，tolerance 50ms，成员是全部节点
+PROXY  select，成员是 [选中的节点?] AUTO 节点… DIRECT
+```
+
+**顺序就是机制。** 两个核心的 `select` 组都以第一个成员为默认值，所以「当前用哪个节点」
+完全由成员顺序决定：
+
+| 用户状态 | PROXY 第一个成员 | 结果 |
+|---|---|---|
+| 点过某个节点 | 那个节点 | 用它 |
+| 没点过 | `AUTO` | 自动挑延迟最低的 |
+
+这条规则取代了之前的行为——「没选过 = 用配置里排第一的节点」，一个用户从没做过的选择。
+
+### 22.1 id 与 name 的分工
+
+持久化的选择是**节点 id**，配置里写的是**节点名**。`compile()` 在调用编译器之前把 id 解析成
+名字放进 `CompileOptions::selected_name`（`#[serde(skip)]`，不是用户可见的配置项）。
+编译器因此不需要知道 id 这回事，也不用每个都写一遍查找逻辑。
+
+### 22.2 运行时切换与「清除选择」
+
+`PUT /proxies/PROXY {"name": …}` 是 Mihomo 与 sing-box 共用的切换方式。清除选择以前是
+**空操作**——只改存储，运行中的核心毫不知情；现在会显式切到 `AUTO`，和选节点走同一条路。
+
+Xray 没有组，也没有控制器 API，保持原有语义：选择保存，下次启动生效。
+
+### 22.3 真机验证
+
+本机装三个核心，用同一份 3 节点配置实际启动：
+
+```text
+mihomo    PROXY Selector now=AUTO all=["AUTO","node-a","node-b","DIRECT"]
+          AUTO  URLTest  now=node-a
+sing-box  PROXY Selector now=AUTO
+          AUTO  URLTest  now=node-a
+xray      配置未变，正常启动
+```
+
+`PUT /proxies/PROXY` 切到 `node-b` 返回 204、`now=node-b`；再切回 `AUTO` 返回 204、`now=AUTO`。
+
+---
+
+## 23. 自定义分流规则
+
+两个预设回答的是「国内站点走不走代理」，回答不了「公司内网域名绝不能出本机」。
+后者才是人们要规则编辑器的原因。
+
+### 23.1 一种语法，一个解析器
+
+用户写 Clash 语法，一行一条：
+
+```text
+DOMAIN-SUFFIX,corp.internal,DIRECT
+DOMAIN-KEYWORD,telemetry,PROXY
+IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+```
+
+`compiler::rules` 解析成中性结构（`kind` + `value` + `target`），三个编译器各自渲染：
+
+| 核心 | `DOMAIN-SUFFIX,corp.internal,DIRECT` |
+|---|---|
+| Mihomo | `DOMAIN-SUFFIX,corp.internal,DIRECT` |
+| sing-box | `{"domain_suffix":["corp.internal"],"outbound":"direct"}` |
+| Xray | `{"domain":["domain:corp.internal"],"outboundTag":"direct"}` |
+
+每个核心各写一份解析器，迟早会各自对「一条规则是什么意思」产生分歧——这是这一层存在的唯一理由。
+
+### 23.2 两个必须做对的细节
+
+**自定义规则排在预设之前。** 用户写 `DOMAIN-SUFFIX,cn,PROXY` 必须能压过 split 预设的
+`GEOSITE,cn,DIRECT`，否则设置页看起来是坏的。
+
+**Xray 在 global 模式下也要出 routing 段。** 以前只有 split 才有；global 下自定义规则是唯一
+能把请求送到代理之外的东西，没有 routing 段它就不存在。proxy 规则的 `outboundTag` 用第一个
+outbound 的 tag（也就是当前选中节点的名字）——Xray 没有组可以指。
+
+### 23.3 校验为什么是两层
+
+编辑器失焦时调 `validate_rules`，错误带行号显示在输入框下面；`save_settings` 落盘前再查一遍。
+
+第二层不是冗余：编译器**故意**丢弃解析失败的规则（一行错字不该把整个连接搞挂），
+所以不在保存时拦住，用户的规则会静默消失，只剩日志里一行 warn。
+
+---
+
+## 24. 托盘、单实例与深链接
+
+这三件事的共同点是：**应用可能在用户没看着它的时候被叫醒**。
+
+### 24.1 托盘
+
+菜单第一行是只读状态：`Mihomo · 自动选择` / `未运行`，在启动、停止、切换核心、选节点之后重建
+（`commands::sync_tray`）。托盘常驻的应用，最不能接受的就是「图标看起来一样，但代理是开是关
+看不出来」。
+
+关闭窗口 = 隐藏，受 `close_to_tray` 控制（默认开）。托盘创建失败时（例如没有 StatusNotifier 的
+Linux 会话）`TRAY_READY` 保持 false，关闭窗口按普通退出处理——否则用户会失去唯一的回到应用的入口。
+
+**退出走一条清理路径**：`RunEvent::ExitRequested` + `AtomicBool` 守卫 + `api.prevent_exit()`，
+异步停核心、还原系统代理，再 `app.exit(0)`。少了这一步，托盘「退出」会留下一个没有界面的核心
+继续占着端口，而机器还指着它。
+
+### 24.2 单实例
+
+`tauri-plugin-single-instance` **第一个注册**。否则第二个进程会先抢到监听端口，再谈转交参数。
+它的回调把 argv 交给深链接处理，然后显示窗口——第二次启动的意思是「让我看看窗口」，与有没有
+带链接无关。
+
+### 24.3 深链接
+
+```text
+triproxy://install?url=https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Dabc
+```
+
+Windows/Linux 把点击的链接作为参数交给进程（安装包里由注册表 / `.desktop` 声明），
+macOS 走 deep-link 的 URL 事件。两条路径落到同一个 `deep_link::handle`，所以只有一种行为要推理。
+
+只注册 `triproxy://`，不抢 `clash://`：装了 Clash 系客户端的机器上抢那个 scheme 是不礼貌的。
+
+---
+
+## 25. 常驻相关的其余部分
+
+### 25.1 订阅后台刷新
+
+`refresh_due()` 之前只有测试在调用，订阅只会老化不会更新。现在进程活着就有一个 1 分钟的 ticker
+（`lib.rs::refresh_subscriptions_forever`），按每个订阅自己的 interval 判断到期。
+
+单个订阅源失败不会停掉 ticker，下一轮照常重试。tick 取 1 分钟而不是 1 小时，是因为
+`refresh_due` 是逐个判断的，tick 太长会让「每小时」的订阅漂移。
+
+### 25.2 监听端口
+
+端口以前是 `default_listen_port()` 写死的 7890，机器上别的程序占着它就整个用不了。
+
+现在 `AppSettings.listen_port` 可配，并且**管理器在 `launch()` 时重新读取**，而不是用构造时的缓存——
+就绪探测的端口和配置里绑定的端口必须来自同一个值，硬编码时代这两个可以悄悄不一致。
+
+### 25.3 开机自启与自动连接
+
+两个开关，因为是两件事：登录时启动 TriProxy，和不点按钮就启动核心。
+
+自启用 `tauri-plugin-autostart`，**状态从操作系统读回来**而不是从 `settings.json` 猜：
+用户手删注册项后，一个仍显示「开」的开关要等到下次重启才会露馅。
+
+自动连接走 UI 用的同一条 `start_core` 命令，TUN 提权检查、配置编译、系统代理交接一个不少。
+
+> **已知取舍**：Windows 上自启走 Run 键，而应用清单要求管理员权限，所以登录时会弹一次 UAC。
+> 彻底的解法是改用计划任务（`/RL HIGHEST`），尚未做。
+
+---
+
+## 26. 配置备份
+
+一个 JSON：设置 + 全部配置 + 当前活动项。核心二进制和日志不在里面——一个能重新下载，
+一个没有价值。
+
+**恢复是合并，不是覆盖。** 从另一台机器带来的备份不该删掉本机已有的配置；只有同一个配置 id
+才会撞车，那时备份胜出——「恢复」就是这个意思。
+
+格式版本在动磁盘之前检查：选错文件只应该得到一句明确的报错，而不是一个恢复了一半的配置库。
+
+记录文件（`profiles/<id>.json`）本身已经包含完整 Profile，所以备份就是这些文档的拷贝，
+不存在「内容和索引不同步」这种问题。
+
+---
+
+## 27. 尚未实现（明确的边界）
 
 这一节按「缺了会影响什么」排序，而不是按规划书章节。**状态会过时，改动功能时请同步更新。**
 
-### 22.1 影响日常使用
+### 27.1 影响日常使用
 
-**切换节点没有界面。** 生成的配置里 `PROXY` 组是 `type: select`，成员是全部节点，
-Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY`），**能力本来就有**——
-只是我们没做这个调用，所以用户只能改配置再重启。Xray 没有控制器 API，切换确实需要重启。
-这是「节点页只能看不能选」的根因，也是目前性价比最高的一个缺口。
+**协议不全。** 现在支持 VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC。
+缺 SOCKS5 / HTTP 出站（公司代理、链式代理最常用的两种）、WireGuard、SSH、SSR、Snell、AnyTLS。
 
-**自定义分流规则。** 只有 `global` / `split` 两个预设，不能加自己的域名/IP 规则，
-也不能管理 rule-set 订阅。
+这一条没有和其余几条一起做，原因是它**不是一个补丁，而是一个矩阵**：每个协议 × 三个核心的
+映射与校验。而且分两类——SOCKS/HTTP 可以用「拿一个核心自己起 socks 入站当目标」的方式端到端验证，
+WireGuard 那一组必须有真实服务端。映射写错不会报错，只会「连上了但行为和预期不同」，这是最坏的一种 bug。
 
-**订阅没有后台定时刷新。** 自动刷新只在显式执行 `triproxy profile refresh` 时发生。
+**规则集订阅没有。** 自定义规则只能内联写，不能订阅远程 rule-set（Clash 的 `rule-providers`）。
+split 预设里的 rule-set 是编译期写死的。
 
-### 22.2 影响完整性
+**节点管理很薄。** 能搜索、按协议过滤、点选切换，但没有收藏、分组、手动排序。
+
+### 27.2 影响完整性
 
 | 缺口 | 说明 |
 |---|---|
-| 协议 | VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC。SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
 | 订阅格式 | 支持 URI 列表、base64 与 Clash YAML 的 proxies 段；**不导入 proxy-groups 与 rules** |
-| 流量历史 | 只有瞬时采样，没有曲线图；数据不落盘 |
-| 节点管理 | 没有收藏、分组、手动排序 |
+| 流量历史 | 有 3 分钟曲线，但**不落盘**——关掉窗口就没了 |
 | 应用更新 | 核心与应用都能更新，但应用更新只在包含该功能的版本之后生效 |
 | 多语言 | 界面只有中文 |
+| 备份 | 不含核心二进制（设计如此：能重新下载） |
 
-### 22.3 只在部分平台成立
+### 27.3 只在部分平台成立
 
 - **系统代理**：Windows 实测过；macOS（`networksetup`）与 Linux（`gsettings`）代码写好但未真机验证
+- **托盘**：Windows 实测过；macOS / Linux 走同一套 Tauri 接口，没有真机点验
+- **深链接**：Windows 上 `register_all()` 已接；macOS 依赖打包后的 Info.plist，未真机验证
 - **连接 / 流量 / 真实延迟**：依赖控制器 API，Xray 没有，界面上会说明
+- **开机自启**：Windows 走 Run 键，会弹一次 UAC（应用清单要求管理员权限）；改用计划任务是已知的后续
 - **macOS / Linux 安装包**：v0.2.2 起提供，构建与产物内容经 CI 校验，但没有在真机上装过
 
-### 22.4 明确不做
+### 27.4 明确不做
 
-- **规则分流做成 Clash 那样的规则编辑器**：与「智能选核」的定位冲突，且维护成本远超收益
+- **规则分流做成 Clash 那样的完整规则编辑器**（图形化 rule-provider 管理、规则命中测试）：
+  内联规则已经覆盖绝大多数需求，剩下的复杂度换不来同等收益
 - **内置节点分享 / 订阅分发**：与软件定位无关
 - **TUN 之外的流量劫持手段**（如 WFP 驱动）：TUN 已经够用，驱动层风险不值得

@@ -18,6 +18,9 @@
 一个基于 Rust 的现代化代理客户端，统一管理 **Mihomo / sing-box / Xray** 三个核心。
 用户只需要「导入配置 → 选择节点 → 连接」，配置解析、协议识别、核心选择、配置转换、网络管理全部由程序完成。
 
+桌面端常驻托盘，关窗口不断网；支持自动/手动代理组、自定义分流规则、`triproxy://` 一键导入订阅、
+开机自启与配置备份。命令行与图形界面共用同一份数据与同一套逻辑。
+
 > 完整产品规划见 [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md)。
 > 当前实现范围见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
@@ -29,15 +32,15 @@
 |---|---|---|
 | Phase 0 | 产品与架构设计 | 已完成（规划书） |
 | **Phase 1** | **Rust 多核心管理器 MVP + CLI** | **已完成并通过三核心真机验证** |
-| **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks）** |
+| **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC）** |
 | **Phase 3** | **Config Compiler** | **已完成（三核心配置均通过各自核心校验）** |
 | **Phase 4** | **Smart Core Selector** | **已完成（硬约束淘汰 + 可解释排序）** |
-| **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 配置 / 日志 / 设置 / 托盘驻留）** |
-| **Phase 6** | **系统代理** | **已完成（Windows 实测，macOS/Linux 待验证）** |
+| **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 连接 / 配置 / 日志 / 设置；托盘驻留、深链接导入、配置备份）** |
+| **Phase 6** | **系统代理** | **已完成（Windows 实测，macOS/Linux 待验证；绕过列表可配）** |
 | **Phase 7** | **TUN 模式** | **已完成（管理员实测：网卡与路由在崩溃后均被清理）** |
 | **Phase 8** | **DNS** | **已完成（三核心 × 三模式全部通过校验；未改系统 DNS，理由见文档）** |
-| **Phase 9** | **订阅** | **已完成（URL 导入 / 条件请求缓存 / 错误恢复；无后台定时器）** |
-| **Phase 10** | **分流 / 延迟 / 连接 / 流量 / 核心更新** | **部分完成（节点收藏、流量历史图表未做）** |
+| **Phase 9** | **订阅** | **已完成（URL 导入 / 条件请求缓存 / 错误恢复 / 后台定时刷新）** |
+| **Phase 10** | **分流 / 延迟 / 连接 / 流量 / 核心更新** | **基本完成（自定义规则、代理组、流量曲线已做；节点收藏未做）** |
 
 Phase 1 的验收目标（规划书第 39 章）已全部达成：
 
@@ -95,12 +98,13 @@ triproxy logs -f           # 跟踪日志
 
 ## 两种发行包
 
-每次发布由 GitHub Actions 构建两种压缩包（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)）：
+每次发布由 GitHub Actions 构建两种安装包（见 [`.github/workflows/release.yml`](.github/workflows/release.yml)），
+文件名读作「平台-架构-变体」，例如 `TriProxy-0.2.5-windows-x64-lite.exe`：
 
 | 包 | 内容 | 适用场景 |
 |---|---|---|
-| `triproxy-<target>-lite` | 仅可执行文件 | 想自行管理核心版本、或需自行指定镜像/代理下载 |
-| `triproxy-<target>-full` | 可执行文件 + `cores/` 内三个已校验核心 + 各核心许可全文 | 开箱即用，首次运行无需联网 |
+| `-lite` | 图形界面 + 命令行，不含核心 | 首次运行在界面里点「下载核心」即可，或自行管理核心版本 |
+| `-full` | 同上 + `cores/` 内三个已校验核心 + 各核心许可全文 | 开箱即用，首次运行无需联网 |
 
 `full` 版的核心由 CI 调用 TriProxy 自身的下载与校验流程获取，SHA256 与上游 Release 一致，
 未经修改，并随包附带 `cores/THIRD-PARTY-NOTICES.txt`（版本、授权、对应源码地址）与
@@ -231,6 +235,9 @@ triproxy proxy off                # 还原 TriProxy 改动前的设置
 - 重复启用不会把「自己写的值」当成原始值，否则恢复等于没恢复；
 - 核心没在监听时拒绝启用——把整台机器指向一个死端口比不改更糟。
 
+**绕过列表可配**（设置 → 代理绕过列表，分号分隔）。默认列表覆盖 localhost 与内网网段；
+留空等于用默认值，而不是「什么都不绕过」——把 localhost 也代理走会毁掉本机所有开发服务器。
+
 Windows 已实测（含外部杀进程模拟崩溃后的自动恢复）；macOS 与 Linux 按同一接口实现，
 但尚未在真机验证。
 
@@ -240,12 +247,17 @@ Windows 已实测（含外部杀进程模拟崩溃后的自动恢复）；macOS 
 
 - 点关闭按钮 = 隐藏到托盘，核心继续跑，系统代理保持不动；
 - 左键点托盘图标 = 显示 / 收起窗口，右键出菜单（显示主窗口 / 启动停止核心 / 退出）；
+- 菜单第一行是只读状态：`Mihomo · 自动选择` 或 `未运行`——托盘常驻的应用，最不能接受的
+  就是「图标看起来一样，但代理是开是关看不出来」；
 - 托盘菜单「退出」才会真正结束进程，并且**先停核心、再还原系统代理**——否则用户以为已经关掉了，
   流量还在偷偷走代理；
 - 设置里关掉「关闭窗口时驻留托盘」就退回普通窗口行为。
 
 如果系统托盘不可用（例如没有 StatusNotifier 的 Linux 会话），关闭窗口按普通退出处理，
 不会出现「窗口没了但进程还在」的情况。
+
+**单实例**：再次启动不会起第二个管理器去抢同一个端口，而是把参数转交给已经在运行的实例
+并显示窗口——这也正是「浏览器里点 `triproxy://` 链接」能到达缩在托盘里的应用的方式。
 
 ## Profile 库
 
@@ -303,6 +315,12 @@ triproxy traffic                     # 读一次流量采样
 数据来自核心的 **Clash 兼容控制器 API**，Mihomo 与 sing-box 都有，**Xray 没有**——
 因此这两项在 Xray 下不可用，界面会说明原因而不是显示空面板。
 
+桌面端的连接列表每条都带**进程**和**命中规则**：前者来自核心的 `metadata.process`（Mihomo 给进程名，
+sing-box 给完整路径），后者是 `rule` + `rulePayload`。排查「这个站为什么走了直连」时，
+这两个字段比流量数字有用得多。
+
+仪表盘还画了最近 3 分钟的上下行曲线（内存里保留 90 个采样，不落盘）。
+
 ## 延迟测试（Phase 10）
 
 ```bash
@@ -329,6 +347,38 @@ triproxy profile compile sub.txt --core sing-box --rules split --check
 三个核心的实现方式完全不同：mihomo 用内置 `GEOSITE`/`GEOIP`，Xray 用自带的 `geosite.dat`/`geoip.dat`，
 sing-box 1.12 之后只能靠**远程 rule-set**（运行时下载）。细节见 ARCHITECTURE 第 15 章。
 
+### 自定义规则
+
+设置 → 自定义规则，一行一条，Clash 语法：
+
+```text
+# 公司内网域名绝不走代理
+DOMAIN-SUFFIX,corp.internal,DIRECT
+DOMAIN-KEYWORD,telemetry,PROXY
+IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+```
+
+- 支持 `DOMAIN` / `DOMAIN-SUFFIX` / `DOMAIN-KEYWORD` / `IP-CIDR`，目标写 `PROXY` 或 `DIRECT`
+- **按顺序匹配，写在前面的优先**：自定义规则排在预设之前，所以 `DOMAIN-SUFFIX,cn,PROXY`
+  能压过 split 的 `GEOSITE,cn,DIRECT`
+- 保存时校验，错误带行号；解析失败的规则不会让整个连接起不来（会被丢弃并记日志）
+
+同一个解析器喂给三个编译器，各渲染成自己的方言。细节见 ARCHITECTURE 第 23 章。
+
+## 代理组（Phase 10）
+
+编译结果里有两个组：
+
+```text
+AUTO   url-test，每 5 分钟重测，取延迟最低
+PROXY  select：[选中的节点?] AUTO 节点… DIRECT
+```
+
+**没选过节点 = 自动选择**，而不是「配置里排第一的那个」。节点页顶部那行「自动选择」就是它；
+点任意节点会排到 AUTO 前面，成为默认。
+
+Mihomo 与 sing-box 支持运行时切换（点一下立刻生效）；Xray 没有控制器 API，选择保存、下次启动生效。
+
 ## 订阅（Phase 9）
 
 ```bash
@@ -339,7 +389,21 @@ triproxy profile refresh --all       # 刷新全部
 
 - **缓存走条件请求**：`ETag` / `Last-Modified` 随订阅存盘，下次带 `If-None-Match`，服务端回 304 就跳过。
 - **刷新失败不毁数据**：只记录 `last_error`，已存的节点原样保留，退出码为 1。
-- **自动更新只在显式调用时发生**（`--interval` 记录到期时间，`refresh --all` 只刷到期的）。没有后台常驻定时器。
+- **桌面客户端里会自动刷新**：进程活着就有一个 1 分钟的 ticker，按每个订阅自己的 interval 判断到期；
+  单个订阅源失败不会停表。CLI 仍然只在你显式调用时刷新。
+
+### 深链接导入
+
+订阅以链接形式到达时（聊天记录、服务商页面），可以直接点：
+
+```text
+triproxy://install?url=https%3A%2F%2Fexample.com%2Fsub%3Ftoken%3Dabc
+```
+
+按域名命名、库为空时自动激活、结果通过应用内提示条显示。应用没在运行时由系统拉起，
+已在运行时（包括缩在托盘里）由单实例转发给运行中的进程。
+
+只注册 `triproxy://`，不抢 `clash://`——装了 Clash 系客户端的机器上抢那个 scheme 是不礼貌的。
 
 ## Clash YAML 导入
 
@@ -402,28 +466,36 @@ npm run tauri build      # 产出安装包
 npm run dev              # http://localhost:1420
 ```
 
-界面包含五个页面：
+界面包含六个页面：
 
 | 页面 | 内容 |
 |---|---|
-| 仪表盘 | 连接状态、当前配置、三个核心的状态与一键切换、Smart Engine 决策解释 |
-| 节点 | 活动配置的节点列表，按名称/地址搜索、按协议筛选 |
-| 配置 | 导入订阅、设为活动、删除 |
-| 日志 | 核心输出实时刷新，按级别筛选 |
-| 设置 | 主题、核心偏好、TUN / rule-set / 代理组、允许局域网、日志级别 |
+| 仪表盘 | 连接状态、流量曲线（最近 3 分钟）、当前配置、三个核心的状态与一键切换、Smart Engine 决策解释 |
+| 节点 | 活动配置的节点列表 + 顶部「自动选择」行，按名称/地址搜索、按协议筛选、点击即切换 |
+| 连接 | 每条连接的目标、进程、命中规则、链路、上下行，可单独关闭 |
+| 配置 | 导入订阅、设为活动、删除、刷新 |
+| 日志 | 核心输出实时刷新，按级别筛选，逐连接记录默认折叠 |
+| 设置 | 主题、核心偏好、系统代理与绕过列表、TUN / rule-set / 代理组、监听端口、自定义规则、开机自启与自动连接、配置备份 |
 
-规则与连接两个页面依赖 Phase 10 的后端能力，暂不提供——留空页面比放一个假页面更糟。
+设置里几处值得单独说：
+
+- **监听端口**：默认 7890。被别的程序占用时改这里，改完需要重启核心生效。
+- **开机自启**：登录时启动 TriProxy。Windows 上会弹一次 UAC（应用清单要求管理员权限），
+  彻底的解法是改用计划任务，尚未做。
+- **启动后自动连接**：有活动配置时，打开应用就启动核心。
+- **配置备份**：导出一个 JSON（设置 + 全部配置 + 当前活动项），导入时**合并**而不是覆盖。
 
 ## 目录结构
 
 ```text
 TriProxy/
 ├── crates/
-│   ├── triproxy-core/          # UI 无关的核心层（未来被 Tauri 后端复用）
+│   ├── triproxy-core/          # UI 无关的核心层（Tauri 后端与 CLI 共用）
 │   │   └── src/
 │   │       ├── core/           # CoreKind / ProxyCore trait / CoreManager
 │   │       ├── profile/        # Unified Profile：节点模型、URI 解析、校验
 │   │       ├── compiler/       # 配置编译器：Profile → 三个核心的原生配置
+│   │       │   └── rules.rs    # 自定义规则的唯一解析器（三方言共用）
 │   │       ├── adapters/       # mihomo / singbox / xray 三个方言
 │   │       ├── binaries/       # 定位、下载、校验、解包
 │   │       ├── process.rs      # 进程监督器（启动/就绪探测/停止/日志捕获）
@@ -433,21 +505,42 @@ TriProxy/
 │   │       ├── paths.rs        # 数据目录布局
 │   │       └── state.rs        # 核心状态机
 │   └── triproxy-cli/           # triproxy 命令行
+├── src/                        # React 前端（仪表盘 / 节点 / 连接 / 配置 / 日志 / 设置）
+├── src-tauri/                  # 桌面外壳
+│   └── src/
+│       ├── commands.rs         # 前端可调用的命令（业务逻辑仍在 core）
+│       ├── tray.rs             # 托盘图标、菜单、退出路径
+│       ├── deep_link.rs        # triproxy:// 链接
+│       ├── backup.rs           # 配置备份与恢复
+│       └── lib.rs              # 组装：插件、调度器、退出清理
 └── docs/
     ├── PROJECT_PLAN.md
     └── ARCHITECTURE.md
 ```
 
-`triproxy-core` 不依赖任何 UI 技术，Tauri 后端（Phase 5）只需把它作为依赖引入即可，无需重写业务逻辑。
+`triproxy-core` 不依赖任何 UI 技术，Tauri 后端与 CLI 只是它的两个壳。
 
 ---
 
 ## 测试
 
 ```bash
-cargo test              # 46 个单元测试
-cargo clippy --all-targets
+cargo test --workspace   # 244 个单元测试（core + CLI）
+cargo clippy --workspace --all-targets -- -D warnings
+cd src-tauri && cargo test   # 桌面外壳的纯逻辑测试（备份、深链接）
 ```
+
+编译器的测试只断言生成的文本/JSON 结构；**真实配置的正确性靠核心自己校验**——
+`mihomo -t` / `sing-box check` / `xray -test` 在每次启动前都会跑一遍。开发时如果要手动验证：
+
+```bash
+triproxy core install mihomo          # 需要 GITHUB_TOKEN，否则 API 限流
+triproxy start mihomo --profile ./sub.txt > /tmp/start.log 2>&1
+curl -s http://127.0.0.1:9090/proxies  # 看运行时分组
+triproxy stop
+```
+
+注意 `start` 的输出**不要接管道**：核心进程会继承 stdout 并一直持有它，`tail` 等不到 EOF。
 
 ---
 
