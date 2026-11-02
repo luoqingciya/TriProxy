@@ -136,7 +136,18 @@ struct Inner {
     started_at: Option<Instant>,
     listen_port: Option<u16>,
     last_error: Option<String>,
+    /// Last TCP probe result and when it was taken.
+    probe: Option<(Instant, Option<u64>)>,
 }
+
+/// How long a TCP probe result is reused before probing again.
+///
+/// The UI polls status every two seconds, and each probe is a real TCP
+/// connection to the local inbound — which the core dutifully logs at INFO, one
+/// line per poll. Process liveness is still checked on every call, so crash
+/// detection stays immediate; only the "is the port accepting" answer is cached,
+/// and it rarely changes.
+const PROBE_TTL: Duration = Duration::from_secs(10);
 
 /// Owns the OS process for exactly one core.
 ///
@@ -173,6 +184,7 @@ impl Supervisor {
                 started_at: None,
                 listen_port: None,
                 last_error: None,
+                probe: None,
             }),
             version: OnceCell::new(),
         }
@@ -225,6 +237,7 @@ impl Supervisor {
         guard.pid = Some(pid);
         guard.child = None;
         guard.listen_port = Some(port);
+        guard.probe = None;
         guard.config = config;
         guard.started_at = None;
         guard.last_error = None;
@@ -402,6 +415,7 @@ impl Supervisor {
         guard.state = CoreState::Stopped;
         guard.started_at = None;
         guard.listen_port = None;
+        guard.probe = None;
         self.logs
             .push(self.kind.as_str(), LogStream::App, "stopped");
         Ok(())
@@ -511,7 +525,23 @@ impl Supervisor {
         };
 
         let latency = match (state.is_running(), port) {
-            (true, Some(port)) => probe_tcp(port).await,
+            (true, Some(port)) => {
+                let cached = self
+                    .inner
+                    .lock()
+                    .await
+                    .probe
+                    .filter(|(at, _)| at.elapsed() < PROBE_TTL)
+                    .map(|(_, value)| value);
+                match cached {
+                    Some(value) => value,
+                    None => {
+                        let value = probe_tcp(port).await;
+                        self.inner.lock().await.probe = Some((Instant::now(), value));
+                        value
+                    }
+                }
+            }
             _ => None,
         };
 
@@ -569,12 +599,16 @@ fn spawn_line_reader<R>(
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    logs.push(kind.as_str(), stream, line.clone());
+                    // Colour codes are forced by the cores even on a pipe; they
+                    // would otherwise show up as `[36m` noise in the panel and
+                    // break level detection.
+                    let line = crate::logging::strip_ansi(&line);
+                    let level = crate::logging::infer_level(stream, &line);
                     if let Some(file) = file.as_mut() {
-                        let level = crate::logging::infer_level(stream, &line).as_char();
-                        let _ = writeln!(file, "{}\t{level}\t{line}", now_ms());
+                        let _ = writeln!(file, "{}\t{}\t{}", now_ms(), level.as_char(), line);
                         let _ = file.flush();
                     }
+                    logs.push(kind.as_str(), stream, line);
                 }
                 Ok(None) => break,
                 Err(_) => break,

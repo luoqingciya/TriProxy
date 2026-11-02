@@ -30,10 +30,23 @@ const LEVEL_STYLE: Record<LogEntry['level'], string> = {
   debug: 'text-faint',
 }
 
+/**
+ * Per-connection chatter.
+ *
+ * sing-box logs one INFO line for every accepted inbound connection and xray
+ * does the same for `accepted tcp:`/`accepted udp:`. With the local health probe
+ * and any app behind the system proxy, that is a line every couple of seconds —
+ * it drowns out everything the user actually wants to read. The live connection
+ * list on the Connections page already covers this data, so these lines are
+ * hidden by default and can be revealed with one click.
+ */
+const CHATTER = /inbound connection from|accepted (?:tcp|udp):/i
+
 export function Logs() {
   const [entries, setEntries] = useState<LogEntry[]>([])
   const [level, setLevel] = useState<LevelFilter>('all')
   const [follow, setFollow] = useState(true)
+  const [showChatter, setShowChatter] = useState(false)
   const bottom = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -54,7 +67,11 @@ export function Logs() {
     }
   }, [])
 
-  const visible = entries.filter((entry) => level === 'all' || entry.level === level)
+  const matched = entries.filter((entry) => level === 'all' || entry.level === level)
+  const chatterCount = matched.filter((entry) => CHATTER.test(entry.text)).length
+  const visible = showChatter
+    ? matched
+    : matched.filter((entry) => !CHATTER.test(entry.text))
 
   useEffect(() => {
     if (follow) {
@@ -82,6 +99,9 @@ export function Logs() {
                 </button>
               ))}
             </div>
+            <Button onClick={() => setShowChatter((value) => !value)}>
+              {showChatter ? '连接日志：显示中' : `连接日志：已隐藏 ${chatterCount} 条`}
+            </Button>
             <Button onClick={() => setFollow((value) => !value)}>
               {follow ? '自动滚动：开' : '自动滚动：关'}
             </Button>
@@ -91,7 +111,11 @@ export function Logs() {
 
       <Card className="min-h-0 flex-1 overflow-auto p-0">
         {visible.length === 0 ? (
-          <Empty>暂无日志 — 启动核心后这里会实时刷新</Empty>
+          <Empty>
+            {chatterCount > 0
+              ? `只有 ${chatterCount} 条连接日志，已折叠 — 点右上角可展开`
+              : '暂无日志 — 启动核心后这里会实时刷新'}
+          </Empty>
         ) : (
           <div className="p-4 font-mono text-[12px] leading-relaxed">
             {visible.map((entry) => (
