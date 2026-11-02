@@ -58,13 +58,13 @@ pub mod subscription_service;
 pub use binaries::{InstallOptions, InstalledBinary, UpdateCheck, UpdateStatus};
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
-    compile, compile_all, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
-    RuleMode, SkippedNode,
+    compile, compile_all, parse_rules, CompileError, CompileOptions, CompiledConfig,
+    ConfigCompiler, CustomRule, DnsMode, RuleError, RuleKind, RuleMode, RuleTarget, SkippedNode,
 };
 pub use controller::{ConnectionInfo, ConnectionsSnapshot, ControllerClient, TrafficSample};
 pub use core::{
     CoreKind, CoreManager, CoreReport, ManagerStatus, ProxyCore, RecoveryReport, StartReport,
-    SwitchReport, SwitchStep,
+    SwitchReport, SwitchStep, DEFAULT_API_PORT,
 };
 pub use error::{Error, Result};
 pub use health::CoreHealth;

@@ -265,7 +265,21 @@ pub async fn settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
 
 #[tauri::command]
 pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> CmdResult<()> {
+    // Validate before writing: the compiler silently drops unparsable rules so
+    // that one typo cannot take the connection down, which means a bad line would
+    // otherwise disappear with nothing but a log entry to show for it.
+    if let Some(text) = settings.custom_rules.as_deref() {
+        triproxy_core::parse_rules(text).map_err(|error| format!("自定义规则 {error}"))?;
+    }
     settings.save(state.manager.layout()).map_err(err)
+}
+
+/// Check rule text without saving it, so the editor can complain in place.
+#[tauri::command]
+pub async fn validate_rules(text: String) -> CmdResult<()> {
+    triproxy_core::parse_rules(&text)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// What the selector currently thinks about the active profile.

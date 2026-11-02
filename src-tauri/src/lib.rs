@@ -139,6 +139,7 @@ pub fn run() {
             commands::refresh_profile,
             commands::settings,
             commands::save_settings,
+            commands::validate_rules,
             commands::preview_selection,
             commands::start_core,
             commands::stop_core,

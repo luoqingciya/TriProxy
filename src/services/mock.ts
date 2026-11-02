@@ -87,6 +87,7 @@ let settings: Settings = {
   close_to_tray: true,
   auto_connect: false,
   proxy_bypass: null,
+  custom_rules: null,
 }
 
 const nodes: NodeSummary[] = [
@@ -209,6 +210,8 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return false as T
     case 'set_autostart':
       return Boolean(args?.enabled) as T
+    case 'validate_rules':
+      return undefined as T
     case 'delete_profile':
       library = {
         active: library.active === args?.id ? null : library.active,

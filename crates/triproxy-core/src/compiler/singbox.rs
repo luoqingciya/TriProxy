@@ -20,8 +20,9 @@ use crate::profile::node::{Credentials, Node, Transport, VlessFlow};
 use crate::profile::Profile;
 
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, RuleMode, SkippedNode,
-    AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL, PROXY_GROUP,
+    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleKind,
+    RuleMode, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL,
+    PROXY_GROUP,
 };
 
 pub struct SingBoxCompiler;
@@ -130,6 +131,11 @@ impl ConfigCompiler for SingBoxCompiler {
         if dns_mode != DnsMode::Off {
             rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
         }
+        // Custom rules first: they are the user's explicit intent and must be
+        // able to override the presets below.
+        for rule in &options.custom_rules {
+            rules.push(custom_rule(rule));
+        }
         if options.rules == RuleMode::Split {
             // sing-box 1.12 dropped the built-in geoip/geosite databases, so the
             // split lists come from remote rule-sets instead. They are fetched
@@ -195,6 +201,29 @@ impl ConfigCompiler for SingBoxCompiler {
 ///
 /// The proxy-dns server carries `detour: PROXY`, so lookups for tunnelled
 /// domains are resolved inside the tunnel rather than beside it.
+/// One custom rule as a sing-box route rule.
+///
+/// sing-box keys the match field by type (`domain_suffix`, `ip_cidr`, ...) rather
+/// than taking a `TYPE,value` string, so the neutral model is expanded here.
+fn custom_rule(rule: &CustomRule) -> Value {
+    let outbound = match rule.target {
+        RuleTarget::Proxy => PROXY_GROUP,
+        RuleTarget::Direct => "direct",
+    };
+    let (key, values) = match rule.kind {
+        RuleKind::Domain => ("domain", json!([rule.value])),
+        RuleKind::DomainSuffix => ("domain_suffix", json!([rule.value])),
+        RuleKind::DomainKeyword => ("domain_keyword", json!([rule.value])),
+        RuleKind::IpCidr => ("ip_cidr", json!([rule.value])),
+    };
+
+    let mut object = serde_json::Map::new();
+    object.insert(key.to_string(), values);
+    object.insert("action".to_string(), json!("route"));
+    object.insert("outbound".to_string(), json!(outbound));
+    Value::Object(object)
+}
+
 /// Remote rule-sets for the split mode.
 fn split_rule_sets() -> Value {
     json!([

@@ -13,10 +13,11 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
 import { Button, Card, SectionTitle, SettingRow, Toggle } from '../components/ui'
+import { api } from '../services/api'
 import {
   checkForUpdate,
   installUpdate,
@@ -40,6 +41,25 @@ export function Settings() {
   const autostart = useApp((state) => state.autostart)
   const setAutostart = useApp((state) => state.setAutostart)
   const update = useApp((state) => state.updateSettings)
+  // Rules are edited as text and saved on blur: validating on every keystroke
+  // would flag a half-typed line as an error the user is still writing.
+  const [rulesText, setRulesText] = useState(settings?.custom_rules ?? '')
+  const [rulesError, setRulesError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setRulesText(settings?.custom_rules ?? '')
+  }, [settings?.custom_rules])
+
+  async function commitRules() {
+    setRulesError(null)
+    try {
+      await api.validateRules(rulesText)
+    } catch (error) {
+      setRulesError(String(error))
+      return
+    }
+    await update({ custom_rules: rulesText.trim() === '' ? null : rulesText })
+  }
 
   if (!settings) {
     return (
@@ -202,6 +222,32 @@ export function Settings() {
             className="w-[240px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[12.5px] text-fg outline-none placeholder:text-faint"
           />
         </SettingRow>
+      </Card>
+
+      <Card className="mb-4">
+        <SectionTitle
+          title="自定义规则"
+          hint="按顺序匹配，写在前面的优先；命中后不再看后面的规则和预设"
+        />
+        <textarea
+          value={rulesText}
+          onChange={(event) => setRulesText(event.target.value)}
+          onBlur={() => void commitRules()}
+          spellCheck={false}
+          rows={6}
+          placeholder={
+            '# 一行一条，Clash 语法\nDOMAIN-SUFFIX,corp.internal,DIRECT\nDOMAIN-KEYWORD,telemetry,PROXY\nIP-CIDR,10.0.0.0/8,DIRECT'
+          }
+          className="w-full resize-y rounded-lg border border-line bg-panel-2 px-3 py-2 font-mono text-[12.5px] leading-relaxed text-fg outline-none placeholder:text-faint"
+        />
+        {rulesError ? (
+          <p className="mt-2 text-[12px] text-danger">{rulesError}</p>
+        ) : (
+          <p className="mt-2 text-[11.5px] text-faint">
+            支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR，目标写 PROXY 或 DIRECT。
+            改完点空白处保存，改动在下次启动核心时生效。
+          </p>
+        )}
       </Card>
 
       <Card>

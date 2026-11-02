@@ -107,6 +107,9 @@ export const api = {
 
   saveSettings: (settings: Settings) => call<void>('save_settings', { settings }),
 
+  /** Parse rule text without saving it; rejects with the offending line. */
+  validateRules: (text: string) => call<void>('validate_rules', { text }),
+
   previewSelection: () => call<Selection | null>('preview_selection'),
 
   systemProxyStatus: () => call<AppliedProxy | null>('system_proxy_status'),

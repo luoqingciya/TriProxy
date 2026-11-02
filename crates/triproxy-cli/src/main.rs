@@ -26,7 +26,7 @@ use triproxy_core::{
     AppSettings, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport, Diagnostic,
     DnsMode, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile,
     ProfileStore, RefreshStatus, RuleMode, Selector, StoredProfile, SubscriptionService,
-    SwitchReport, SystemProxyManager, DEFAULT_PROBE_URL,
+    SwitchReport, SystemProxyManager, DEFAULT_API_PORT, DEFAULT_PROBE_URL,
 };
 use triproxy_core::{select_node, ApplyOutcome, ControllerClient};
 
@@ -634,20 +634,22 @@ async fn cmd_start(
         Some(name) => parse_core_choice(name)?,
         None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
-    let options = CompileOptions {
-        tun,
-        dns: parse_dns_mode(dns.as_deref())?,
-        rules: parse_rule_mode(rules.as_deref())?,
-        // Only when running from the stored active profile: an explicit
-        // --profile path is a different profile and its selection is unknown.
-        selected_node: if profile.is_none() {
-            selected_node_of(manager)
-        } else {
-            None
-        },
-        listen_port: AppSettings::load(manager.layout()).listen_port,
-        ..Default::default()
+    // Start from the saved settings so the port, custom rules and any other
+    // compile-time knob mean the same thing here as they do in the GUI; the
+    // flags below only override what this command was told to change.
+    let saved = AppSettings::load(manager.layout());
+    let mut options = saved.compile_options(saved.listen_port, DEFAULT_API_PORT);
+    options.tun = tun;
+    options.dns = parse_dns_mode(dns.as_deref())?;
+    options.rules = parse_rule_mode(rules.as_deref())?;
+    // Only when running from the stored active profile: an explicit --profile
+    // path is a different profile and its selection is unknown.
+    options.selected_node = if profile.is_none() {
+        selected_node_of(manager)
+    } else {
+        None
     };
+    let options = options;
     let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
 
     let report = match compiled {
@@ -730,20 +732,22 @@ async fn cmd_switch(
     }
 
     let choice = parse_core_choice(core)?;
-    let options = CompileOptions {
-        tun,
-        dns: parse_dns_mode(dns.as_deref())?,
-        rules: parse_rule_mode(rules.as_deref())?,
-        // Only when running from the stored active profile: an explicit
-        // --profile path is a different profile and its selection is unknown.
-        selected_node: if profile.is_none() {
-            selected_node_of(manager)
-        } else {
-            None
-        },
-        listen_port: AppSettings::load(manager.layout()).listen_port,
-        ..Default::default()
+    // Start from the saved settings so the port, custom rules and any other
+    // compile-time knob mean the same thing here as they do in the GUI; the
+    // flags below only override what this command was told to change.
+    let saved = AppSettings::load(manager.layout());
+    let mut options = saved.compile_options(saved.listen_port, DEFAULT_API_PORT);
+    options.tun = tun;
+    options.dns = parse_dns_mode(dns.as_deref())?;
+    options.rules = parse_rule_mode(rules.as_deref())?;
+    // Only when running from the stored active profile: an explicit --profile
+    // path is a different profile and its selection is unknown.
+    options.selected_node = if profile.is_none() {
+        selected_node_of(manager)
+    } else {
+        None
     };
+    let options = options;
     let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
 
     let report = match compiled {

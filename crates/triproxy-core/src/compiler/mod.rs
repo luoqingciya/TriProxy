@@ -33,9 +33,12 @@
 //!   `xray -test`) before it is ever used — see `CoreManager::start_with_config`.
 
 pub mod mihomo;
+pub mod rules;
 pub mod singbox;
 pub mod xray;
 pub mod yaml;
+
+pub use rules::{parse_rules, CustomRule, RuleError, RuleKind, RuleTarget};
 
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +91,9 @@ pub struct CompileOptions {
     /// every compiler from repeating the lookup.
     #[serde(skip)]
     pub selected_name: Option<String>,
+    /// User-written rules, applied before the presets so they can override them.
+    #[serde(default)]
+    pub custom_rules: Vec<CustomRule>,
 }
 
 /// Routing strategy.
@@ -157,6 +163,7 @@ impl Default for CompileOptions {
             rules: RuleMode::Global,
             selected_node: None,
             selected_name: None,
+            custom_rules: Vec::new(),
         }
     }
 }
@@ -471,6 +478,67 @@ mod tests {
             "the pick must precede AUTO inside {PROXY_GROUP}:\n{}",
             mihomo.text
         );
+    }
+
+    /// A user rule has to beat the preset it contradicts, in all three dialects.
+    #[test]
+    fn custom_rules_are_emitted_before_the_presets() {
+        let node = node(Protocol::Trojan, "a.example.com");
+        let profile = Profile::new("p", vec![node]);
+        let options = CompileOptions {
+            rules: RuleMode::Split,
+            custom_rules: vec![CustomRule {
+                kind: RuleKind::DomainSuffix,
+                value: "corp.internal".to_string(),
+                target: RuleTarget::Direct,
+            }],
+            ..Default::default()
+        };
+
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        let custom_at = mihomo
+            .text
+            .find("DOMAIN-SUFFIX,corp.internal,DIRECT")
+            .unwrap();
+        let preset_at = mihomo.text.find("GEOSITE,cn,DIRECT").unwrap();
+        assert!(
+            custom_at < preset_at,
+            "custom rule must come first:\n{}",
+            mihomo.text
+        );
+
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&singbox.text).unwrap();
+        let first = &document["route"]["rules"][0];
+        assert_eq!(first["domain_suffix"][0], "corp.internal");
+        assert_eq!(first["outbound"], "direct");
+
+        let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&xray.text).unwrap();
+        let first = &document["routing"]["rules"][0];
+        assert_eq!(first["domain"][0], "domain:corp.internal");
+        assert_eq!(first["outboundTag"], "direct");
+    }
+
+    /// In global mode everything goes to the proxy, so a custom rule is the only
+    /// thing that can send a request elsewhere — the routing section has to
+    /// exist even though the preset contributes nothing.
+    #[test]
+    fn xray_emits_routing_for_custom_rules_in_global_mode() {
+        let node = node(Protocol::Trojan, "a.example.com");
+        let profile = Profile::new("p", vec![node]);
+        let options = CompileOptions {
+            custom_rules: vec![CustomRule {
+                kind: RuleKind::IpCidr,
+                value: "10.0.0.0/8".to_string(),
+                target: RuleTarget::Direct,
+            }],
+            ..Default::default()
+        };
+
+        let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&xray.text).unwrap();
+        assert_eq!(document["routing"]["rules"][0]["ip"][0], "10.0.0.0/8");
     }
 
     #[test]
