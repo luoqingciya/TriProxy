@@ -461,4 +461,48 @@ mod tests {
         let capability = CoreCapability::for_core(CoreKind::Xray);
         assert_eq!(requirement.unmet_by(&capability), vec!["TUN".to_string()]);
     }
+
+    #[test]
+    fn hysteria2_compiles_for_two_cores_and_is_refused_by_the_third() {
+        let hy2 = Node {
+            id: String::new(),
+            name: "hy2".to_string(),
+            protocol: Protocol::Hysteria2,
+            server: "hy.example.com".to_string(),
+            port: 443,
+            credentials: Credentials::Hysteria2 {
+                password: "secret".to_string(),
+                obfs: Some("salamander".to_string()),
+                obfs_password: Some("obfspw".to_string()),
+            },
+            transport: Transport::Tcp,
+            tls: Some(crate::profile::TlsConfig {
+                server_name: Some("www.bing.com".to_string()),
+                ..Default::default()
+            }),
+            udp: true,
+            plugin: None,
+        };
+        let mut hy2 = hy2;
+        hy2.refresh_id();
+        let profile = Profile::new("p", vec![hy2]);
+
+        let options = CompileOptions::default();
+
+        // Mihomo spells the obfuscation fields with hyphens.
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        assert!(mihomo.text.contains("hysteria2"), "{}", mihomo.text);
+        assert!(mihomo.text.contains("obfs-password"), "{}", mihomo.text);
+
+        // sing-box nests obfuscation in an object.
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        assert!(singbox.text.contains("\"hysteria2\""), "{}", singbox.text);
+        assert!(singbox.text.contains("\"obfs\""), "{}", singbox.text);
+
+        // Xray cannot run it at all; the gate must say so by name rather than
+        // producing a config that silently drops the node.
+        let error = compile(CoreKind::Xray, &profile, &options).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains("hysteria2"), "{message}");
+    }
 }

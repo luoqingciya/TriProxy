@@ -66,6 +66,7 @@ pub fn parse_uri(line: &str) -> Result<Node, ParseIssue> {
         "vmess" => parse_vmess(rest),
         "vless" => parse_vless(rest),
         "trojan" => parse_trojan(rest),
+        "hysteria2" | "hy2" => parse_hysteria2(rest),
         other => Err(ParseIssue::new(
             "unsupported_scheme",
             format!("unsupported scheme `{other}://`"),
@@ -585,6 +586,76 @@ fn parse_vless(rest: &str) -> Result<Node, ParseIssue> {
     ))
 }
 
+/// Hysteria2 share link.
+///
+/// Always TLS — the protocol has no plaintext mode, so a link without
+/// `security` is still TLS. `insecure=1` maps to skip-cert-verify, and the
+/// obfuscation pair only makes sense together.
+fn parse_hysteria2(rest: &str) -> Result<Node, ParseIssue> {
+    let uri = parse_standard(rest)?;
+
+    let password = uri.userinfo;
+    if password.is_empty() {
+        return Err(ParseIssue::new(
+            "hysteria2.empty_password",
+            "hysteria2 link has no password",
+        ));
+    }
+
+    let obfs = query_non_empty(&uri.query, "obfs").map(str::to_string);
+    let obfs_password = query_non_empty(&uri.query, "obfs-password").map(str::to_string);
+
+    if obfs.is_some() && obfs_password.is_none() {
+        return Err(ParseIssue::new(
+            "hysteria2.obfs_without_password",
+            "hysteria2 link sets obfs but no obfs-password",
+        ));
+    }
+
+    // Hysteria2 has no plaintext mode, so TLS is built here rather than derived
+    // from a `security` parameter that the link format does not define.
+    let allow_insecure = query_non_empty(&uri.query, "insecure")
+        .map(|value| matches!(value, "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let tls = Some(TlsConfig {
+        server_name: Some(
+            query_non_empty(&uri.query, "sni")
+                .or_else(|| query_non_empty(&uri.query, "peer"))
+                .unwrap_or(&uri.server)
+                .to_string(),
+        ),
+        allow_insecure,
+        alpn: query_non_empty(&uri.query, "alpn")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(|item| item.trim().to_string())
+                    .filter(|item| !item.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        fingerprint: None,
+        reality: None,
+    });
+
+    Ok(finish(
+        Protocol::Hysteria2,
+        Credentials::Hysteria2 {
+            password,
+            obfs,
+            obfs_password,
+        },
+        NodeParts {
+            name: uri.fragment,
+            server: uri.server,
+            port: uri.port,
+            transport: Transport::Tcp,
+            tls,
+            plugin: None,
+        },
+    ))
+}
+
 fn parse_trojan(rest: &str) -> Result<Node, ParseIssue> {
     let uri = parse_standard(rest)?;
     let transport = build_transport(&uri.query)?;
@@ -760,10 +831,47 @@ mod tests {
     }
 
     #[test]
+    fn hysteria2_keeps_obfuscation_and_forces_tls() {
+        let uri = "hysteria2://secret@hy.example.com:443\
+                   ?sni=www.bing.com&insecure=1&obfs=salamander&obfs-password=obfspw#Hy2";
+        let node = parse_uri(uri).unwrap();
+
+        assert_eq!(node.protocol, Protocol::Hysteria2);
+        assert_eq!(node.name, "Hy2");
+        match &node.credentials {
+            Credentials::Hysteria2 {
+                password,
+                obfs,
+                obfs_password,
+            } => {
+                assert_eq!(password, "secret");
+                assert_eq!(obfs.as_deref(), Some("salamander"));
+                assert_eq!(obfs_password.as_deref(), Some("obfspw"));
+            }
+            other => panic!("expected hysteria2, got {other:?}"),
+        }
+
+        // No `security` parameter exists in this link format; TLS is implied.
+        let tls = node.tls.expect("hysteria2 is always TLS");
+        assert_eq!(tls.server_name.as_deref(), Some("www.bing.com"));
+        assert!(tls.allow_insecure);
+    }
+
+    #[test]
+    fn hysteria2_without_obfs_password_is_rejected() {
+        // The server would reject the connection anyway; failing at import says
+        // why, instead of surfacing as a mysterious handshake failure.
+        let error = parse_uri("hysteria2://pw@hy.example.com:443?obfs=salamander#x").unwrap_err();
+        assert_eq!(error.code, "hysteria2.obfs_without_password");
+    }
+
+    #[test]
     fn unsupported_scheme_is_reported_not_panicked() {
-        let error = parse_uri("hysteria2://pw@example.com:443#x").unwrap_err();
+        // hysteria2 used to live here as the example of an unknown scheme; it is
+        // supported now, so the test needs a scheme that still is not.
+        let error = parse_uri("ssr://cHc@example.com:443#x").unwrap_err();
         assert_eq!(error.code, "unsupported_scheme");
-        assert!(error.message.contains("hysteria2"));
+        assert!(error.message.contains("ssr"));
     }
 
     #[test]

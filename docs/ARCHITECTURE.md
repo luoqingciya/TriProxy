@@ -966,11 +966,67 @@ sing-box  ok
 xray      ok
 ```
 
-## 21. 尚未实现（明确的边界）
+## 21. Hysteria2
+
+### 21.1 第一个「只有两个核心能用」的协议
+
+之前所有节点三个核心都能跑，能力门禁（硬约束淘汰）从未真正触发过。
+Hysteria2 基于 QUIC，**Xray 完全不支持**——门禁第一次有了实际意义：
+
+```text
+$ triproxy start auto
+using active profile `hy2` (1 nodes)
+smart: selected `sing-box` — sing-box is the default general-purpose core;
+  no candidate needed a specialisation; eliminated: xray (protocol hysteria2)
+```
+
+强制指定 xray 时直接拒绝，而不是生成一份悄悄丢掉节点的配置：
+
+```text
+$ triproxy profile compile hy2.txt --core xray --check
+error: `xray` cannot serve this profile: protocol hysteria2
+```
+
+### 21.2 TLS 不是选项
+
+Hysteria2 没有明文模式。链接格式里也没有 `security` 参数，所以 TLS 是**构造出来的**，
+不是从参数推导的；Clash 配置里省略 `tls` 键同样按 TLS 处理。
+
+### 21.3 混淆参数成对出现
+
+`obfs` 和 `obfs-password` 缺一不可。只给 obfs 的链接在导入阶段就拒绝——
+服务端本来也会拒绝，但让它在握手阶段失败，用户只会看到「连不上」。
+
+目前只定义 `salamander` 一种；其他值在校验阶段给警告。
+
+### 21.4 两个核心的字段名不一样
+
+Mihomo 用连字符，sing-box 嵌套成对象：
+
+```yaml
+# mihomo
+type: hysteria2
+password: secret
+obfs: salamander
+obfs-password: obfspw
+tls: true
+sni: www.bing.com
+```
+
+```json
+// sing-box
+{ "type": "hysteria2", "password": "secret",
+  "obfs": { "type": "salamander", "password": "obfspw" },
+  "tls": { "enabled": true, "server_name": "www.bing.com" } }
+```
+
+两种都被各自的核心校验通过（`mihomo -t` / `sing-box check`）。
+
+## 22. 尚未实现（明确的边界）
 
 这一节按「缺了会影响什么」排序，而不是按规划书章节。**状态会过时，改动功能时请同步更新。**
 
-### 21.1 影响日常使用
+### 22.1 影响日常使用
 
 **切换节点没有界面。** 生成的配置里 `PROXY` 组是 `type: select`，成员是全部节点，
 Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY`），**能力本来就有**——
@@ -982,24 +1038,24 @@ Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY
 
 **订阅没有后台定时刷新。** 自动刷新只在显式执行 `triproxy profile refresh` 时发生。
 
-### 21.2 影响完整性
+### 22.2 影响完整性
 
 | 缺口 | 说明 |
 |---|---|
-| 协议 | 只有 VLESS / VMess / Trojan / Shadowsocks。Hysteria2、TUIC、SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
+| 协议 | VLESS / VMess / Trojan / Shadowsocks / Hysteria2。TUIC、SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
 | 订阅格式 | 支持 URI 列表、base64 与 Clash YAML 的 proxies 段；**不导入 proxy-groups 与 rules** |
 | 流量历史 | 只有瞬时采样，没有曲线图；数据不落盘 |
 | 节点管理 | 没有收藏、分组、手动排序 |
 | 应用更新 | 核心与应用都能更新，但应用更新只在包含该功能的版本之后生效 |
 | 多语言 | 界面只有中文 |
 
-### 21.3 只在部分平台成立
+### 22.3 只在部分平台成立
 
 - **系统代理**：Windows 实测过；macOS（`networksetup`）与 Linux（`gsettings`）代码写好但未真机验证
 - **连接 / 流量 / 真实延迟**：依赖控制器 API，Xray 没有，界面上会说明
 - **macOS / Linux 安装包**：v0.2.2 起提供，构建与产物内容经 CI 校验，但没有在真机上装过
 
-### 21.4 明确不做
+### 22.4 明确不做
 
 - **规则分流做成 Clash 那样的规则编辑器**：与「智能选核」的定位冲突，且维护成本远超收益
 - **内置节点分享 / 订阅分发**：与软件定位无关

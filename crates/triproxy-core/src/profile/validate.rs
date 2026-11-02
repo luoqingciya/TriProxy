@@ -183,6 +183,38 @@ pub fn validate_node(node: &Node, index: usize) -> Vec<Diagnostic> {
                 ));
             }
         }
+        Credentials::Hysteria2 {
+            password,
+            obfs,
+            obfs_password,
+        } => {
+            if password.is_empty() {
+                out.push(Diagnostic::for_node(
+                    Severity::Error,
+                    index,
+                    node,
+                    "hysteria2.empty_password",
+                    "hysteria2 password is empty",
+                ));
+            }
+            match (obfs, obfs_password) {
+                (Some(name), None) => out.push(Diagnostic::for_node(
+                    Severity::Warning,
+                    index,
+                    node,
+                    "hysteria2.obfs_without_password",
+                    format!("obfuscation {name} has no password; the server will reject it"),
+                )),
+                (Some(name), Some(_)) if name != "salamander" => out.push(Diagnostic::for_node(
+                    Severity::Warning,
+                    index,
+                    node,
+                    "hysteria2.unknown_obfs",
+                    format!("unrecognised obfuscation {name}; only salamander is defined"),
+                )),
+                _ => {}
+            }
+        }
     }
 
     if let Credentials::Vless { flow, .. } = &node.credentials {

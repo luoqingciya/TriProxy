@@ -280,6 +280,22 @@ fn outbound(node: &Node) -> Result<Value, String> {
             map.insert("type".to_string(), json!("trojan"));
             map.insert("password".to_string(), json!(password));
         }
+        Credentials::Hysteria2 {
+            password,
+            obfs,
+            obfs_password,
+        } => {
+            map.insert("type".to_string(), json!("hysteria2"));
+            map.insert("password".to_string(), json!(password));
+            if let Some(obfs) = obfs {
+                let mut obfs_object = Map::new();
+                obfs_object.insert("type".to_string(), json!(obfs));
+                if let Some(secret) = obfs_password {
+                    obfs_object.insert("password".to_string(), json!(secret));
+                }
+                map.insert("obfs".to_string(), Value::Object(obfs_object));
+            }
+        }
     }
 
     if node.tls.is_some() {

@@ -223,7 +223,8 @@ proxies:
 
     #[test]
     fn one_bad_line_does_not_lose_the_others() {
-        let payload = format!("{TROJAN}\nhysteria2://x@y:1#C\n{VLESS}");
+        // hysteria2 used to be the deliberately-broken line; it is supported now.
+        let payload = format!("{TROJAN}\nssr://x@y:1#C\n{VLESS}");
         let parsed = parse_payload(&payload, "sub", "stdin");
 
         assert_eq!(parsed.node_count(), 2);
@@ -234,7 +235,7 @@ proxies:
             .find(|d| d.code.starts_with("line."))
             .expect("a per-line diagnostic");
         assert!(error.message.contains("line 2"), "{}", error.message);
-        assert!(error.message.contains("hysteria2"));
+        assert!(error.message.contains("ssr"));
     }
 
     #[test]

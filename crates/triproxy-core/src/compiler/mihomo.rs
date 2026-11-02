@@ -211,6 +211,21 @@ fn proxy_entry(node: &Node) -> Result<Yaml, String> {
             // Mihomo spells the trojan SNI field `sni`.
             apply_tls(entry, node, "sni")
         }
+        Credentials::Hysteria2 {
+            password,
+            obfs,
+            obfs_password,
+        } => {
+            let mut entry = entry.with("password", Yaml::str(password.clone()));
+            if let Some(obfs) = obfs {
+                entry = entry.with("obfs", Yaml::str(obfs.clone()));
+                if let Some(secret) = obfs_password {
+                    entry = entry.with("obfs-password", Yaml::str(secret.clone()));
+                }
+            }
+            // Hysteria2 is always TLS; there is no plaintext mode to opt out of.
+            apply_tls(entry, node, "sni")
+        }
     };
 
     Ok(apply_transport(entry, node))
@@ -222,6 +237,7 @@ fn protocol_type(node: &Node) -> &'static str {
         Credentials::Vmess { .. } => "vmess",
         Credentials::Vless { .. } => "vless",
         Credentials::Trojan { .. } => "trojan",
+        Credentials::Hysteria2 { .. } => "hysteria2",
     }
 }
 
