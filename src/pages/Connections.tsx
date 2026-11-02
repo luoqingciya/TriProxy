@@ -32,6 +32,20 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unit]}`
 }
 
+/**
+ * Bare executable name for a connection.
+ *
+ * Mihomo fills `process` (a name), sing-box fills `processPath` (a full path);
+ * the list wants the same thing from both.
+ */
+function processName(metadata: {
+  process: string
+  process_path: string
+}): string {
+  const raw = metadata.process || metadata.process_path || ''
+  return raw.split(/[\\/]/).pop() ?? ''
+}
+
 export function Connections() {
   const snapshot = useApp((state) => state.connections)
   const status = useApp((state) => state.status)
@@ -70,8 +84,9 @@ export function Connections() {
           <Empty>当前没有活动连接</Empty>
         ) : (
           <div>
-            <div className="grid grid-cols-[1fr_72px_1fr_84px_84px_52px] gap-4 border-b border-line px-5 py-2.5 text-[11px] font-semibold tracking-wide text-faint uppercase">
+            <div className="grid grid-cols-[1fr_110px_72px_1fr_84px_84px_52px] gap-4 border-b border-line px-5 py-2.5 text-[11px] font-semibold tracking-wide text-faint uppercase">
               <div>目标</div>
+              <div>进程</div>
               <div>网络</div>
               <div>链路</div>
               <div className="text-right">上传</div>
@@ -81,15 +96,28 @@ export function Connections() {
             {snapshot.connections.map((connection) => (
               <div
                 key={connection.id}
-                className="grid grid-cols-[1fr_72px_1fr_84px_84px_52px] items-center gap-4 border-b border-line px-5 py-2.5 text-[13px] last:border-b-0 hover:bg-panel-hover"
+                className="grid grid-cols-[1fr_110px_72px_1fr_84px_84px_52px] items-center gap-4 border-b border-line px-5 py-2.5 text-[13px] last:border-b-0 hover:bg-panel-hover"
               >
-                <div className="truncate text-fg">
-                  {connection.metadata.host || connection.metadata.destination_ip}
-                  {connection.metadata.destination_port && (
-                    <span className="text-faint">
-                      :{connection.metadata.destination_port}
-                    </span>
+                <div className="min-w-0">
+                  <div className="truncate text-fg">
+                    {connection.metadata.host || connection.metadata.destination_ip}
+                    {connection.metadata.destination_port && (
+                      <span className="text-faint">
+                        :{connection.metadata.destination_port}
+                      </span>
+                    )}
+                  </div>
+                  {/* Which rule caught this is the first thing anyone debugging
+                      "why did this site go direct" wants to see. */}
+                  {connection.rule && (
+                    <div className="truncate text-[11px] text-faint">
+                      {connection.rule}
+                      {connection.rule_payload ? ` · ${connection.rule_payload}` : ''}
+                    </div>
                   )}
+                </div>
+                <div className="truncate text-muted">
+                  {processName(connection.metadata) || '—'}
                 </div>
                 <div>
                   <Badge>{connection.metadata.network || '—'}</Badge>

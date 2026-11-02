@@ -81,6 +81,12 @@ pub struct AppSettings {
     /// unattended at login.
     #[serde(default)]
     pub auto_connect: bool,
+    /// Semicolon-separated list of destinations that bypass the system proxy.
+    ///
+    /// `None` keeps the built-in list. Users who work against a private network
+    /// need to add their own ranges, and a hard-coded list cannot know them.
+    #[serde(default)]
+    pub proxy_bypass: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -111,6 +117,7 @@ impl Default for AppSettings {
             listen_port: default_listen_port(),
             close_to_tray: default_close_to_tray(),
             auto_connect: false,
+            proxy_bypass: None,
         }
     }
 }
@@ -221,6 +228,7 @@ mod tests {
             listen_port: 1080,
             close_to_tray: false,
             auto_connect: true,
+            proxy_bypass: Some("localhost;*.internal".to_string()),
         };
         settings.save(&layout).unwrap();
 

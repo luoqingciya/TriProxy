@@ -23,12 +23,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{commands, AppState};
 
 /// Window label from `tauri.conf.json` (the implicit default).
 const MAIN_WINDOW: &str = "main";
+
+/// Id of the tray icon, used to find it again when the menu changes.
+const TRAY_ID: &str = "triproxy";
 
 /// Whether a tray icon actually exists.
 ///
@@ -48,21 +51,47 @@ pub fn is_ready() -> bool {
     TRAY_READY.load(Ordering::Relaxed)
 }
 
-pub fn install<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle-core", "启动 / 停止核心", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出 TriProxy", true, None::<&str>)?;
-    let menu = Menu::with_items(
-        app,
+/// Build the tray menu, with a read-only first line describing what is running.
+///
+/// Rebuilt rather than mutated: the status line changes on every core switch and
+/// node pick, and rebuilding three items is cheaper than tracking handles.
+fn build_menu(manager: &impl Manager<tauri::Wry>, status: &str) -> tauri::Result<Menu<tauri::Wry>> {
+    let status_item = MenuItem::with_id(manager, "status", status, false, None::<&str>)?;
+    let show = MenuItem::with_id(manager, "show", "显示主窗口", true, None::<&str>)?;
+    let toggle =
+        MenuItem::with_id(manager, "toggle-core", "启动 / 停止核心", true, None::<&str>)?;
+    let quit = MenuItem::with_id(manager, "quit", "退出 TriProxy", true, None::<&str>)?;
+
+    Menu::with_items(
+        manager,
         &[
+            &status_item,
+            &PredefinedMenuItem::separator(manager)?,
             &show,
             &toggle,
-            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::separator(manager)?,
             &quit,
         ],
-    )?;
+    )
+}
 
-    let mut builder = TrayIconBuilder::with_id("triproxy")
+/// Replace the menu with one that reports `status`.
+pub fn set_status(app: &AppHandle, status: &str) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    match build_menu(app, status) {
+        Ok(menu) => {
+            let _ = tray.set_menu(Some(menu));
+        }
+        Err(error) => tracing::warn!(%error, "could not update the tray menu"),
+    }
+}
+
+pub fn install(app: &tauri::App) -> tauri::Result<()> {
+    let menu = build_menu(app, "未运行")?;
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("TriProxy")
         .menu(&menu)
         // Left click is "show/hide the window"; the menu is right-click only.
@@ -97,7 +126,7 @@ pub fn install<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
 }
 
 /// Show and focus the main window.
-pub fn show_window<R: Runtime>(app: &AppHandle<R>) {
+pub fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
         let _ = window.show();
         let _ = window.unminimize();
@@ -108,7 +137,7 @@ pub fn show_window<R: Runtime>(app: &AppHandle<R>) {
 /// Left-click behaviour: focus the window if it is already in front, otherwise
 /// bring it back. Clicking a visible-but-behind window should raise it, not hide
 /// it, which is why focus — not visibility — decides.
-fn toggle_window<R: Runtime>(app: &AppHandle<R>) {
+fn toggle_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         return;
     };
@@ -128,18 +157,18 @@ fn toggle_window<R: Runtime>(app: &AppHandle<R>) {
 /// profile compilation, the TUN privilege check and the system-proxy handoff all
 /// live there, and a tray path that drifted from the UI path would be a bug
 /// factory.
-async fn toggle_core<R: Runtime>(app: AppHandle<R>) {
+async fn toggle_core(app: AppHandle) {
     let running = {
         let state = app.state::<AppState>();
         state.manager.status().await.active_core.is_some()
     };
 
     let result = if running {
-        commands::stop_core(app.state::<AppState>())
+        commands::stop_core(app.clone(), app.state::<AppState>())
             .await
             .map(|()| "核心已停止，系统代理已还原".to_string())
     } else {
-        commands::start_core(app.state::<AppState>(), None)
+        commands::start_core(app.clone(), app.state::<AppState>(), None)
             .await
             .map(|status| match status.active_core {
                 Some(kind) => format!("{} 已启动", kind.display_name()),

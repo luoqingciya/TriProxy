@@ -119,6 +119,10 @@ export interface ConnectionInfo {
     destination_ip: string
     destination_port: string
     host: string
+    /** Bare name when the core reports one (Mihomo on Windows/macOS). */
+    process: string
+    /** Full path when the core reports one (sing-box). */
+    process_path: string
   }
   upload: number
   download: number
@@ -181,6 +185,8 @@ export interface Settings {
   close_to_tray: boolean
   /** Start a core as soon as the app launches. */
   auto_connect: boolean
+  /** Semicolon-separated bypass list; null keeps the built-in one. */
+  proxy_bypass: string | null
 }
 
 export const CORE_LABEL: Record<CoreKind, string> = {

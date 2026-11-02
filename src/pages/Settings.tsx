@@ -184,6 +184,24 @@ export function Settings() {
             className="w-[104px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg tabular outline-none"
           />
         </SettingRow>
+        <SettingRow
+          title="代理绕过列表"
+          hint="分号分隔；留空用默认（localhost 与内网网段）"
+        >
+          <input
+            value={settings.proxy_bypass ?? ''}
+            onChange={(event) =>
+              // Empty means "use the built-in list" rather than "bypass nothing":
+              // proxying localhost breaks every local dev server.
+              update({
+                proxy_bypass:
+                  event.target.value.trim() === '' ? null : event.target.value,
+              })
+            }
+            placeholder="localhost;*.internal;192.168.*"
+            className="w-[240px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[12.5px] text-fg outline-none placeholder:text-faint"
+          />
+        </SettingRow>
       </Card>
 
       <Card>

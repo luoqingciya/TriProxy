@@ -31,6 +31,9 @@ import type {
   StoredProfile,
 } from '../types'
 
+/** 90 samples at the 2s poll interval: three minutes of history. */
+const TRAFFIC_HISTORY_POINTS = 90
+
 export type Page =
   | 'dashboard'
   | 'proxies'
@@ -72,6 +75,15 @@ interface AppState {
   proxy: AppliedProxy | null
   latency: Record<string, LatencySample>
   traffic: TrafficSample | null
+  /**
+   * Recent traffic samples, oldest first, one per poll.
+   *
+   * Kept in memory only: the chart answers "what has my connection been doing
+   * for the last few minutes", which is a question about the session, not about
+   * history. Persisting it would mean a schema, a retention policy and a file
+   * to corrupt, for a graph nobody looks at after closing the window.
+   */
+  trafficHistory: { up: number; down: number }[]
   connections: ConnectionsSnapshot | null
   testing: boolean
   busy: boolean
@@ -118,6 +130,7 @@ export const useApp = create<AppState>((set, get) => ({
   proxy: null,
   latency: {},
   traffic: null,
+  trafficHistory: [],
   connections: null,
   testing: false,
   busy: false,
@@ -154,6 +167,11 @@ export const useApp = create<AppState>((set, get) => ({
         selection,
         proxy,
         traffic,
+        trafficHistory: traffic
+          ? [...get().trafficHistory, { up: traffic.up, down: traffic.down }].slice(
+              -TRAFFIC_HISTORY_POINTS,
+            )
+          : [],
         connections,
         error: null,
       })

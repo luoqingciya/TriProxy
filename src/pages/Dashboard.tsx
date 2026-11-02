@@ -81,6 +81,7 @@ export function Dashboard() {
   const settings = useApp((state) => state.settings)
   const proxy = useApp((state) => state.proxy)
   const traffic = useApp((state) => state.traffic)
+  const trafficHistory = useApp((state) => state.trafficHistory)
   const busy = useApp((state) => state.busy)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
@@ -161,7 +162,7 @@ export function Dashboard() {
         </div>
       </Card>
 
-      <div className="mb-4 grid grid-cols-2 gap-4">
+      <div className="mb-4 grid grid-cols-3 gap-4">
         <Card>
           <SectionTitle title="当前配置" />
           {activeProfile ? (
@@ -189,6 +190,25 @@ export function Dashboard() {
             />
             <Row label="分流规则" value={settings?.rule_set ? '已启用' : '未启用'} />
           </div>
+        </Card>
+
+        <Card>
+          <SectionTitle title="流量" />
+          {traffic ? (
+            <>
+              <div className="mb-2 flex items-baseline justify-between text-[13px] tabular">
+                <span className="text-muted">↑ {formatRate(traffic.up)}</span>
+                <span className="text-muted">↓ {formatRate(traffic.down)}</span>
+              </div>
+              <Sparkline
+                up={trafficHistory.map((sample) => sample.up)}
+                down={trafficHistory.map((sample) => sample.down)}
+              />
+              <div className="mt-1 text-[11px] text-faint">最近 3 分钟</div>
+            </>
+          ) : (
+            <p className="text-[13px] text-faint">核心未运行</p>
+          )}
         </Card>
       </div>
 
@@ -307,6 +327,50 @@ export function Dashboard() {
         })}
       </Card>
     </div>
+  )
+}
+
+/**
+ * Two-line traffic sparkline.
+ *
+ * Normalised to the busiest sample in the window rather than to an absolute
+ * scale: a quiet connection still shows its shape, where a fixed scale would
+ * flatten everything except the one burst that set the maximum.
+ */
+function Sparkline({ up, down }: { up: number[]; down: number[] }) {
+  if (up.length < 2) {
+    return <div className="h-12 rounded-md bg-panel-2" />
+  }
+
+  const max = Math.max(...up, ...down, 1)
+  const points = (values: number[]) =>
+    values
+      .map((value, index) => {
+        const x = (index / (values.length - 1)) * 100
+        const y = 100 - (value / max) * 100
+        return `${x.toFixed(2)},${y.toFixed(2)}`
+      })
+      .join(' ')
+
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-12 w-full">
+      <polyline
+        points={points(down)}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        vectorEffect="non-scaling-stroke"
+        className="text-accent"
+      />
+      <polyline
+        points={points(up)}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        vectorEffect="non-scaling-stroke"
+        className="text-muted"
+      />
+    </svg>
   )
 }
 

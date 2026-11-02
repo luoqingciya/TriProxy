@@ -86,6 +86,7 @@ let settings: Settings = {
   listen_port: 7890,
   close_to_tray: true,
   auto_connect: false,
+  proxy_bypass: null,
 }
 
 const nodes: NodeSummary[] = [

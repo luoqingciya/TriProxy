@@ -91,6 +91,15 @@ pub struct ConnectionMetadata {
     pub destination_port: String,
     #[serde(default)]
     pub host: String,
+    /// Process that opened the connection, when the core can tell.
+    ///
+    /// Mihomo reports a bare name on Windows and macOS; sing-box reports a full
+    /// path in `processPath`. Both are parsed so the UI does not have to know
+    /// which core answered.
+    #[serde(default)]
+    pub process: String,
+    #[serde(rename = "processPath", default)]
+    pub process_path: String,
 }
 
 impl ConnectionInfo {
@@ -426,13 +435,14 @@ mod tests {
                     "sourceIP": "127.0.0.1",
                     "destinationIP": "93.184.216.34",
                     "destinationPort": "443",
-                    "host": "example.com"
+                    "host": "example.com",
+                    "process": "chrome.exe"
                 },
                 "upload": 10,
                 "download": 20,
                 "chains": ["PROXY", "Tokyo 01"],
-                "rule": "Match",
-                "rulePayload": "",
+                "rule": "GEOSITE",
+                "rulePayload": "cn",
                 "start": "2026-11-01T22:00:00Z"
             }]
         }"#;
@@ -442,6 +452,21 @@ mod tests {
         let connection = &snapshot.connections[0];
         assert_eq!(connection.target(), "example.com");
         assert_eq!(connection.chains, vec!["PROXY", "Tokyo 01"]);
+        // The list shows which rule caught a connection; without it "why did this
+        // site go direct" is unanswerable from the UI.
+        assert_eq!(connection.rule, "GEOSITE");
+        assert_eq!(connection.rule_payload, "cn");
+        assert_eq!(connection.metadata.process, "chrome.exe");
+    }
+
+    /// sing-box reports a full path instead of a name; both fields exist so the
+    /// UI does not have to branch on which core answered.
+    #[test]
+    fn parses_a_process_path_from_sing_box() {
+        let metadata: ConnectionMetadata =
+            serde_json::from_str(r#"{"processPath":"C:\\Program Files\\App\\app.exe"}"#).unwrap();
+        assert_eq!(metadata.process_path, "C:\\Program Files\\App\\app.exe");
+        assert!(metadata.process.is_empty());
     }
 
     #[test]

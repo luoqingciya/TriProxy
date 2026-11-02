@@ -42,6 +42,39 @@ fn err(message: impl std::fmt::Display) -> String {
     message.to_string()
 }
 
+/// What the tray should say it is currently doing.
+///
+/// One line, because a tray menu is read at a glance: which core, and whether it
+/// is following the automatic group or a node the user picked.
+fn tray_status_node(state: &AppState) -> String {
+    let store = ProfileStore::new(state.manager.layout());
+    match store.active() {
+        Ok(Some((record, profile))) => match record.selected_node {
+            Some(id) => profile
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.name.clone())
+                .unwrap_or_else(|| "自动选择".to_string()),
+            None => "自动选择".to_string(),
+        },
+        _ => "无配置".to_string(),
+    }
+}
+
+/// Refresh the tray menu after anything that changes what it reports.
+pub(crate) async fn sync_tray(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    let state = app.state::<AppState>();
+    let node = tray_status_node(&state);
+    let label = match state.manager.persisted_active().await {
+        Some(kind) => format!("{} · {node}", kind.display_name()),
+        None => "未运行".to_string(),
+    };
+    crate::tray::set_status(app, &label);
+}
+
 #[tauri::command]
 pub async fn status(state: State<'_, AppState>) -> CmdResult<ManagerStatus> {
     Ok(state.manager.status().await)
@@ -277,6 +310,7 @@ fn compile_active(
 
 #[tauri::command]
 pub async fn start_core(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     core: Option<CoreKind>,
 ) -> CmdResult<ManagerStatus> {
@@ -319,6 +353,7 @@ pub async fn start_core(
         }
     }
 
+    sync_tray(&app).await;
     Ok(state.manager.status().await)
 }
 
@@ -334,17 +369,25 @@ fn enable_system_proxy(state: &AppState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn stop_core(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn stop_core(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<()> {
     state.manager.stop().await.map_err(err)?;
     // The proxy is useless without a core and would break connectivity.
     SystemProxyManager::new(state.manager.layout())
         .disable()
         .map_err(err)?;
+    sync_tray(&app).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn switch_core(state: State<'_, AppState>, target: String) -> CmdResult<ManagerStatus> {
+pub async fn switch_core(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    target: String,
+) -> CmdResult<ManagerStatus> {
     let requested = if target == "smart" {
         None
     } else {
@@ -362,6 +405,7 @@ pub async fn switch_core(state: State<'_, AppState>, target: String) -> CmdResul
         .switch_with_config(kind, &compiled.text, compiled.file_name)
         .await
         .map_err(err)?;
+    sync_tray(&app).await;
     Ok(state.manager.status().await)
 }
 
@@ -401,6 +445,7 @@ pub struct SelectResult {
 
 #[tauri::command]
 pub async fn select_node(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     node_id: Option<String>,
 ) -> CmdResult<SelectResult> {
@@ -416,6 +461,8 @@ pub async fn select_node(
     let outcome = triproxy_core::select_node(&store, client.as_ref(), node_id.as_deref())
         .await
         .map_err(err)?;
+
+    sync_tray(&app).await;
 
     Ok(match outcome {
         triproxy_core::ApplyOutcome::Applied { node } => SelectResult {
