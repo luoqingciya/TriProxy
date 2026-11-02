@@ -41,6 +41,8 @@ export function Settings() {
   const autostart = useApp((state) => state.autostart)
   const setAutostart = useApp((state) => state.setAutostart)
   const update = useApp((state) => state.updateSettings)
+  const loadSettings = useApp((state) => state.loadSettings)
+  const refresh = useApp((state) => state.refresh)
   // Rules are edited as text and saved on blur: validating on every keystroke
   // would flag a half-typed line as an error the user is still writing.
   const [rulesText, setRulesText] = useState(settings?.custom_rules ?? '')
@@ -59,6 +61,29 @@ export function Settings() {
       return
     }
     await update({ custom_rules: rulesText.trim() === '' ? null : rulesText })
+  }
+
+  async function exportBackup() {
+    try {
+      const path = await api.exportBackup()
+      if (path) useApp.setState({ notice: `已导出到 ${path}` })
+    } catch (error) {
+      useApp.setState({ error: String(error) })
+    }
+  }
+
+  async function importBackup() {
+    try {
+      const count = await api.importBackup()
+      if (count === null) return
+      // Reload both: the backup carries settings and profiles, and the poll
+      // alone would leave the form showing the old values.
+      await loadSettings()
+      await refresh()
+      useApp.setState({ notice: `已导入 ${count} 个配置` })
+    } catch (error) {
+      useApp.setState({ error: String(error) })
+    }
   }
 
   if (!settings) {
@@ -294,6 +319,15 @@ export function Settings() {
           <span className="max-w-[380px] truncate text-[12.5px] text-muted tabular">
             {status?.data_dir ?? '—'}
           </span>
+        </SettingRow>
+        <SettingRow
+          title="配置备份"
+          hint="导出设置与全部配置到一个 JSON；导入时合并，不会删掉已有的配置"
+        >
+          <div className="flex gap-2">
+            <Button onClick={() => void exportBackup()}>导出</Button>
+            <Button onClick={() => void importBackup()}>导入</Button>
+          </div>
         </SettingRow>
       </Card>
 

@@ -55,6 +55,11 @@
     "createUpdaterArtifacts": true
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["triproxy"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUzMDMyQzgyQUY3MjAyNzQKUldSMEFuS3ZnaXdEVTl6VE1aR243Y21jTGQ3amhrUXlVZGt1MEU4dWRzK3cvbktIN25KcDJRS2cK",
       "endpoints": [

@@ -110,6 +110,12 @@ export const api = {
   /** Parse rule text without saving it; rejects with the offending line. */
   validateRules: (text: string) => call<void>('validate_rules', { text }),
 
+  /** Write a backup; null when the save dialog was dismissed. */
+  exportBackup: () => call<string | null>('export_backup'),
+
+  /** Merge a backup; null when the open dialog was dismissed. */
+  importBackup: () => call<number | null>('import_backup'),
+
   previewSelection: () => call<Selection | null>('preview_selection'),
 
   systemProxyStatus: () => call<AppliedProxy | null>('system_proxy_status'),

@@ -282,6 +282,72 @@ pub async fn validate_rules(text: String) -> CmdResult<()> {
         .map_err(|error| error.to_string())
 }
 
+/// Ask for a destination and write everything the user configured into it.
+///
+/// Returns `None` when the dialog was dismissed: cancelling is not an error, and
+/// reporting it as one would train people to ignore the banner.
+#[tauri::command]
+pub async fn export_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("TriProxy 备份", &["json"])
+        .set_file_name("triproxy-backup.json")
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(err)?;
+
+    let layout = state.manager.layout();
+    let store = ProfileStore::new(layout);
+    let backup =
+        crate::backup::Backup::capture(&store, AppSettings::load(layout)).map_err(err)?;
+    let text = serde_json::to_string_pretty(&backup).map_err(err)?;
+    std::fs::write(&path, text).map_err(err)?;
+
+    Ok(Some(path.display().to_string()))
+}
+
+/// Ask for a backup file and merge it into the current data directory.
+#[tauri::command]
+pub async fn import_backup(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Option<usize>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("TriProxy 备份", &["json"])
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(err)?;
+
+    let text = std::fs::read_to_string(&path).map_err(err)?;
+    let backup = crate::backup::Backup::parse(&text)?;
+
+    let layout = state.manager.layout();
+    let store = ProfileStore::new(layout);
+    let count = backup.restore(&store, layout)?;
+
+    Ok(Some(count))
+}
+
 /// What the selector currently thinks about the active profile.
 #[tauri::command]
 pub async fn preview_selection(state: State<'_, AppState>) -> CmdResult<Option<Selection>> {
