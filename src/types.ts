@@ -191,6 +191,8 @@ export interface Settings {
   proxy_bypass: string | null
   /** User-written routing rules, one per line; null means none. */
   custom_rules: string | null
+  /** Remote rule-sets, one per line: 目标,类型,URL; null means none. */
+  rule_sets: string | null
 }
 
 export const CORE_LABEL: Record<CoreKind, string> = {

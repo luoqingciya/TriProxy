@@ -180,6 +180,7 @@ pub fn run() {
             commands::settings,
             commands::save_settings,
             commands::validate_rules,
+            commands::validate_rule_sets,
             commands::export_backup,
             commands::import_backup,
             commands::preview_selection,

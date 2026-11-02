@@ -21,8 +21,8 @@ use crate::profile::Profile;
 
 use super::{
     CompileError, CompileOptions, CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleKind,
-    RuleMode, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL,
-    PROXY_GROUP,
+    RuleMode, RuleSet, RuleSetFormat, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS,
+    AUTO_TEST_URL, PROXY_GROUP,
 };
 
 pub struct SingBoxCompiler;
@@ -136,6 +136,26 @@ impl ConfigCompiler for SingBoxCompiler {
         for rule in &options.custom_rules {
             rules.push(custom_rule(rule));
         }
+
+        // Remote rule-sets. Only `.srs`: sing-box cannot read a Clash provider,
+        // and a bad entry here fails the whole config at load time.
+        let srs_sets: Vec<&RuleSet> = options
+            .rule_sets
+            .iter()
+            .filter(|set| set.format == RuleSetFormat::SingBox)
+            .collect();
+        for set in &srs_sets {
+            let outbound = match set.target {
+                RuleTarget::Proxy => PROXY_GROUP,
+                RuleTarget::Direct => "direct",
+            };
+            rules.push(json!({
+                "rule_set": set.name,
+                "action": "route",
+                "outbound": outbound,
+            }));
+        }
+
         if options.rules == RuleMode::Split {
             // sing-box 1.12 dropped the built-in geoip/geosite databases, so the
             // split lists come from remote rule-sets instead. They are fetched
@@ -151,8 +171,28 @@ impl ConfigCompiler for SingBoxCompiler {
         if !rules.is_empty() {
             route["rules"] = json!(rules);
         }
+
+        // Both the split preset and the user's rule-sets declare entries here;
+        // they are merged rather than overwriting each other.
+        let mut declared: Vec<Value> = Vec::new();
         if options.rules == RuleMode::Split {
-            route["rule_set"] = json!(split_rule_sets());
+            if let Some(existing) = split_rule_sets().as_array() {
+                declared.extend(existing.iter().cloned());
+            }
+        }
+        for set in &srs_sets {
+            declared.push(json!({
+                "tag": set.name,
+                "type": "remote",
+                "format": "binary",
+                "url": set.url,
+                // Fetched directly: routing the download through the proxy would
+                // deadlock, since the rule-set decides what goes through it.
+                "download_detour": "direct",
+            }));
+        }
+        if !declared.is_empty() {
+            route["rule_set"] = json!(declared);
         }
         if dns_mode != DnsMode::Off {
             // sing-box 1.12+ refuses a config with a dns section but no bootstrap

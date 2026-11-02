@@ -288,6 +288,10 @@ pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) ->
     if let Some(text) = settings.custom_rules.as_deref() {
         triproxy_core::parse_rules(text).map_err(|error| format!("自定义规则 {error}"))?;
     }
+    if let Some(text) = settings.rule_sets.as_deref() {
+        triproxy_core::parse_rule_sets(text)
+            .map_err(|error| format!("规则集 {error}"))?;
+    }
     settings.save(state.manager.layout()).map_err(err)
 }
 
@@ -295,6 +299,14 @@ pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) ->
 #[tauri::command]
 pub async fn validate_rules(text: String) -> CmdResult<()> {
     triproxy_core::parse_rules(&text)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// Check rule-set text without saving it, so the editor can complain in place.
+#[tauri::command]
+pub async fn validate_rule_sets(text: String) -> CmdResult<()> {
+    triproxy_core::parse_rule_sets(&text)
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

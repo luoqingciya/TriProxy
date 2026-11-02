@@ -94,6 +94,13 @@ pub struct AppSettings {
     /// time the page loads.
     #[serde(default)]
     pub custom_rules: Option<String>,
+    /// Remote rule-sets, one per line: `目标,类型,URL`.
+    ///
+    /// Kept separate from `custom_rules` because they carry different metadata
+    /// (a target, a behaviour, and a file format that decides which core can
+    /// read them).
+    #[serde(default)]
+    pub rule_sets: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -126,6 +133,7 @@ impl Default for AppSettings {
             auto_connect: false,
             proxy_bypass: None,
             custom_rules: None,
+            rule_sets: None,
         }
     }
 }
@@ -192,6 +200,7 @@ impl AppSettings {
             selected_node: None,
             selected_name: None,
             custom_rules: self.parsed_rules(),
+            rule_sets: self.parsed_rule_sets(),
         }
     }
 
@@ -209,6 +218,21 @@ impl AppSettings {
             Ok(rules) => rules,
             Err(error) => {
                 tracing::warn!(%error, "ignoring unparsable custom rules");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The rule-sets, parsed. Same policy as `parsed_rules`: a malformed line is
+    /// dropped at compile time and reported at save time.
+    fn parsed_rule_sets(&self) -> Vec<crate::compiler::RuleSet> {
+        let Some(text) = self.rule_sets.as_deref() else {
+            return Vec::new();
+        };
+        match crate::compiler::parse_rule_sets(text) {
+            Ok(sets) => sets,
+            Err(error) => {
+                tracing::warn!(%error, "ignoring unparsable rule-sets");
                 Vec::new()
             }
         }
@@ -258,6 +282,7 @@ mod tests {
             auto_connect: true,
             proxy_bypass: Some("localhost;*.internal".to_string()),
             custom_rules: Some("DOMAIN-SUFFIX,corp.internal,DIRECT".to_string()),
+            rule_sets: Some("DIRECT,domain,https://example.com/cn.mrs".to_string()),
         };
         settings.save(&layout).unwrap();
 

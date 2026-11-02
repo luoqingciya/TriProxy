@@ -179,6 +179,198 @@ fn valid_cidr(value: &str) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// remote rule-sets
+// ---------------------------------------------------------------------------
+
+/// Which core can read a rule-set file.
+///
+/// The two families do not share a format: Mihomo downloads `.mrs`/`.yaml`
+/// providers, sing-box downloads `.srs` binary rule-sets. One URL cannot serve
+/// both, which is why the format is derived per entry instead of being a single
+/// app-wide setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuleSetFormat {
+    Clash,
+    SingBox,
+}
+
+/// What a Mihomo rule-provider contains.
+///
+/// sing-box infers this from the file, so the field is ignored there — but
+/// Mihomo requires it to be declared, and guessing wrong makes it reject the
+/// config at load time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleSetBehavior {
+    Domain,
+    IpCidr,
+    Classical,
+}
+
+impl RuleSetBehavior {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleSetBehavior::Domain => "domain",
+            RuleSetBehavior::IpCidr => "ipcidr",
+            RuleSetBehavior::Classical => "classical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSet {
+    /// Identifier used as the provider key / rule-set tag. Derived from the URL.
+    pub name: String,
+    pub url: String,
+    pub target: RuleTarget,
+    pub behavior: RuleSetBehavior,
+    pub format: RuleSetFormat,
+}
+
+/// Parse rule-set lines: `目标,类型,URL`.
+///
+/// The type is spelled out rather than guessed from the file name because Mihomo
+/// needs it and a wrong guess is a config the core refuses to load.
+pub fn parse_rule_sets(text: &str) -> Result<Vec<RuleSet>, RuleError> {
+    let mut sets: Vec<RuleSet> = Vec::new();
+
+    for (index, raw) in text.lines().enumerate() {
+        let line = index + 1;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+
+        let fields: Vec<&str> = trimmed.splitn(3, ',').map(str::trim).collect();
+        if fields.len() < 3 {
+            return Err(RuleError {
+                line,
+                message: "需要三个字段：PROXY 或 DIRECT,类型(domain/ipcidr/classical),URL"
+                    .to_string(),
+            });
+        }
+
+        let target = match fields[0].to_ascii_uppercase().as_str() {
+            "PROXY" => RuleTarget::Proxy,
+            "DIRECT" => RuleTarget::Direct,
+            other => {
+                return Err(RuleError {
+                    line,
+                    message: format!("目标只能是 PROXY 或 DIRECT，收到 `{other}`"),
+                })
+            }
+        };
+
+        let behavior = match fields[1].to_ascii_lowercase().as_str() {
+            "domain" => RuleSetBehavior::Domain,
+            "ipcidr" => RuleSetBehavior::IpCidr,
+            "classical" => RuleSetBehavior::Classical,
+            other => {
+                return Err(RuleError {
+                    line,
+                    message: format!("类型只能是 domain / ipcidr / classical，收到 `{other}`"),
+                })
+            }
+        };
+
+        let url = fields[2].to_string();
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(RuleError {
+                line,
+                message: "URL 必须以 http:// 或 https:// 开头".to_string(),
+            });
+        }
+
+        let format = match format_of(&url) {
+            Some(format) => format,
+            None => {
+                return Err(RuleError {
+                    line,
+                    message: "只认 .mrs / .yaml（Mihomo）与 .srs（sing-box）结尾的规则集文件"
+                        .to_string(),
+                })
+            }
+        };
+
+        let base = name_from(&url);
+        let name = unique_name(&sets, &base);
+        sets.push(RuleSet {
+            name,
+            url,
+            target,
+            behavior,
+            format,
+        });
+    }
+
+    Ok(sets)
+}
+
+/// The format a URL implies, from its extension.
+///
+/// Extensions rather than content sniffing: this runs while the user is typing,
+/// and a HEAD request per keystroke is not an option.
+fn format_of(url: &str) -> Option<RuleSetFormat> {
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    if path.ends_with(".mrs") || path.ends_with(".yaml") || path.ends_with(".yml") {
+        Some(RuleSetFormat::Clash)
+    } else if path.ends_with(".srs") {
+        Some(RuleSetFormat::SingBox)
+    } else {
+        None
+    }
+}
+
+/// A safe identifier from the URL's file stem.
+fn name_from(url: &str) -> String {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let stem = path
+        .rsplit('/')
+        .next()
+        .unwrap_or("rules")
+        .split('.')
+        .next()
+        .unwrap_or("rules");
+
+    let cleaned: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    if cleaned.is_empty() {
+        "rules".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Two rule-sets with the same file name must not collide: Mihomo keys providers
+/// by name, and a duplicate silently replaces the first.
+fn unique_name(existing: &[RuleSet], base: &str) -> String {
+    if !existing.iter().any(|set| set.name == base) {
+        return base.to_string();
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}-{suffix}");
+        if !existing.iter().any(|set| set.name == candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the loop only exits by returning")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +429,46 @@ mod tests {
         assert!(parse_rules("IP-CIDR,10.0.0.0/8,DIRECT").is_ok());
         assert!(parse_rules("IP-CIDR,not-an-ip/8,DIRECT").is_err());
         assert!(parse_rules("IP-CIDR,2001:db8::/32,DIRECT").is_ok());
+    }
+
+    #[test]
+    fn rule_sets_carry_their_target_type_and_format() {
+        let sets = parse_rule_sets(
+            "# 国内直连\nDIRECT,domain,https://example.com/rules/geosite-cn.mrs\nPROXY,ipcidr,https://example.com/rules/geoip-us.srs",
+        )
+        .unwrap();
+
+        assert_eq!(sets.len(), 2);
+        assert_eq!(sets[0].name, "geosite-cn");
+        assert_eq!(sets[0].target, RuleTarget::Direct);
+        assert_eq!(sets[0].behavior, RuleSetBehavior::Domain);
+        assert_eq!(sets[0].format, RuleSetFormat::Clash);
+        assert_eq!(sets[1].name, "geoip-us");
+        assert_eq!(sets[1].format, RuleSetFormat::SingBox);
+    }
+
+    /// The two families use different file formats; a URL we cannot classify is
+    /// an error rather than a silent skip, because the user would otherwise
+    /// wonder why their rule-set never took effect.
+    #[test]
+    fn rule_sets_reject_an_unknown_file_type() {
+        let error = parse_rule_sets("DIRECT,domain,https://example.com/rules.txt").unwrap_err();
+        assert!(error.message.contains(".mrs"), "{}", error.message);
+    }
+
+    #[test]
+    fn duplicate_file_names_get_a_suffix() {
+        let sets = parse_rule_sets(
+            "DIRECT,domain,https://a.example.com/cn.mrs\nPROXY,domain,https://b.example.com/cn.mrs",
+        )
+        .unwrap();
+        assert_eq!(sets[0].name, "cn");
+        assert_eq!(sets[1].name, "cn-2");
+    }
+
+    #[test]
+    fn rule_set_urls_must_be_http() {
+        let error = parse_rule_sets("DIRECT,domain,file:///tmp/cn.mrs").unwrap_err();
+        assert!(error.message.contains("http"), "{}", error.message);
     }
 }

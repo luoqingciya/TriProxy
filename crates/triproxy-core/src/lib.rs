@@ -58,8 +58,9 @@ pub mod subscription_service;
 pub use binaries::{InstallOptions, InstalledBinary, UpdateCheck, UpdateStatus};
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
-    compile, compile_all, parse_rules, CompileError, CompileOptions, CompiledConfig,
-    ConfigCompiler, CustomRule, DnsMode, RuleError, RuleKind, RuleMode, RuleTarget, SkippedNode,
+    compile, compile_all, parse_rule_sets, parse_rules, CompileError, CompileOptions,
+    CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleError, RuleKind, RuleMode, RuleSet,
+    RuleSetBehavior, RuleSetFormat, RuleTarget, SkippedNode,
 };
 pub use controller::{ConnectionInfo, ConnectionsSnapshot, ControllerClient, TrafficSample};
 pub use core::{
