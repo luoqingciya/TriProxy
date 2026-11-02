@@ -20,7 +20,7 @@ use crate::profile::Profile;
 use super::yaml::{emit, Yaml};
 use super::{
     CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, RuleMode, SkippedNode,
-    PROXY_GROUP,
+    AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL, PROXY_GROUP,
 };
 
 pub struct MihomoCompiler;
@@ -56,7 +56,29 @@ impl ConfigCompiler for MihomoCompiler {
             }
         }
 
-        let mut group_members: Vec<String> = included.clone();
+        // The automatic group is what "no node chosen" now means. Without it the
+        // default was whichever node happened to be first in the profile, which
+        // is a coin flip the user never asked for.
+        let auto = Yaml::map()
+            .with("name", Yaml::str(AUTO_GROUP))
+            .with("type", Yaml::str("url-test"))
+            .with("url", Yaml::str(AUTO_TEST_URL))
+            .with("interval", Yaml::int(AUTO_TEST_INTERVAL_SECS as i64))
+            .with("tolerance", Yaml::int(50))
+            .with("proxies", Yaml::strings(included.clone()));
+
+        let mut group_members: Vec<String> = Vec::new();
+        // An explicit pick outranks the automatic group: the first member of a
+        // select group is its default, so order is the whole mechanism.
+        if let Some(name) = options
+            .selected_name
+            .as_ref()
+            .filter(|name| included.contains(name))
+        {
+            group_members.push(name.clone());
+        }
+        group_members.push(AUTO_GROUP.to_string());
+        group_members.extend(included.iter().cloned());
         group_members.push("DIRECT".to_string());
 
         let group = Yaml::map()
@@ -99,7 +121,7 @@ impl ConfigCompiler for MihomoCompiler {
 
         document = document
             .with("proxies", Yaml::List(proxies))
-            .with("proxy-groups", Yaml::list().push(group))
+            .with("proxy-groups", Yaml::list().push(auto).push(group))
             .with("rules", Yaml::strings(rule_lines(options.rules)));
 
         Ok(CompiledConfig {
@@ -494,6 +516,32 @@ mod tests {
         assert!(text.contains("\"name\": \"PROXY\""), "{text}");
         assert!(text.contains("\"MATCH,PROXY\""), "{text}");
         assert!(text.contains("\"mixed-port\": 7890"), "{text}");
+    }
+
+    /// With no explicit pick the automatic group is the default, which is what
+    /// "I never chose a node" should mean — not "whichever node sorts first".
+    #[test]
+    fn automatic_group_is_the_default_without_a_pick() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            None,
+        );
+        let text = compile_yaml(&Profile::new("p", vec![node]), &CompileOptions::default())
+            .unwrap()
+            .text;
+
+        assert!(text.contains("\"name\": \"AUTO\""), "{text}");
+        assert!(text.contains("\"type\": \"url-test\""), "{text}");
+        assert!(
+            text.contains("\"url\": \"http://www.gstatic.com/generate_204\""),
+            "{text}"
+        );
+        // AUTO comes first inside PROXY, and PROXY itself comes first.
+        let auto = text.find("\"name\": \"AUTO\"").unwrap();
+        let proxy = text.find("\"name\": \"PROXY\"").unwrap();
+        assert!(auto < proxy, "AUTO must be defined before PROXY:\n{text}");
     }
 
     #[test]

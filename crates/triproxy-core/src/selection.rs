@@ -27,7 +27,7 @@
 //! reported to the caller rather than hidden, because "I clicked the node and
 //! nothing changed" is exactly the kind of thing users cannot diagnose.
 
-use crate::compiler::PROXY_GROUP;
+use crate::compiler::{AUTO_GROUP, PROXY_GROUP};
 use crate::controller::ControllerClient;
 use crate::error::{Error, Result};
 use crate::store::ProfileStore;
@@ -74,10 +74,24 @@ pub async fn select_node(
     store.set_selected_node(&stored.id, node_id)?;
 
     let Some(node_name) = node_name else {
-        return Ok(ApplyOutcome::SavedOnly {
-            node: None,
-            reason: "selection cleared".to_string(),
-        });
+        // Clearing the pick means "use the automatic group", not "keep doing
+        // whatever the core is doing". A running core has to be told, exactly
+        // like it is told about an explicit node.
+        let Some(client) = client else {
+            return Ok(ApplyOutcome::SavedOnly {
+                node: None,
+                reason: "selection cleared; takes effect on the next start".to_string(),
+            });
+        };
+        return match client.select_proxy(PROXY_GROUP, AUTO_GROUP).await {
+            Ok(()) => Ok(ApplyOutcome::Applied {
+                node: AUTO_GROUP.to_string(),
+            }),
+            Err(error) => Ok(ApplyOutcome::SavedOnly {
+                node: None,
+                reason: error.to_string(),
+            }),
+        };
     };
 
     let Some(client) = client else {
