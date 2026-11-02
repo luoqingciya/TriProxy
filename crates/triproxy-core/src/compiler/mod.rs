@@ -541,6 +541,73 @@ mod tests {
         assert_eq!(document["routing"]["rules"][0]["ip"][0], "10.0.0.0/8");
     }
 
+    /// SOCKS5 and HTTP are the two protocols every core speaks, and the two most
+    /// likely to appear in a chain. Each spells them differently.
+    #[test]
+    fn proxy_outbound_nodes_compile_for_every_core() {
+        let socks = crate::profile::parse_uri("socks5://user:pass@proxy.example.com:1080")
+            .expect("socks uri");
+        let profile = Profile::new("p", vec![socks]);
+        let options = CompileOptions::default();
+
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        assert!(
+            mihomo.text.contains("\"type\": \"socks5\""),
+            "{}",
+            mihomo.text
+        );
+        assert!(
+            mihomo.text.contains("\"username\": \"user\""),
+            "{}",
+            mihomo.text
+        );
+
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        assert!(
+            singbox.text.contains("\"type\": \"socks\""),
+            "{}",
+            singbox.text
+        );
+        assert!(
+            singbox.text.contains("\"version\": \"5\""),
+            "{}",
+            singbox.text
+        );
+
+        let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
+        assert!(
+            xray.text.contains("\"protocol\": \"socks\""),
+            "{}",
+            xray.text
+        );
+        assert!(xray.text.contains("\"user\": \"user\""), "{}", xray.text);
+
+        let http =
+            crate::profile::parse_uri("http://user:pass@proxy.example.com:8080").expect("http uri");
+        let profile = Profile::new("p", vec![http]);
+
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        assert!(
+            mihomo.text.contains("\"type\": \"http\""),
+            "{}",
+            mihomo.text
+        );
+
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        assert!(
+            singbox.text.contains("\"type\": \"http\""),
+            "{}",
+            singbox.text
+        );
+
+        let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
+        assert!(
+            xray.text.contains("\"protocol\": \"http\""),
+            "{}",
+            xray.text
+        );
+    }
+
     #[test]
     fn an_unknown_selection_falls_back_to_the_profile_order() {
         let a = node(Protocol::Trojan, "a.example.com");

@@ -311,6 +311,40 @@ fn outbound(node: &Node) -> Result<Value, String> {
                 }),
             );
         }
+        Credentials::Socks5 { username, password } => {
+            // Xray models both socks and http the same way: a `servers` array
+            // whose `users` list is optional.
+            let mut server = Map::new();
+            server.insert("address".to_string(), json!(node.server));
+            server.insert("port".to_string(), json!(node.port));
+            if !username.is_empty() {
+                server.insert(
+                    "users".to_string(),
+                    json!([{ "user": username, "pass": password }]),
+                );
+            }
+            outbound.insert("protocol".to_string(), json!("socks"));
+            outbound.insert(
+                "settings".to_string(),
+                json!({ "servers": [Value::Object(server)] }),
+            );
+        }
+        Credentials::Http { username, password } => {
+            let mut server = Map::new();
+            server.insert("address".to_string(), json!(node.server));
+            server.insert("port".to_string(), json!(node.port));
+            if !username.is_empty() {
+                server.insert(
+                    "users".to_string(),
+                    json!([{ "user": username, "pass": password }]),
+                );
+            }
+            outbound.insert("protocol".to_string(), json!("http"));
+            outbound.insert(
+                "settings".to_string(),
+                json!({ "servers": [Value::Object(server)] }),
+            );
+        }
     }
 
     outbound.insert("streamSettings".to_string(), stream_settings(node));

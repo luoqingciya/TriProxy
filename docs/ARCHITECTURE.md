@@ -1223,12 +1223,18 @@ macOS 走 deep-link 的 URL 事件。两条路径落到同一个 `deep_link::han
 
 ### 27.1 影响日常使用
 
-**协议不全。** 现在支持 VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC。
-缺 SOCKS5 / HTTP 出站（公司代理、链式代理最常用的两种）、WireGuard、SSH、SSR、Snell、AnyTLS。
+**协议不全。** 现在支持 VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC，
+以及 SOCKS5 / HTTP 出站（公司代理、链式代理最常用的两种）。
 
-这一条没有和其余几条一起做，原因是它**不是一个补丁，而是一个矩阵**：每个协议 × 三个核心的
-映射与校验。而且分两类——SOCKS/HTTP 可以用「拿一个核心自己起 socks 入站当目标」的方式端到端验证，
-WireGuard 那一组必须有真实服务端。映射写错不会报错，只会「连上了但行为和预期不同」，这是最坏的一种 bug。
+仍缺 WireGuard、SSH、SSR、Snell、AnyTLS。这一组没有和 SOCKS5/HTTP 一起做，因为
+**必须有真实服务端才能验证**：映射写错不会报错，只会「连上了但行为和预期不同」，
+这是最坏的一种 bug。
+
+SOCKS5 的验证方式是拿一个核心自己起 socks 入站当目标，端到端跑通：sing-box 起一个带认证的
+socks 入站（`11080`）→ TriProxy 用 mihomo 加载 `socks5://user:pass@127.0.0.1:11080` →
+`curl -x http://127.0.0.1:7890 http://example.com` 返回 200，杀掉那个 socks 入站后同一请求变成
+502。**502 那一步才是关键**：只看到 200 无法区分「链路通了」和「核心悄悄直连了」。
+WireGuard 没有等价的本地手段，所以它仍然停在门外。
 
 **规则集订阅没有。** 自定义规则只能内联写，不能订阅远程 rule-set（Clash 的 `rule-providers`）。
 split 预设里的 rule-set 是编译期写死的。
