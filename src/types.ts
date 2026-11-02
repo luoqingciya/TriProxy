@@ -72,6 +72,8 @@ export interface StoredProfile {
   subscription?: Subscription | null
   /** Node the user picked, or null when the profile order decides. */
   selected_node?: string | null
+  /** Starred node ids, in the order they were starred. */
+  favorites?: string[]
 }
 
 export interface ProfileLibrary {
