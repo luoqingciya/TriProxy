@@ -13,8 +13,15 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
+import { useState } from 'react'
+
 import { PageHeader } from '../components/Sidebar'
-import { Card, SectionTitle, SettingRow, Toggle } from '../components/ui'
+import { Button, Card, SectionTitle, SettingRow, Toggle } from '../components/ui'
+import {
+  checkForUpdate,
+  installUpdate,
+  type AppUpdateInfo,
+} from '../services/updater'
 import { useApp } from '../store/app'
 import { CORE_LABEL, type CoreKind, type Settings as AppSettings } from '../types'
 
@@ -176,6 +183,85 @@ export function Settings() {
           </span>
         </SettingRow>
       </Card>
+
+      <AppUpdate />
     </div>
+  )
+}
+
+/**
+ * Application self-update.
+ *
+ * Deliberately manual: checking on every launch costs a network round trip and
+ * surprises people mid-task. The button is the whole feature.
+ */
+function AppUpdate() {
+  const [checking, setChecking] = useState(false)
+  const [update, setUpdate] = useState<AppUpdateInfo | null>(null)
+  const [checked, setChecked] = useState(false)
+  const [installing, setInstalling] = useState(false)
+  const [percent, setPercent] = useState<number | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function check() {
+    setChecking(true)
+    setError(null)
+    try {
+      setUpdate(await checkForUpdate())
+      setChecked(true)
+    } catch (problem) {
+      setError(String(problem))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  async function install() {
+    setInstalling(true)
+    setError(null)
+    try {
+      await installUpdate(setPercent)
+      // The installer restarts the app; if we are still here, say so instead of
+      // pretending nothing happened.
+      setError('安装完成，正在重启…')
+    } catch (problem) {
+      setError(String(problem))
+      setInstalling(false)
+    }
+  }
+
+  return (
+    <Card className="mt-4">
+      <SectionTitle title="应用更新" hint="更新程序本身；核心的更新在命令行 `core update`" />
+      <SettingRow title="版本" hint="当前安装的 TriProxy 版本">
+        <div className="flex items-center gap-3">
+          {checked && !update && (
+            <span className="text-[12.5px] text-muted">已是最新版本</span>
+          )}
+          {update && !installing && (
+            <span className="text-[12.5px] text-accent">可更新到 {update.version}</span>
+          )}
+          {installing && (
+            <span className="text-[12.5px] text-muted">
+              {percent === null ? '正在下载…' : `正在下载 ${percent.toFixed(0)}%`}
+            </span>
+          )}
+          {update && !installing ? (
+            <Button variant="primary" onClick={install}>
+              下载并安装
+            </Button>
+          ) : (
+            <Button onClick={check} disabled={checking || installing}>
+              {checking ? '检查中…' : '检查更新'}
+            </Button>
+          )}
+        </div>
+      </SettingRow>
+      {error && (
+        <SettingRow title="结果">
+          <span className="max-w-[380px] text-[12.5px] text-muted">{error}</span>
+        </SettingRow>
+      )}
+    </Card>
   )
 }

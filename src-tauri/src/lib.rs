@@ -35,6 +35,9 @@ pub fn run() {
     let manager = Arc::new(CoreManager::new(layout).expect("cannot initialise the core manager"));
 
     tauri::Builder::default()
+        // Self-update. The plugin is what makes an installed copy able to move
+        // to a newer release without the user downloading an installer again.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             manager: manager.clone(),
         })
