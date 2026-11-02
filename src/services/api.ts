@@ -79,6 +79,11 @@ export const api = {
   closeConnection: (id: string | null) =>
     call<void>('close_connection', { id }),
 
+  selectNode: (nodeId: string | null) =>
+    call<{ applied: boolean; node?: string; reason?: string }>('select_node', {
+      nodeId,
+    }),
+
   testProxyDelay: (timeoutSecs: number) =>
     call<LatencySample[]>('test_proxy_delay', { timeoutSecs }),
 

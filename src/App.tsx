@@ -30,6 +30,8 @@ export function App() {
   const settings = useApp((state) => state.settings)
   const error = useApp((state) => state.error)
   const clearError = useApp((state) => state.clearError)
+  const notice = useApp((state) => state.notice)
+  const clearNotice = useApp((state) => state.clearNotice)
   const refresh = useApp((state) => state.refresh)
   const loadSettings = useApp((state) => state.loadSettings)
 
@@ -81,6 +83,19 @@ export function App() {
           </div>
         )}
       </main>
+
+      {notice && (
+        <div className="fixed right-5 bottom-5 z-50 flex max-w-[420px] items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 shadow-lg">
+          <p className="text-[12.5px] leading-relaxed text-muted">{notice}</p>
+          <button
+            onClick={clearNotice}
+            className="mt-0.5 shrink-0 text-faint hover:text-fg"
+            aria-label="关闭"
+          >
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="fixed right-5 bottom-5 z-50 flex max-w-[420px] items-start gap-3 rounded-xl border border-danger/40 bg-panel px-4 py-3 shadow-lg">

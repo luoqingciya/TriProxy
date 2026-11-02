@@ -73,6 +73,8 @@ interface AppState {
   testing: boolean
   busy: boolean
   error: string | null
+  /** Transient informational message (not an error). */
+  notice: string | null
 
   setPage: (page: Page) => void
   refresh: () => Promise<void>
@@ -91,8 +93,10 @@ interface AppState {
   testLatency: () => Promise<void>
   testProxyDelay: () => Promise<void>
   closeConnection: (id: string | null) => Promise<void>
+  selectNode: (nodeId: string | null) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   clearError: () => void
+  clearNotice: () => void
 }
 
 const emptyLibrary: ProfileLibrary = { active: null, profiles: [] }
@@ -111,6 +115,7 @@ export const useApp = create<AppState>((set, get) => ({
   testing: false,
   busy: false,
   error: null,
+  notice: null,
 
   setPage: (page) => {
     window.history.replaceState(null, '', `#${page}`)
@@ -254,6 +259,20 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
+  selectNode: async (nodeId) => {
+    try {
+      const result = await api.selectNode(nodeId)
+      await get().refresh()
+      // Saved but not applied is the normal case on Xray and on a stopped core;
+      // saying so beats leaving the user wondering why nothing changed.
+      if (!result.applied && result.reason) {
+        set({ notice: `已保存，下次启动生效（${result.reason}）` })
+      }
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
   closeConnection: async (id) => {
     try {
       await api.closeConnection(id)
@@ -303,6 +322,8 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  clearNotice: () => set({ notice: null }),
 }))
 
 function describe(error: unknown): string {

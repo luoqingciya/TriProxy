@@ -57,6 +57,9 @@ pub struct StoredProfile {
     /// Present when the profile came from a URL and can be refreshed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscription: Option<Subscription>,
+    /// Node id the user picked, or  for the profile default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_node: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -75,6 +78,9 @@ struct Record {
     /// written before subscriptions existed still load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     subscription: Option<Subscription>,
+    /// Node id the user picked for this profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_node: Option<String>,
 }
 
 /// A record as stored on disk, including refresh state.
@@ -84,6 +90,7 @@ pub struct StoredRecord {
     pub stored_at_ms: u64,
     pub profile: Profile,
     pub subscription: Option<Subscription>,
+    pub selected_node: Option<String>,
 }
 
 pub struct ProfileStore {
@@ -243,11 +250,18 @@ impl ProfileStore {
                 .and_then(|existing| existing.subscription),
         };
 
+        // Re-importing or refreshing must not forget which node the user picked.
+        let selected_node = self
+            .record(&id)
+            .ok()
+            .and_then(|existing| existing.selected_node);
+
         let record = Record {
             id: id.clone(),
             stored_at_ms: now_ms(),
             profile: profile.clone(),
             subscription,
+            selected_node,
         };
         let text = serde_json::to_string_pretty(&record)?;
         write_atomic(&self.record_path(&id), &text)?;
@@ -271,6 +285,7 @@ impl ProfileStore {
             stored_at_ms: record.stored_at_ms,
             profile: record.profile,
             subscription: record.subscription,
+            selected_node: record.selected_node,
         })
     }
 
@@ -302,6 +317,7 @@ impl ProfileStore {
                 stored_at_ms: record.stored_at_ms,
                 profile: record.profile,
                 subscription: record.subscription,
+                selected_node: record.selected_node,
             });
         }
 
@@ -318,6 +334,7 @@ impl ProfileStore {
             stored_at_ms: record.stored_at_ms,
             profile: record.profile.clone(),
             subscription: record.subscription.clone(),
+            selected_node: record.selected_node.clone(),
         };
         let text = serde_json::to_string_pretty(&stored)?;
         write_atomic(&self.record_path(&record.id), &text)?;
@@ -360,6 +377,28 @@ impl ProfileStore {
         Ok(())
     }
 
+    /// Record which node the user picked for a profile.
+    ///
+    /// The id is validated against the stored profile: a stale selection (a node
+    /// removed by a subscription refresh) would otherwise be persisted forever
+    /// and silently ignored at compile time.
+    pub fn set_selected_node(&self, profile_id: &str, node_id: Option<&str>) -> Result<()> {
+        let mut record = self.record(profile_id)?;
+
+        if let Some(node_id) = node_id {
+            if !record.profile.nodes.iter().any(|node| node.id == node_id) {
+                return Err(Error::Other(format!(
+                    "no node with id `{node_id}` in profile `{}`",
+                    record.profile.name
+                )));
+            }
+        }
+
+        record.selected_node = node_id.map(str::to_string);
+        self.save_record(&record)?;
+        Ok(())
+    }
+
     /// The active profile, if one is set and still readable.
     pub fn active(&self) -> Result<Option<(StoredProfile, Profile)>> {
         let Some(id) = self.active_id()? else {
@@ -394,6 +433,7 @@ fn summarise(record: &Record) -> StoredProfile {
         content_id: record.profile.id.clone(),
         updated_at_ms: record.stored_at_ms,
         subscription: record.subscription.clone(),
+        selected_node: record.selected_node.clone(),
     }
 }
 
