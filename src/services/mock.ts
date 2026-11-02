@@ -212,6 +212,10 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return Boolean(args?.enabled) as T
     case 'validate_rules':
       return undefined as T
+    case 'export_backup':
+      return null as T
+    case 'import_backup':
+      return null as T
     case 'delete_profile':
       library = {
         active: library.active === args?.id ? null : library.active,

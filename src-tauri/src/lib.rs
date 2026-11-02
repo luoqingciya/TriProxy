@@ -17,7 +17,9 @@
 //! it over Tauri commands. Everything the window shows comes from the same core
 //! crate the CLI uses.
 
+pub mod backup;
 pub mod commands;
+pub mod deep_link;
 pub mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +47,20 @@ pub fn run() {
     let manager = Arc::new(CoreManager::new(layout).expect("cannot initialise the core manager"));
 
     tauri::Builder::default()
+        // Registered before anything else: it has to be the first thing that
+        // runs in a second process, otherwise two copies would race for the
+        // listen port before the second one hands over its arguments and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            for arg in &argv {
+                deep_link::handle(app, arg);
+            }
+            // A second launch means "show me the window", link or no link.
+            tray::show_window(app);
+        }))
+        .plugin(tauri_plugin_deep_link::init())
+        // File pickers for backup and restore. Rust-side only, so no JS
+        // permission is involved.
+        .plugin(tauri_plugin_dialog::init())
         // Self-update. The plugin is what makes an installed copy able to move
         // to a newer release without the user downloading an installer again.
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -59,6 +75,30 @@ pub fn run() {
         })
         .setup(move |app| {
             use tauri::Manager;
+
+            // Windows and Linux hand a clicked link to us as an argument, so the
+            // scheme has to be registered with the OS. macOS reads the bundle's
+            // Info.plist instead and delivers the URL as an event, handled below.
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(error) = app.deep_link().register_all() {
+                    tracing::warn!(%error, "could not register the triproxy:// scheme");
+                }
+            }
+
+            // A link clicked while the app is already running: macOS delivers an
+            // Apple Event, Windows and Linux go through the single-instance
+            // plugin above.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        deep_link::handle(&handle, url.as_str());
+                    }
+                });
+            }
 
             // Bundled cores do not sit beside the executable on every platform:
             // macOS keeps them in TriProxy.app/Contents/Resources/cores, and a
@@ -140,6 +180,8 @@ pub fn run() {
             commands::settings,
             commands::save_settings,
             commands::validate_rules,
+            commands::export_backup,
+            commands::import_backup,
             commands::preview_selection,
             commands::start_core,
             commands::stop_core,

@@ -413,6 +413,38 @@ impl ProfileStore {
         Ok(Some((summary, profile)))
     }
 
+    /// Every record document, verbatim, for a backup.
+    ///
+    /// The record file already carries the whole profile, so a backup is these
+    /// documents plus the settings — there is no separate content store that
+    /// could fall out of sync with them.
+    pub fn export_records(&self) -> Result<Vec<serde_json::Value>> {
+        let mut documents = Vec::new();
+        for entry in self.records()? {
+            let path = self.record_path(&entry.id);
+            let text = std::fs::read_to_string(&path).map_err(|error| Error::io(&path, error))?;
+            documents.push(serde_json::from_str(&text)?);
+        }
+        Ok(documents)
+    }
+
+    /// Write record documents back, keeping their ids.
+    ///
+    /// Restoring merges rather than replaces: a user who imports a backup on a
+    /// machine that already has profiles keeps both, and ids that already exist
+    /// are overwritten with the backup's version.
+    pub fn restore_records(&self, documents: &[serde_json::Value]) -> Result<usize> {
+        self.ensure()?;
+        let mut restored = 0;
+        for document in documents {
+            let record: Record = serde_json::from_value(document.clone())?;
+            let text = serde_json::to_string_pretty(&record)?;
+            write_atomic(&self.record_path(&record.id), &text)?;
+            restored += 1;
+        }
+        Ok(restored)
+    }
+
     fn read_index(&self) -> Result<Index> {
         let path = self.index_path();
         match std::fs::read_to_string(&path) {
