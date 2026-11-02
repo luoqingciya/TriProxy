@@ -61,10 +61,20 @@ pub struct AppSettings {
     pub rule_mode: crate::compiler::RuleMode,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Keep running in the system tray when the window is closed.
+    ///
+    /// Defaults to true: a proxy client that exits on close would cut the
+    /// connection the user is in the middle of using.
+    #[serde(default = "default_close_to_tray")]
+    pub close_to_tray: bool,
 }
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+fn default_close_to_tray() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -80,6 +90,7 @@ impl Default for AppSettings {
             dns_mode: crate::compiler::DnsMode::Off,
             rule_mode: crate::compiler::RuleMode::Global,
             log_level: default_log_level(),
+            close_to_tray: default_close_to_tray(),
         }
     }
 }
@@ -186,6 +197,7 @@ mod tests {
             dns_mode: crate::compiler::DnsMode::Split,
             rule_mode: crate::compiler::RuleMode::Split,
             log_level: "debug".to_string(),
+            close_to_tray: false,
         };
         settings.save(&layout).unwrap();
 
@@ -200,6 +212,16 @@ mod tests {
     fn missing_file_yields_defaults() {
         let layout = layout("missing");
         assert_eq!(AppSettings::load(&layout), AppSettings::default());
+        // Tray residency is on by default: closing the window must not cut the
+        // connection the user is using.
+        assert!(AppSettings::default().close_to_tray);
+    }
+
+    #[test]
+    fn settings_file_from_before_the_tray_option_still_loads() {
+        let layout = layout("legacy-tray");
+        std::fs::write(layout.root().join("settings.json"), r#"{"theme":"dark"}"#).unwrap();
+        assert!(AppSettings::load(&layout).close_to_tray);
     }
 
     #[test]

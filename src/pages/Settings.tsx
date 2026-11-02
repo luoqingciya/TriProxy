@@ -94,6 +94,15 @@ export function Settings() {
             ))}
           </select>
         </SettingRow>
+        <SettingRow
+          title="关闭窗口时驻留托盘"
+          hint="关闭窗口不退出，代理继续运行；退出请用托盘菜单"
+        >
+          <Toggle
+            checked={settings.close_to_tray}
+            onChange={(close_to_tray) => update({ close_to_tray })}
+          />
+        </SettingRow>
       </Card>
 
       <Card className="mb-4">

@@ -13,6 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
+import { listen } from '@tauri-apps/api/event'
 import { X } from 'lucide-react'
 import { useEffect } from 'react'
 
@@ -23,6 +24,7 @@ import { Logs } from './pages/Logs'
 import { Profiles } from './pages/Profiles'
 import { Proxies } from './pages/Proxies'
 import { Settings } from './pages/Settings'
+import { isTauri } from './services/api'
 import { useApp } from './store/app'
 
 export function App() {
@@ -60,6 +62,18 @@ export function App() {
     const timer = window.setInterval(() => void refresh(), 2000)
     return () => window.clearInterval(timer)
   }, [loadSettings, refresh])
+
+  // Tray actions run in Rust with no window in front of the user. They report
+  // their result through this event so the same banner the UI uses shows it.
+  useEffect(() => {
+    if (!isTauri) return undefined
+    const pending = listen<string>('triproxy-notice', (event) => {
+      useApp.setState({ notice: event.payload })
+    })
+    return () => {
+      void pending.then((off) => off())
+    }
+  }, [])
 
   return (
     <div className="flex h-full overflow-hidden bg-bg text-fg">

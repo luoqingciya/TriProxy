@@ -83,6 +83,7 @@ let settings: Settings = {
   dns_mode: 'off',
   rule_mode: 'global',
   log_level: 'info',
+  close_to_tray: true,
 }
 
 const nodes: NodeSummary[] = [
