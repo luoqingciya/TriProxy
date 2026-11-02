@@ -32,7 +32,7 @@
 |---|---|---|
 | Phase 0 | 产品与架构设计 | 已完成（规划书） |
 | **Phase 1** | **Rust 多核心管理器 MVP + CLI** | **已完成并通过三核心真机验证** |
-| **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC）** |
+| **Phase 2** | **Unified Profile / Parser / Validator** | **已完成（VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC / SOCKS5 / HTTP）** |
 | **Phase 3** | **Config Compiler** | **已完成（三核心配置均通过各自核心校验）** |
 | **Phase 4** | **Smart Core Selector** | **已完成（硬约束淘汰 + 可解释排序）** |
 | **Phase 5** | **Tauri GUI** | **已完成（仪表盘 / 节点 / 连接 / 配置 / 日志 / 设置；托盘驻留、深链接导入、配置备份）** |
@@ -163,7 +163,7 @@ macOS Intel 不在支持范围（Apple 已停售 Intel Mac），但自行编译�
 
 ## 配置导入（Phase 2）
 
-支持分享链接列表与 base64 订阅（服务商最常见的两种下发方式），协议覆盖 VLESS / VMess / Trojan / Shadowsocks：
+支持分享链接列表与 base64 订阅（服务商最常见的两种下发方式），协议覆盖 VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC，以及 SOCKS5 / HTTP 出站：
 
 ```bash
 triproxy profile parse ./sub.txt        # 列出解析出的节点

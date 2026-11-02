@@ -68,6 +68,11 @@ pub fn parse_uri(line: &str) -> Result<Node, ParseIssue> {
         "trojan" => parse_trojan(rest),
         "hysteria2" | "hy2" => parse_hysteria2(rest),
         "tuic" => parse_tuic(rest),
+        // `socks` is what v2rayN exports; `socks5` is what everyone types.
+        "socks" | "socks5" => parse_socks(rest),
+        "http" => parse_http(rest, false),
+        // Same outbound with TLS on top; the difference is the transport.
+        "https" => parse_http(rest, true),
         other => Err(ParseIssue::new(
             "unsupported_scheme",
             format!("unsupported scheme `{other}://`"),
@@ -469,6 +474,31 @@ fn parse_standard(rest: &str) -> Result<StandardUri, ParseIssue> {
     })
 }
 
+/// Same as [`parse_standard`], but a link without credentials is valid.
+///
+/// An unauthenticated SOCKS or HTTP proxy is a real thing (a local tunnel, a
+/// trusted LAN host), and those links carry no `user@` part at all.
+fn parse_standard_optional_userinfo(rest: &str) -> Result<StandardUri, ParseIssue> {
+    let parts = split_parts(rest);
+    let body = parts.body.trim();
+    let (userinfo, hostport) = match split_userinfo(body) {
+        Some((userinfo, hostport)) => (Some(userinfo), hostport),
+        None => (None, body.to_string()),
+    };
+    let (server, port) = parse_host_port(&hostport)
+        .ok_or_else(|| ParseIssue::new("bad_endpoint", format!("invalid endpoint `{hostport}`")))?;
+
+    Ok(StandardUri {
+        userinfo: userinfo
+            .map(|value| percent_decode(&value))
+            .unwrap_or_default(),
+        server,
+        port,
+        query: parts.query,
+        fragment: parts.fragment,
+    })
+}
+
 fn build_transport(query: &[(String, String)]) -> Result<Transport, ParseIssue> {
     let kind = query_get(query, "type")
         .unwrap_or("")
@@ -752,9 +782,150 @@ fn parse_trojan(rest: &str) -> Result<Node, ParseIssue> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// socks / http
+// ---------------------------------------------------------------------------
+
+/// `socks://base64(user:pass)@host:port` and `socks5://user:pass@host:port`.
+///
+/// Two encodings exist in the wild because two clients invented them: v2rayN
+/// base64s the credentials, everyone else writes them plainly. Both are accepted
+/// because a user pasting a share link does not know which one they have.
+fn parse_socks(rest: &str) -> Result<Node, ParseIssue> {
+    let uri = parse_standard_optional_userinfo(rest)?;
+    let (username, password) = decode_socks_userinfo(&uri.userinfo)?;
+
+    Ok(finish(
+        Protocol::Socks,
+        Credentials::Socks5 { username, password },
+        NodeParts {
+            name: uri.fragment,
+            server: uri.server,
+            port: uri.port,
+            transport: Transport::Tcp,
+            tls: None,
+            plugin: None,
+        },
+    ))
+}
+
+fn decode_socks_userinfo(raw: &str) -> Result<(String, String), ParseIssue> {
+    let decoded = percent_decode(raw);
+    if decoded.is_empty() {
+        // An open SOCKS proxy with no auth is a legitimate, if unusual, node.
+        return Ok((String::new(), String::new()));
+    }
+
+    // Base64 never contains `:`, so a colon means plain credentials.
+    if let Some((user, pass)) = decoded.split_once(':') {
+        return Ok((user.to_string(), pass.to_string()));
+    }
+
+    let text = decode_base64_string(&decoded).ok_or_else(|| {
+        ParseIssue::new(
+            "socks_bad_userinfo",
+            "socks userinfo is neither `user:pass` nor base64 of it",
+        )
+    })?;
+
+    // v2rayN writes `method:user:pass`; the method is meaningless for SOCKS5.
+    let parts = text.splitn(3, ':').collect::<Vec<_>>();
+    match parts.len() {
+        3 => Ok((parts[1].to_string(), parts[2].to_string())),
+        2 => Ok((parts[0].to_string(), parts[1].to_string())),
+        _ => Err(ParseIssue::new(
+            "socks_bad_userinfo",
+            "decoded socks userinfo has no `user:pass`",
+        )),
+    }
+}
+
+/// `http://user:pass@host:port`, and `https://` for the TLS variant.
+fn parse_http(rest: &str, tls_enabled: bool) -> Result<Node, ParseIssue> {
+    let uri = parse_standard_optional_userinfo(rest)?;
+    let decoded = percent_decode(&uri.userinfo);
+    let (username, password) = match decoded.split_once(':') {
+        Some((user, pass)) => (user.to_string(), pass.to_string()),
+        None => (decoded, String::new()),
+    };
+
+    let tls = tls_enabled.then(|| TlsConfig {
+        server_name: Some(uri.server.clone()),
+        ..Default::default()
+    });
+
+    Ok(finish(
+        Protocol::Http,
+        Credentials::Http { username, password },
+        NodeParts {
+            name: uri.fragment,
+            server: uri.server,
+            port: uri.port,
+            transport: Transport::Tcp,
+            tls,
+            plugin: None,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socks_accepts_plain_credentials() {
+        let node = parse_uri("socks5://user:pass@proxy.example.com:1080#office").unwrap();
+        assert_eq!(node.protocol, Protocol::Socks);
+        assert_eq!(node.server, "proxy.example.com");
+        assert_eq!(node.port, 1080);
+        assert_eq!(node.name, "office");
+        match node.credentials {
+            Credentials::Socks5 { username, password } => {
+                assert_eq!(username, "user");
+                assert_eq!(password, "pass");
+            }
+            other => panic!("expected socks5, got {other:?}"),
+        }
+    }
+
+    /// v2rayN exports the credentials base64-encoded; a share link copied from
+    /// there has to work without the user decoding it first.
+    #[test]
+    fn socks_accepts_base64_credentials() {
+        // base64("user:pass")
+        let node = parse_uri("socks://dXNlcjpwYXNz@proxy.example.com:1080").unwrap();
+        match node.credentials {
+            Credentials::Socks5 { username, password } => {
+                assert_eq!(username, "user");
+                assert_eq!(password, "pass");
+            }
+            other => panic!("expected socks5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn socks_without_credentials_is_still_a_node() {
+        let node = parse_uri("socks5://proxy.example.com:1080").unwrap();
+        match node.credentials {
+            Credentials::Socks5 { username, password } => {
+                assert!(username.is_empty());
+                assert!(password.is_empty());
+            }
+            other => panic!("expected socks5, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_and_https_differ_only_by_tls() {
+        let plain = parse_uri("http://user:pass@proxy.example.com:8080").unwrap();
+        assert_eq!(plain.protocol, Protocol::Http);
+        assert!(plain.tls.is_none());
+
+        let secure = parse_uri("https://user:pass@proxy.example.com:8443").unwrap();
+        assert_eq!(secure.protocol, Protocol::Http);
+        let tls = secure.tls.expect("https must carry tls");
+        assert_eq!(tls.server_name.as_deref(), Some("proxy.example.com"));
+    }
 
     #[test]
     fn vless_reality_ws_is_fully_modelled() {

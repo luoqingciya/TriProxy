@@ -254,6 +254,19 @@ pub fn validate_node(node: &Node, index: usize) -> Vec<Diagnostic> {
                 _ => {}
             }
         }
+        // A username without a password is a configuration mistake in every core:
+        // they all send the pair together or not at all.
+        Credentials::Socks5 { username, password } | Credentials::Http { username, password } => {
+            if username.is_empty() && !password.is_empty() {
+                out.push(Diagnostic::for_node(
+                    Severity::Warning,
+                    index,
+                    node,
+                    "proxy.password_without_username",
+                    "password without a username; most servers treat this as no auth",
+                ));
+            }
+        }
     }
 
     if let Credentials::Vless { flow, .. } = &node.credentials {

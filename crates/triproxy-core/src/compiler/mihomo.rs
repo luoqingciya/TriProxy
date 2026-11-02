@@ -292,6 +292,27 @@ fn proxy_entry(node: &Node) -> Result<Yaml, String> {
             // TUIC is TLS-only, same as Hysteria2.
             apply_tls(entry, node, "sni")
         }
+        Credentials::Socks5 { username, password } => {
+            let mut entry = entry;
+            if !username.is_empty() {
+                entry = entry
+                    .with("username", Yaml::str(username.clone()))
+                    .with("password", Yaml::str(password.clone()));
+            }
+            // `socks5` has no TLS of its own; leaving the fields out is the
+            // honest representation rather than emitting an empty tls block.
+            entry
+        }
+        Credentials::Http { username, password } => {
+            let mut entry = entry;
+            if !username.is_empty() {
+                entry = entry
+                    .with("username", Yaml::str(username.clone()))
+                    .with("password", Yaml::str(password.clone()));
+            }
+            // An `https://` proxy is the same outbound with TLS on top.
+            apply_tls(entry, node, "sni")
+        }
     };
 
     Ok(apply_transport(entry, node))
@@ -305,6 +326,8 @@ fn protocol_type(node: &Node) -> &'static str {
         Credentials::Trojan { .. } => "trojan",
         Credentials::Hysteria2 { .. } => "hysteria2",
         Credentials::Tuic { .. } => "tuic",
+        Credentials::Socks5 { .. } => "socks5",
+        Credentials::Http { .. } => "http",
     }
 }
 

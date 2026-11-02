@@ -360,6 +360,23 @@ fn outbound(node: &Node) -> Result<Value, String> {
                 map.insert("udp_relay_mode".to_string(), json!(mode));
             }
         }
+        Credentials::Socks5 { username, password } => {
+            map.insert("type".to_string(), json!("socks"));
+            if !username.is_empty() {
+                map.insert("username".to_string(), json!(username));
+                map.insert("password".to_string(), json!(password));
+            }
+            // A socks outbound with no credentials is version 5 without auth;
+            // sing-box infers that, so no explicit field is needed.
+            map.insert("version".to_string(), json!("5"));
+        }
+        Credentials::Http { username, password } => {
+            map.insert("type".to_string(), json!("http"));
+            if !username.is_empty() {
+                map.insert("username".to_string(), json!(username));
+                map.insert("password".to_string(), json!(password));
+            }
+        }
     }
 
     if node.tls.is_some() {

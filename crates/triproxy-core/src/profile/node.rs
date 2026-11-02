@@ -160,6 +160,22 @@ pub enum Credentials {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         obfs_password: Option<String>,
     },
+    /// Plain SOCKS5 outbound. The everyday way to chain through a corporate or
+    /// self-hosted proxy, and the one protocol every core speaks.
+    Socks5 {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    },
+    /// HTTP CONNECT proxy. `https` shares this variant and carries `tls` on the
+    /// node, because the difference is the transport, not the protocol.
+    Http {
+        #[serde(default)]
+        username: String,
+        #[serde(default)]
+        password: String,
+    },
 }
 
 fn default_vmess_security() -> String {
@@ -200,6 +216,10 @@ impl Credentials {
                 obfs.clone().unwrap_or_default(),
                 obfs_password.clone().unwrap_or_default()
             ),
+            Credentials::Socks5 { username, password } => {
+                format!("socks5:{username}:{password}")
+            }
+            Credentials::Http { username, password } => format!("http:{username}:{password}"),
         }
     }
 
@@ -211,6 +231,8 @@ impl Credentials {
             Credentials::Trojan { .. } => Protocol::Trojan,
             Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
             Credentials::Tuic { .. } => Protocol::Tuic,
+            Credentials::Socks5 { .. } => Protocol::Socks,
+            Credentials::Http { .. } => Protocol::Http,
         }
     }
 }
