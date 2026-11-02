@@ -61,7 +61,9 @@ jobs:
           - label: macos
             os: macos-latest
             cli: triproxy
-            bundles: dmg
+            # app stays in the bundle directory so the verification step can
+            # look inside it; dmg alone deletes it after packaging.
+            bundles: app,dmg
             arch: aarch64
 
     steps:
@@ -149,9 +151,19 @@ jobs:
             "./target/release/${{ matrix.cli }}" core install "$core" --data-dir "$stage"
           done
           mkdir -p src-tauri/resources/cores
-          cp "$stage"/bin/*.exe "$stage"/bin/*.dat src-tauri/resources/cores/ 2>/dev/null || true
-          cp "$stage"/bin/*.json src-tauri/resources/cores/ 2>/dev/null || true
+          # Copy everything: the binaries are triproxy.exe-style on Windows but
+          # plain `mihomo` / `sing-box` / `xray` elsewhere. Matching `*.exe`
+          # staged nothing on macOS and Linux, and the `|| true` that used to be
+          # here hid it — both platforms shipped a "full" bundle with no cores.
+          cp "$stage"/bin/* src-tauri/resources/cores/
           ls -l src-tauri/resources/cores/
+          # Assert the three binaries are really there before building.
+          for core in mihomo sing-box xray; do
+            if ! ls src-tauri/resources/cores/ | grep -qE "^${core}(\.exe)?$"; then
+              echo "::error::$core was not staged into the bundle"
+              exit 1
+            fi
+          done
 
       # The full bundle ships third-party binaries, so their licence texts have
       # to travel with them.
