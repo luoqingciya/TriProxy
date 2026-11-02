@@ -28,6 +28,7 @@ pub mod manager;
 
 pub use manager::{
     CoreManager, CoreReport, ManagerStatus, RecoveryReport, StartReport, SwitchReport, SwitchStep,
+    DEFAULT_API_PORT,
 };
 
 /// The three supported proxy cores.

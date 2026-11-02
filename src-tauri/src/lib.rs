@@ -22,8 +22,12 @@ pub mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use triproxy_core::{AppSettings, CoreManager, Layout, SystemProxyManager};
+use triproxy_core::{
+    AppSettings, CoreManager, Layout, ProfileStore, RefreshStatus, SubscriptionService,
+    SystemProxyManager,
+};
 
 /// Guards the exit path: cleanup is asynchronous, so the app has to be held open
 /// once, then allowed through on the second exit request.
@@ -44,10 +48,18 @@ pub fn run() {
         // Self-update. The plugin is what makes an installed copy able to move
         // to a newer release without the user downloading an installer again.
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Autostart. The OS owns the registration, so the toggle reads its state
+        // back from the OS rather than from our settings file.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(AppState {
             manager: manager.clone(),
         })
         .setup(move |app| {
+            use tauri::Manager;
+
             // Bundled cores do not sit beside the executable on every platform:
             // macOS keeps them in TriProxy.app/Contents/Resources/cores, and a
             // Linux .deb installs them under /usr/lib/triproxy/cores. The shell
@@ -84,6 +96,18 @@ pub fn run() {
             if let Err(error) = tray::install(app) {
                 tracing::error!(%error, "could not create the tray icon");
             }
+
+            // Subscriptions used to refresh only when the user asked. A profile
+            // that quietly ages out is worse than one that never updates, so the
+            // scheduler runs for as long as the app does — including while it
+            // sits in the tray, which is now most of the time.
+            let scheduler = app.state::<AppState>().manager.clone();
+            tauri::async_runtime::spawn(async move {
+                refresh_subscriptions_forever(scheduler).await;
+            });
+
+            // Start the core without being asked, if the user wants that.
+            maybe_auto_connect(app.handle());
             Ok(())
         })
         // Closing the window hides it; the proxy is supposed to keep running.
@@ -113,6 +137,10 @@ pub fn run() {
             commands::start_core,
             commands::stop_core,
             commands::switch_core,
+            commands::install_core,
+            commands::check_core_update,
+            commands::autostart_enabled,
+            commands::set_autostart,
             commands::select_node,
             commands::test_proxy_delay,
             commands::traffic,
@@ -143,8 +171,92 @@ pub fn run() {
         });
 }
 
-/// Stop every core and restore the system proxy before the process goes away.
+/// Refresh every subscription whose interval has elapsed.
 ///
+/// The tick is one minute because `refresh_due` decides per profile: a longer
+/// tick would make a one-hour subscription drift by however much the tick is.
+/// The first tick is consumed without doing work so startup stays quiet.
+async fn refresh_subscriptions_forever(manager: Arc<CoreManager>) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+
+        let store = ProfileStore::new(manager.layout());
+        let service = match SubscriptionService::new(&store) {
+            Ok(service) => service,
+            Err(error) => {
+                // A client that cannot be built will not build later either;
+                // keeping the loop alive would just log the same line forever.
+                tracing::warn!(%error, "subscription scheduler stopped");
+                return;
+            }
+        };
+
+        match service.refresh_due().await {
+            Ok(outcomes) if outcomes.is_empty() => {}
+            Ok(outcomes) => {
+                let failed = outcomes
+                    .iter()
+                    .filter(|outcome| matches!(outcome.status, RefreshStatus::Failed { .. }))
+                    .count();
+                tracing::info!(
+                    refreshed = outcomes.len(),
+                    failed,
+                    "subscriptions refreshed in the background"
+                );
+            }
+            // One unreachable provider must not stop the scheduler: the next
+            // tick retries it along with everything else that is due.
+            Err(error) => tracing::warn!(%error, "background subscription refresh failed"),
+        }
+    }
+}
+
+/// Start a core on launch when the user asked for it.
+///
+/// Deliberately routed through the same command the UI uses: the TUN privilege
+/// check, profile compilation and system-proxy handoff all live there, and an
+/// auto-connect path that skipped them would start a core that behaves
+/// differently from one the user started by hand.
+fn maybe_auto_connect<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    use tauri::Manager;
+
+    let settings = AppSettings::load(app.state::<AppState>().manager.layout());
+    if !settings.auto_connect {
+        return;
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let manager = app.state::<AppState>().manager.clone();
+
+        if manager.status().await.active_core.is_some() {
+            return;
+        }
+        if ProfileStore::new(manager.layout())
+            .active()
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            tracing::info!("auto-connect skipped: no active profile");
+            return;
+        }
+
+        match commands::start_core(app.state::<AppState>(), None).await {
+            Ok(status) => tracing::info!(
+                core = status.active_core.map(|kind| kind.as_str()).unwrap_or("-"),
+                "auto-connected on launch"
+            ),
+            Err(error) => tracing::warn!(%error, "auto-connect failed"),
+        }
+    });
+}
+
+/// Stop every core and restore the system proxy before the process goes away.
 /// Without this, quitting from the tray would leave a headless core holding the
 /// proxy port with the machine still pointed at it — the user would believe the
 /// proxy is off while their traffic kept flowing through it.

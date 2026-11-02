@@ -39,6 +39,14 @@ export interface CoreReport {
   last_error: string | null
 }
 
+/** Result of comparing an installed core with the latest upstream release. */
+export interface CoreUpdate {
+  core: CoreKind
+  installed: string | null
+  latest: string | null
+  status: 'not-installed' | 'up-to-date' | 'update-available'
+}
+
 export interface ManagerStatus {
   active_core: CoreKind | null
   exclusive: boolean
@@ -167,8 +175,12 @@ export interface Settings {
   /** Routing strategy baked into the generated config. */
   rule_mode: RuleMode
   log_level: string
+  /** Local inbound port for the mixed listener. */
+  listen_port: number
   /** Hide to the tray instead of quitting when the window is closed. */
   close_to_tray: boolean
+  /** Start a core as soon as the app launches. */
+  auto_connect: boolean
 }
 
 export const CORE_LABEL: Record<CoreKind, string> = {

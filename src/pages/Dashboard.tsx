@@ -84,6 +84,8 @@ export function Dashboard() {
   const busy = useApp((state) => state.busy)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
+  const installCore = useApp((state) => state.installCore)
+  const updateCore = useApp((state) => state.updateCore)
   const stop = useApp((state) => state.stop)
   const [showWhy, setShowWhy] = useState(false)
 
@@ -237,7 +239,7 @@ export function Dashboard() {
           cores is first-class information, and switching is one click away. */}
       <Card className="mt-4">
         <SectionTitle title="核心" hint="同一时刻只有一个核心运行" />
-        <div className="grid grid-cols-[92px_110px_1fr_1fr_72px] gap-3 border-b border-line pb-2 text-[11px] font-semibold tracking-wide text-faint uppercase">
+        <div className="grid grid-cols-[92px_110px_1fr_1fr_96px] gap-3 border-b border-line pb-2 text-[11px] font-semibold tracking-wide text-faint uppercase">
           <div>核心</div>
           <div>状态</div>
           <div>版本</div>
@@ -249,7 +251,7 @@ export function Dashboard() {
           return (
             <div
               key={core.kind}
-              className="grid grid-cols-[92px_110px_1fr_1fr_72px] items-center gap-3 border-b border-line py-2.5 text-[13px] last:border-b-0"
+              className="grid grid-cols-[92px_110px_1fr_1fr_96px] items-center gap-3 border-b border-line py-2.5 text-[13px] last:border-b-0"
             >
               <div className={running ? 'font-medium text-fg' : 'text-muted'}>
                 {CORE_LABEL[core.kind]}
@@ -259,22 +261,45 @@ export function Dashboard() {
                 <span className="text-[12.5px] text-muted">{STATE_LABEL[core.state]}</span>
               </div>
               <div className="text-muted tabular">
-                {core.binary_version ? `v${core.binary_version}` : '未安装'}
+                {core.binary_version ? (
+                  `v${core.binary_version}`
+                ) : (
+                  // The lite installer ships no cores, so this cell is the whole
+                  // first-run experience for anyone who picked it.
+                  <button
+                    disabled={busy}
+                    onClick={() => void installCore(core.kind)}
+                    className="text-[12px] text-accent hover:underline disabled:opacity-40"
+                  >
+                    {busy ? '下载中…' : '下载核心'}
+                  </button>
+                )}
               </div>
               <div className="text-muted tabular">
                 {running ? `127.0.0.1:${core.listen_port ?? '—'}` : '—'}
               </div>
-              <div className="text-right">
+              <div className="flex justify-end gap-2 text-[12px]">
                 {running ? (
-                  <span className="text-[12px] text-accent">当前</span>
+                  <span className="text-accent">当前</span>
                 ) : (
-                  <button
-                    disabled={busy || !core.binary}
-                    onClick={() => switchTo(core.kind)}
-                    className="text-[12px] text-muted hover:text-accent disabled:opacity-40"
-                  >
-                    切换
-                  </button>
+                  <>
+                    <button
+                      disabled={busy || !core.binary}
+                      onClick={() => void switchTo(core.kind)}
+                      className="text-muted hover:text-accent disabled:opacity-40"
+                    >
+                      切换
+                    </button>
+                    {core.binary ? (
+                      <button
+                        disabled={busy}
+                        onClick={() => void updateCore(core.kind)}
+                        className="text-faint hover:text-accent disabled:opacity-40"
+                      >
+                        更新
+                      </button>
+                    ) : null}
+                  </>
                 )}
               </div>
             </div>

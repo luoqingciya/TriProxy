@@ -110,7 +110,7 @@ pub struct BinaryStatus {
 }
 
 /// Outcome of comparing the installed version with the latest release.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpdateCheck {
     pub core: CoreKind,
     pub installed: Option<String>,
@@ -118,7 +118,8 @@ pub struct UpdateCheck {
     pub status: UpdateStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum UpdateStatus {
     NotInstalled,
     UpToDate,

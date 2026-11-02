@@ -370,6 +370,9 @@ impl CoreManager {
         kind: CoreKind,
         config: PathBuf,
     ) -> Result<StartReport> {
+        // Re-read rather than trust the value cached at construction: the user
+        // may have changed the port in settings since the manager was built.
+        core.set_listen_port(crate::settings::AppSettings::load(&self.layout).listen_port);
         core.check_config(&config).await?;
         core.start(&config).await?;
 
@@ -692,11 +695,17 @@ fn build_core(
     layout: &Layout,
 ) -> Arc<dyn ProxyCore> {
     let log_file = Some(layout.core_log_file(kind.as_str()));
-    match kind {
+    let core: Arc<dyn ProxyCore> = match kind {
         CoreKind::Mihomo => adapters::mihomo::new(path, logs, log_file),
         CoreKind::SingBox => adapters::singbox::new(path, logs, log_file),
         CoreKind::Xray => adapters::xray::new(path, logs, log_file),
-    }
+    };
+    // The port the supervisor probes for readiness has to be the port the config
+    // binds. Reading it here means a caller cannot compile for one port and wait
+    // on another, which is exactly what a hard-coded default allowed.
+    let port = crate::settings::AppSettings::load(layout).listen_port;
+    core.set_listen_port(port);
+    core
 }
 
 #[cfg(test)]
