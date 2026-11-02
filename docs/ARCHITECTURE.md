@@ -928,11 +928,49 @@ lite 与 full 的应用二进制完全相同，差别只是 `full` 的安装包�
 每次启动都检查更新会多一次网络往返，并在用户做别的事情时打断他。
 设置页一个「检查更新」按钮就是全部功能。
 
-## 20. 尚未实现（明确的边界）
+## 20. Clash YAML 导入
+
+### 20.1 只导入 proxies 段
+
+只取 `proxies:` 列表。**proxy-groups 与 rules 一律忽略**——
+本程序自己生成单一的 `PROXY` 组和自己的分流规则，导入 Clash 的 rules 等于重新实现它的规则引擎，
+那是另一个产品。
+
+### 20.2 不支持的条目要报出来，不能悄悄丢掉
+
+一份 60 节点的配置导入后只剩 48 个，用户必须知道另外 12 个去哪了：
+
+```text
+$ triproxy profile check clash.yaml
+clash-test: 3 nodes, 0 errors, 1 warnings
+
+  warning clash.unsupported_proxy  `Hy2 Unsupported`: proxy type `hysteria2` is not supported
+```
+
+同样的原则适用于**未知传输**（`network: quic`）和**未知 vless flow**：
+猜一个值会改变流量如何封装，比直接拒绝更糟。
+
+### 20.3 两个容易搞错的默认值
+
+- **trojan 没写 `tls` 也按 TLS 处理**。Clash 配置里常省略这个键，但 trojan 明文是没有意义的
+- **ss 的 `plugin` 会重建回 SIP002 字符串**（`obfs-local;obfs=http;obfs-host=x`）。
+  统一成一种表示，三个编译器就不用各写一套分支
+
+### 20.4 验证
+
+导入一份含 reality / ws+tls / ss / hysteria2 的配置后，三个核心全部接受编译结果：
+
+```text
+mihomo    ok
+sing-box  ok
+xray      ok
+```
+
+## 21. 尚未实现（明确的边界）
 
 这一节按「缺了会影响什么」排序，而不是按规划书章节。**状态会过时，改动功能时请同步更新。**
 
-### 19.1 影响日常使用
+### 21.1 影响日常使用
 
 **切换节点没有界面。** 生成的配置里 `PROXY` 组是 `type: select`，成员是全部节点，
 Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY`），**能力本来就有**——
@@ -944,24 +982,24 @@ Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY
 
 **订阅没有后台定时刷新。** 自动刷新只在显式执行 `triproxy profile refresh` 时发生。
 
-### 19.2 影响完整性
+### 21.2 影响完整性
 
 | 缺口 | 说明 |
 |---|---|
 | 协议 | 只有 VLESS / VMess / Trojan / Shadowsocks。Hysteria2、TUIC、SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
-| 订阅格式 | 支持 URI 列表与 base64；**不支持 Clash YAML 配置导入** |
+| 订阅格式 | 支持 URI 列表、base64 与 Clash YAML 的 proxies 段；**不导入 proxy-groups 与 rules** |
 | 流量历史 | 只有瞬时采样，没有曲线图；数据不落盘 |
 | 节点管理 | 没有收藏、分组、手动排序 |
-| 应用更新 | 核心能更新（`core update`），应用自身不能 |
+| 应用更新 | 核心与应用都能更新，但应用更新只在包含该功能的版本之后生效 |
 | 多语言 | 界面只有中文 |
 
-### 19.3 只在部分平台成立
+### 21.3 只在部分平台成立
 
 - **系统代理**：Windows 实测过；macOS（`networksetup`）与 Linux（`gsettings`）代码写好但未真机验证
 - **连接 / 流量 / 真实延迟**：依赖控制器 API，Xray 没有，界面上会说明
 - **macOS / Linux 安装包**：v0.2.2 起提供，构建与产物内容经 CI 校验，但没有在真机上装过
 
-### 19.4 明确不做
+### 21.4 明确不做
 
 - **规则分流做成 Clash 那样的规则编辑器**：与「智能选核」的定位冲突，且维护成本远超收益
 - **内置节点分享 / 订阅分发**：与软件定位无关

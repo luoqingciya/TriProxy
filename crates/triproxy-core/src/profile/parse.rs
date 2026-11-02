@@ -66,6 +66,19 @@ pub fn parse_payload(text: &str, name: &str, source: &str) -> ParsedProfile {
         };
     }
 
+    // A Clash configuration is YAML with a `proxies:` list. Checked before the
+    // URI/base64 path because YAML is not line-oriented in the same way and would
+    // otherwise produce one "unsupported scheme" error per line.
+    if super::clash::looks_like_clash(trimmed) {
+        let (nodes, mut diagnostics) = super::clash::parse(trimmed);
+        let profile = Profile::new(name, nodes).with_metadata(source, InputFormat::ClashYaml);
+        diagnostics.extend(validate_profile(&profile));
+        return ParsedProfile {
+            profile,
+            diagnostics,
+        };
+    }
+
     let (body, format) = unwrap_payload(trimmed);
 
     let mut diagnostics = Vec::new();
@@ -147,6 +160,39 @@ mod tests {
     const TROJAN: &str = "trojan://pw@a.example.com:443#A";
     const VLESS: &str =
         "vless://11111111-2222-3333-4444-555555555555@b.example.com:443?security=tls#B";
+
+    #[test]
+    fn a_clash_config_is_routed_to_the_yaml_importer() {
+        let text = "\
+port: 7890
+proxies:
+  - name: A
+    type: trojan
+    server: a.example.com
+    port: 443
+    password: pw
+  - name: B
+    type: tuic
+    server: b.example.com
+    port: 443
+    uuid: x
+";
+        let parsed = parse_payload(text, "clash", "file.yaml");
+
+        // Routed as a whole, not line by line: a YAML file would otherwise
+        // produce one "unsupported scheme" error per line.
+        assert_eq!(parsed.profile.metadata.format, InputFormat::ClashYaml);
+        assert_eq!(parsed.profile.nodes.len(), 1);
+        assert_eq!(parsed.profile.nodes[0].name, "A");
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "clash.unsupported_proxy"),
+            "{:?}",
+            parsed.diagnostics
+        );
+    }
 
     #[test]
     fn plain_uri_list_is_parsed() {
