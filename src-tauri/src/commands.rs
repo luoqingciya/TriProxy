@@ -111,7 +111,7 @@ pub async fn import_profile(
     // creating a second entry with the same title.
     let existing = store.find_by_name(&name).map_err(err)?;
     store
-        .save(
+        .save_activating_if_first(
             &parsed.profile,
             existing.as_ref().map(|entry| entry.id.as_str()),
         )

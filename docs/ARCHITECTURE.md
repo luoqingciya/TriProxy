@@ -876,9 +876,6 @@ error: proxy delay needs a running Mihomo or sing-box with its controller API
 1  Singapore gRPC  sg.example.com:443  -  delay probe for `Singapore gRPC` failed
                                           (HTTP 503): {"message":"An error occurred in the delay test"}
 ```
-
-## 19. 尚未实现（明确的边界）
-
 ### 18.4 实测
 
 ```text
@@ -897,16 +894,39 @@ API 链路本身已被验证——三个端点都返回了可解析的数据，�
 
 ## 19. 尚未实现（明确的边界）
 
-刻意不做，避免半成品：
+这一节按「缺了会影响什么」排序，而不是按规划书章节。**状态会过时，改动功能时请同步更新。**
 
-- 系统代理、TUN、DNS、路由（Phase 6–8）
-- Clash YAML 导入、订阅下载与本地存储（Phase 3 剩余 / Phase 9）
-- Hysteria2 / TUIC / SOCKS / HTTP 节点（Phase 10 扩展）
-- 规则分流：三个编译器目前都只生成 `MATCH,PROXY` / `final: PROXY` 单条规则
-- 延迟测试与 Smart Core 评分（Phase 4）
-- 控制器 API 健康检查（当前用 TCP 探活）
-- GUI（Phase 5）
+### 19.1 影响日常使用
 
-因此 `triproxy` 目前**还不是一个可用的翻墙客户端**：它能解析订阅、把节点编译成三个核心都认可的配置、
-并管理核心生命周期，但还没有系统代理/TUN 把流量真正导进去，也没有规则分流与节点选择界面。
-这是规划书 38 章规定的开发顺序。
+**切换节点没有界面。** 生成的配置里 `PROXY` 组是 `type: select`，成员是全部节点，
+Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY`），**能力本来就有**——
+只是我们没做这个调用，所以用户只能改配置再重启。Xray 没有控制器 API，切换确实需要重启。
+这是「节点页只能看不能选」的根因，也是目前性价比最高的一个缺口。
+
+**自定义分流规则。** 只有 `global` / `split` 两个预设，不能加自己的域名/IP 规则，
+也不能管理 rule-set 订阅。
+
+**订阅没有后台定时刷新。** 自动刷新只在显式执行 `triproxy profile refresh` 时发生。
+
+### 19.2 影响完整性
+
+| 缺口 | 说明 |
+|---|---|
+| 协议 | 只有 VLESS / VMess / Trojan / Shadowsocks。Hysteria2、TUIC、SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
+| 订阅格式 | 支持 URI 列表与 base64；**不支持 Clash YAML 配置导入** |
+| 流量历史 | 只有瞬时采样，没有曲线图；数据不落盘 |
+| 节点管理 | 没有收藏、分组、手动排序 |
+| 应用更新 | 核心能更新（`core update`），应用自身不能 |
+| 多语言 | 界面只有中文 |
+
+### 19.3 只在部分平台成立
+
+- **系统代理**：Windows 实测过；macOS（`networksetup`）与 Linux（`gsettings`）代码写好但未真机验证
+- **连接 / 流量 / 真实延迟**：依赖控制器 API，Xray 没有，界面上会说明
+- **macOS / Linux 安装包**：v0.2.2 起提供，构建与产物内容经 CI 校验，但没有在真机上装过
+
+### 19.4 明确不做
+
+- **规则分流做成 Clash 那样的规则编辑器**：与「智能选核」的定位冲突，且维护成本远超收益
+- **内置节点分享 / 订阅分发**：与软件定位无关
+- **TUN 之外的流量劫持手段**（如 WFP 驱动）：TUN 已经够用，驱动层风险不值得
