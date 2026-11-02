@@ -13,7 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Activity, Check, Search } from 'lucide-react'
+import { Activity, Check, Search, Zap } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
@@ -46,6 +46,8 @@ export function Proxies() {
 
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
   const selectedNodeId = activeProfile?.selected_node ?? null
+  // No stored pick means the compiled config defaults to the automatic group.
+  const autoSelected = selectedNodeId === null && nodes.length > 0
 
   const protocols = useMemo(() => {
     const seen = new Set<Protocol>()
@@ -146,6 +148,34 @@ export function Proxies() {
               <div>传输</div>
               <div className="text-right">延迟</div>
             </div>
+            {/*
+              The automatic group sits with the nodes because that is what it is:
+              one more thing to pick. "Nothing selected" now means this row, not
+              "whichever node happens to be first".
+            */}
+            <button
+              onClick={() => void selectNode(null)}
+              title="按延迟自动挑选，每 5 分钟重新测速"
+              className={
+                autoSelected
+                  ? 'grid w-full cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line bg-accent-soft px-5 py-3 text-left text-[13px]'
+                  : 'grid w-full cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line px-5 py-3 text-left text-[13px] hover:bg-panel-hover'
+              }
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <span className={autoSelected ? 'text-accent' : 'text-transparent'}>
+                  <Check size={14} strokeWidth={2.6} />
+                </span>
+                <Zap size={14} strokeWidth={2.2} className="shrink-0 text-accent" />
+                <span className="truncate text-fg">自动选择</span>
+              </div>
+              <div>
+                <Badge>自动</Badge>
+              </div>
+              <div className="truncate text-muted">延迟最低的节点</div>
+              <div className="text-muted">—</div>
+              <div className="text-right text-muted tabular">—</div>
+            </button>
             {visible.map((node) => {
               const isSelected = node.id === selectedNodeId
               return (

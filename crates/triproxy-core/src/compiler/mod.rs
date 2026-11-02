@@ -46,6 +46,22 @@ use crate::profile::Profile;
 /// Name of the selector group every compiler creates, when the core has one.
 pub const PROXY_GROUP: &str = "PROXY";
 
+/// Name of the automatic group nested inside [`PROXY_GROUP`].
+///
+/// One vocabulary across the two cores that have groups, so the controller call
+/// that switches to it is the same string everywhere.
+pub const AUTO_GROUP: &str = "AUTO";
+
+/// How long the automatic group waits between latency probes.
+pub const AUTO_TEST_INTERVAL_SECS: u64 = 300;
+
+/// Probe URL for the automatic group.
+///
+/// Same endpoint the latency measurement uses, and the one every Clash-family
+/// client tests against: a 204 with no body, so it measures the round trip and
+/// nothing else.
+pub const AUTO_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+
 /// Knobs that are about the local listener, not about the profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompileOptions {
@@ -65,6 +81,13 @@ pub struct CompileOptions {
     /// every core starts on it; a running core with a controller API is switched
     /// at runtime instead of being restarted.
     pub selected_node: Option<String>,
+    /// The same choice resolved to a name, filled in by [`compile`].
+    ///
+    /// Compilers work in node names — that is what goes into a config — while
+    /// the persisted choice is an id. Resolving it once, in `compile`, keeps
+    /// every compiler from repeating the lookup.
+    #[serde(skip)]
+    pub selected_name: Option<String>,
 }
 
 /// Routing strategy.
@@ -133,6 +156,7 @@ impl Default for CompileOptions {
             dns: DnsMode::Off,
             rules: RuleMode::Global,
             selected_node: None,
+            selected_name: None,
         }
     }
 }
@@ -255,12 +279,21 @@ pub fn compile(
     // (or first group member) as the default, so this is the one place that
     // needs to know about the choice.
     let ordered;
+    let mut resolved = options.clone();
     let profile = match options.selected_node.as_deref() {
         Some(id) if profile.nodes.iter().any(|node| node.id == id) => {
+            resolved.selected_name = profile
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .map(|node| node.name.clone());
             ordered = with_selected_first(profile, id);
             &ordered
         }
-        _ => profile,
+        _ => {
+            resolved.selected_name = None;
+            profile
+        }
     };
 
     let capability = CoreCapability::for_core(kind);
@@ -274,7 +307,7 @@ pub fn compile(
         return Err(CompileError::Incompatible { core: kind, unmet });
     }
 
-    let compiled = compiler_for(kind).compile(profile, options)?;
+    let compiled = compiler_for(kind).compile(profile, &resolved)?;
     if compiled.included.is_empty() {
         return Err(CompileError::NothingCompilable {
             core: kind,
@@ -395,6 +428,48 @@ mod tests {
             b_at < a_at,
             "selected node should come first:\n{}",
             xray.text
+        );
+    }
+
+    /// A pick has to beat the automatic group, not merely sit next to it.
+    ///
+    /// Both cores default a `select` group to its first member, and AUTO is a
+    /// member too — so the only thing that decides this is whether the picked
+    /// node was inserted before AUTO.
+    #[test]
+    fn an_explicit_pick_is_the_selector_default() {
+        let a = node(Protocol::Trojan, "a.example.com");
+        let b = node(Protocol::Trojan, "b.example.com");
+        let profile = Profile::new("p", vec![a.clone(), b.clone()]);
+        let options = CompileOptions {
+            selected_node: Some(b.id.clone()),
+            ..Default::default()
+        };
+
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&singbox.text).unwrap();
+        let selector = document["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == PROXY_GROUP)
+            .expect("selector outbound");
+        assert_eq!(selector["default"], b.name);
+        assert_eq!(selector["outbounds"][0], b.name);
+        assert_eq!(selector["outbounds"][1], AUTO_GROUP);
+
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        let proxy_at = mihomo
+            .text
+            .find(&format!("\"name\": \"{PROXY_GROUP}\""))
+            .unwrap();
+        let group = &mihomo.text[proxy_at..];
+        let picked_at = group.find(&b.name).unwrap();
+        let auto_at = group.find(AUTO_GROUP).unwrap();
+        assert!(
+            picked_at < auto_at,
+            "the pick must precede AUTO inside {PROXY_GROUP}:\n{}",
+            mihomo.text
         );
     }
 

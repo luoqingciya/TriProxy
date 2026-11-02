@@ -175,6 +175,7 @@ impl AppSettings {
             dns: self.dns_mode,
             rules: self.rule_mode,
             selected_node: None,
+            selected_name: None,
         }
     }
 }

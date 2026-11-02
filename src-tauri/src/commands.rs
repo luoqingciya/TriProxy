@@ -254,7 +254,7 @@ fn compile_active(
 ) -> Result<(CoreKind, CompiledConfig), String> {
     let layout = state.manager.layout();
     let store = ProfileStore::new(layout);
-    let (_, profile) = store
+    let (stored, profile) = store
         .active()
         .map_err(err)?
         .ok_or_else(|| "还没有活动配置，请先在「配置」页导入并设为活动".to_string())?;
@@ -266,7 +266,11 @@ fn compile_active(
     });
 
     let selection = selector.select(&profile, settings.network()).map_err(err)?;
-    let options = settings.compile_options(settings.listen_port, API_PORT);
+    let mut options = settings.compile_options(settings.listen_port, API_PORT);
+    // The node the user picked has to survive a restart, and the only way it does
+    // is by going into the config: the runtime switch through the controller is
+    // gone the moment the core stops.
+    options.selected_node = stored.selected_node.clone();
     let compiled = compile(selection.selected, &profile, &options).map_err(err)?;
     Ok((selection.selected, compiled))
 }

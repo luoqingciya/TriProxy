@@ -21,7 +21,7 @@ use crate::profile::Profile;
 
 use super::{
     CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, RuleMode, SkippedNode,
-    PROXY_GROUP,
+    AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL, PROXY_GROUP,
 };
 
 pub struct SingBoxCompiler;
@@ -57,14 +57,32 @@ impl ConfigCompiler for SingBoxCompiler {
             }
         }
 
-        // The selector is what gives sing-box a user-visible node picker, the
-        // equivalent of a Clash `select` group.
-        let mut members: Vec<Value> = included.iter().map(|name| json!(name)).collect();
+        // The automatic group, and the selector that offers it next to the
+        // individual nodes. `urltest` probes every member and picks the fastest;
+        // the selector's default decides what runs when the user has not chosen.
+        outbounds.push(json!({
+            "type": "urltest",
+            "tag": AUTO_GROUP,
+            "outbounds": included.clone(),
+            "url": AUTO_TEST_URL,
+            "interval": format!("{AUTO_TEST_INTERVAL_SECS}s"),
+            "tolerance": 50,
+        }));
+
+        let mut members: Vec<Value> = Vec::new();
+        let mut default = AUTO_GROUP.to_string();
+        // An explicit pick outranks the automatic group, same rule as Mihomo.
+        if let Some(name) = options
+            .selected_name
+            .as_ref()
+            .filter(|name| included.contains(name))
+        {
+            members.push(json!(name));
+            default = name.clone();
+        }
+        members.push(json!(AUTO_GROUP));
+        members.extend(included.iter().map(|name| json!(name)));
         members.push(json!("direct"));
-        let default = included
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "direct".to_string());
 
         outbounds.push(json!({
             "type": "selector",
@@ -465,10 +483,19 @@ mod tests {
         );
         let document = compiled(node);
 
-        let selector = &document["outbounds"][1];
+        // outbounds: [node, urltest(AUTO), selector(PROXY), direct]
+        let auto = &document["outbounds"][1];
+        assert_eq!(auto["type"], "urltest");
+        assert_eq!(auto["tag"], "AUTO");
+        assert_eq!(auto["outbounds"][0], "Tokyo 01");
+
+        let selector = &document["outbounds"][2];
         assert_eq!(selector["type"], "selector");
         assert_eq!(selector["tag"], "PROXY");
-        assert_eq!(selector["default"], "Tokyo 01");
+        // No explicit pick: the automatic group is the default.
+        assert_eq!(selector["default"], "AUTO");
+        assert_eq!(selector["outbounds"][0], "AUTO");
+        assert_eq!(selector["outbounds"][1], "Tokyo 01");
         assert_eq!(document["route"]["final"], "PROXY");
     }
 
