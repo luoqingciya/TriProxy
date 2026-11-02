@@ -60,14 +60,72 @@ impl LogLevel {
     }
 }
 
+/// Remove ANSI escape sequences from a line of core output.
+///
+/// All three cores force colour even when their output is a pipe, so every line
+/// arrives wrapped in SGR codes (`ESC[36mINFO ESC[0m[0000] ...`). Left alone they
+/// render as literal `[36m` garbage in the log panel and — worse — they sit in
+/// the middle of the level word, which is what made level detection miss it.
+pub fn strip_ansi(text: &str) -> String {
+    if !text.contains('\u{1b}') {
+        return text.trim_end_matches('\r').to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            if ch != '\r' {
+                out.push(ch);
+            }
+            continue;
+        }
+        match chars.peek().copied() {
+            // CSI: ESC '[' <params> <final byte in @..=~>
+            Some('[') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ']' ... terminated by BEL or ESC '\'
+            Some(']') => {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Any other two-byte escape is dropped as a pair.
+            Some(_) => {
+                chars.next();
+            }
+            None => {}
+        }
+    }
+    out
+}
+
 /// Heuristic level detection for core output.
 ///
-/// The three cores do not share a log format, and stderr is used for both
-/// fatal errors and ordinary warnings, so level inference is best-effort. It is
-/// only used for filtering in the UI; it never affects control flow.
-pub fn infer_level(stream: LogStream, text: &str) -> LogLevel {
+/// The three cores do not share a log format and all of them write ordinary
+/// output to stderr, so the stream carries no severity information: an INFO
+/// line from sing-box and a fatal bind error both arrive on stderr. Detection
+/// therefore reads the level word the core declares, then falls back to
+/// keywords in the message. It is only used for filtering in the UI; it never
+/// affects control flow.
+pub fn infer_level(_stream: LogStream, text: &str) -> LogLevel {
+    if let Some(level) = declared_level(text) {
+        return level;
+    }
     let lowered = text.to_ascii_lowercase();
-    if lowered.contains("fatal") || lowered.contains("panic") || lowered.contains("level=error") {
+    if lowered.contains("fatal") || lowered.contains("panic") {
         return LogLevel::Error;
     }
     if lowered.contains("error") || lowered.contains("failed") {
@@ -79,10 +137,42 @@ pub fn infer_level(stream: LogStream, text: &str) -> LogLevel {
     if lowered.contains("debug") || lowered.contains("trace") {
         return LogLevel::Debug;
     }
-    match stream {
-        LogStream::Stderr => LogLevel::Warn,
-        _ => LogLevel::Info,
-    }
+    LogLevel::Info
+}
+
+/// The level word declared by the core itself, if any.
+///
+/// One token scan covers all three formats because each puts a bare level word
+/// on the line: sing-box/logrus `INFO[0000]`, mihomo `time="..." level=info`,
+/// xray `2026/11/02 13:43:34 [Info]`. The first match wins, which matters for
+/// mihomo: the declared level precedes the message, so a message that happens to
+/// contain the word "error" cannot override `level=info`.
+fn declared_level(text: &str) -> Option<LogLevel> {
+    text.split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(level_word)
+}
+
+fn level_word(token: &str) -> Option<LogLevel> {
+    const TABLE: [(&str, LogLevel); 14] = [
+        ("info", LogLevel::Info),
+        ("notice", LogLevel::Info),
+        ("warn", LogLevel::Warn),
+        ("warning", LogLevel::Warn),
+        ("error", LogLevel::Error),
+        ("err", LogLevel::Error),
+        ("fatal", LogLevel::Error),
+        ("panic", LogLevel::Error),
+        ("critical", LogLevel::Error),
+        ("severe", LogLevel::Error),
+        ("debug", LogLevel::Debug),
+        ("trace", LogLevel::Debug),
+        ("verbose", LogLevel::Debug),
+        ("dbg", LogLevel::Debug),
+    ];
+    TABLE
+        .iter()
+        .find(|(word, _)| token.eq_ignore_ascii_case(word))
+        .map(|(_, level)| *level)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +339,61 @@ mod tests {
         assert_eq!(
             infer_level(LogStream::Stdout, "inbound started"),
             LogLevel::Info
+        );
+    }
+
+    /// sing-box writes *everything* to stderr, including INFO, so the stream
+    /// must not turn a normal connection line into a warning.
+    #[test]
+    fn singbox_info_on_stderr_is_not_a_warning() {
+        let line = "+0800 2026-11-02 13:43:34 INFO[0000] inbound connection from 127.0.0.1:60270";
+        assert_eq!(infer_level(LogStream::Stderr, line), LogLevel::Info);
+    }
+
+    #[test]
+    fn declared_level_wins_over_message_content() {
+        // mihomo puts the level first; the message may contain anything.
+        let line = r#"time="2026-11-02T13:43:34Z" level=info msg="[TCP] connection error: EOF""#;
+        assert_eq!(infer_level(LogStream::Stderr, line), LogLevel::Info);
+    }
+
+    #[test]
+    fn xray_bracket_level_is_read() {
+        let line = "2026/11/02 13:43:34 [Warning] failed to read geosite.dat";
+        assert_eq!(infer_level(LogStream::Stderr, line), LogLevel::Warn);
+    }
+
+    #[test]
+    fn stderr_without_markers_is_info() {
+        assert_eq!(
+            infer_level(
+                LogStream::Stderr,
+                "inbound mixed[mixed-in] started at 127.0.0.1:7890"
+            ),
+            LogLevel::Info
+        );
+    }
+
+    #[test]
+    fn ansi_sequences_are_stripped() {
+        let raw = "\u{1b}[36mINFO\u{1b}[0m[0000] inbound connection from 127.0.0.1:60270\r";
+        assert_eq!(
+            strip_ansi(raw),
+            "INFO[0000] inbound connection from 127.0.0.1:60270"
+        );
+        // A stripped line must still classify correctly.
+        assert_eq!(
+            infer_level(LogStream::Stderr, &strip_ansi(raw)),
+            LogLevel::Info
+        );
+    }
+
+    #[test]
+    fn strip_ansi_leaves_plain_text_alone() {
+        assert_eq!(strip_ansi("plain line"), "plain line");
+        assert_eq!(
+            strip_ansi("256-color \u{1b}[38;5;189mtext\u{1b}[0m"),
+            "256-color text"
         );
     }
 
