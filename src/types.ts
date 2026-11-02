@@ -187,6 +187,8 @@ export interface Settings {
   auto_connect: boolean
   /** Semicolon-separated bypass list; null keeps the built-in one. */
   proxy_bypass: string | null
+  /** User-written routing rules, one per line; null means none. */
+  custom_rules: string | null
 }
 
 export const CORE_LABEL: Record<CoreKind, string> = {

@@ -26,8 +26,8 @@ use crate::profile::node::{Credentials, Node, Transport, VlessFlow};
 use crate::profile::Profile;
 
 use super::{
-    common_skip_reason, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode,
-    RuleMode, SkippedNode,
+    common_skip_reason, CompileError, CompileOptions, CompiledConfig, ConfigCompiler, CustomRule,
+    DnsMode, RuleKind, RuleMode, RuleTarget, SkippedNode,
 };
 
 pub struct XrayCompiler;
@@ -101,8 +101,14 @@ impl ConfigCompiler for XrayCompiler {
         if dns_mode != DnsMode::Off {
             document["dns"] = dns_object();
         }
-        if options.rules != RuleMode::Global {
-            document["routing"] = routing_object();
+        // Custom rules need a routing section even in global mode: they are the
+        // only thing that can send a request somewhere other than the proxy.
+        if options.rules != RuleMode::Global || !options.custom_rules.is_empty() {
+            document["routing"] = routing_object(
+                included.first().map(String::as_str).unwrap_or("proxy"),
+                options.rules,
+                &options.custom_rules,
+            );
         }
 
         let mut text =
@@ -127,14 +133,61 @@ impl ConfigCompiler for XrayCompiler {
 /// Xray ships its own geosite/geoip data files, so the split lists need no
 /// download. Rules send Chinese domains and addresses to the  outbound;
 /// anything unmatched falls through to the first outbound, which is the proxy.
-fn routing_object() -> Value {
+///
+/// `proxy_tag` is the first outbound's tag — Xray has no group to name, so a
+/// custom rule pointing at the proxy has to name the node that currently holds
+/// that position.
+fn routing_object(proxy_tag: &str, mode: RuleMode, custom: &[CustomRule]) -> Value {
+    let mut rules: Vec<Value> = custom
+        .iter()
+        .map(|rule| custom_rule(rule, proxy_tag))
+        .collect();
+
+    if mode != RuleMode::Global {
+        rules.push(json!({ "type": "field", "outboundTag": "direct", "domain": ["geosite:cn"] }));
+        rules.push(
+            json!({ "type": "field", "outboundTag": "direct", "ip": ["geoip:cn", "geoip:private"] }),
+        );
+    }
+
     json!({
         "domainStrategy": "IPIfNonMatch",
-        "rules": [
-            { "type": "field", "outboundTag": "direct", "domain": ["geosite:cn"] },
-            { "type": "field", "outboundTag": "direct", "ip": ["geoip:cn", "geoip:private"] },
-        ],
+        "rules": rules,
     })
+}
+
+/// One custom rule as an Xray routing rule.
+///
+/// Xray encodes the match kind inside the value (`domain:`, `full:`, `keyword:`)
+/// rather than as a separate field.
+fn custom_rule(rule: &CustomRule, proxy_tag: &str) -> Value {
+    let tag = match rule.target {
+        RuleTarget::Proxy => proxy_tag,
+        RuleTarget::Direct => "direct",
+    };
+
+    match rule.kind {
+        RuleKind::Domain => json!({
+            "type": "field",
+            "outboundTag": tag,
+            "domain": [format!("full:{}", rule.value)],
+        }),
+        RuleKind::DomainSuffix => json!({
+            "type": "field",
+            "outboundTag": tag,
+            "domain": [format!("domain:{}", rule.value)],
+        }),
+        RuleKind::DomainKeyword => json!({
+            "type": "field",
+            "outboundTag": tag,
+            "domain": [format!("keyword:{}", rule.value)],
+        }),
+        RuleKind::IpCidr => json!({
+            "type": "field",
+            "outboundTag": tag,
+            "ip": [rule.value],
+        }),
+    }
 }
 
 /// DNS section.

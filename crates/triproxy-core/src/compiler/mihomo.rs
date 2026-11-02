@@ -19,8 +19,9 @@ use crate::profile::Profile;
 
 use super::yaml::{emit, Yaml};
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, DnsMode, RuleMode, SkippedNode,
-    AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL, PROXY_GROUP,
+    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleKind,
+    RuleMode, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL,
+    PROXY_GROUP,
 };
 
 pub struct MihomoCompiler;
@@ -122,7 +123,10 @@ impl ConfigCompiler for MihomoCompiler {
         document = document
             .with("proxies", Yaml::List(proxies))
             .with("proxy-groups", Yaml::list().push(auto).push(group))
-            .with("rules", Yaml::strings(rule_lines(options.rules)));
+            .with(
+                "rules",
+                Yaml::strings(rule_lines(options.rules, &options.custom_rules)),
+            );
 
         Ok(CompiledConfig {
             core: CoreKind::Mihomo,
@@ -170,18 +174,40 @@ fn dns_block(mode: DnsMode) -> Yaml {
 /// Split mode keeps the local networks and Chinese destinations off the proxy.
 /// GEOSITE/GEOIP are evaluated against Mihomo own geo database, so no rule-set
 /// download is needed at runtime.
-fn rule_lines(mode: RuleMode) -> Vec<String> {
+fn rule_lines(mode: RuleMode, custom: &[CustomRule]) -> Vec<String> {
+    // Custom rules go first: they are the user's explicit intent, and a preset
+    // that swallowed them would make the settings page look broken.
+    let mut lines: Vec<String> = custom.iter().map(custom_line).collect();
+
     match mode {
-        RuleMode::Global => vec![format!("MATCH,{PROXY_GROUP}")],
-        RuleMode::Split => vec![
+        RuleMode::Global => {}
+        RuleMode::Split => lines.extend([
             "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve".to_string(),
             "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve".to_string(),
             "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve".to_string(),
             "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".to_string(),
             "GEOSITE,cn,DIRECT".to_string(),
             "GEOIP,CN,DIRECT".to_string(),
-            format!("MATCH,{PROXY_GROUP}"),
-        ],
+        ]),
+    }
+
+    lines.push(format!("MATCH,{PROXY_GROUP}"));
+    lines
+}
+
+/// One custom rule in Mihomo's syntax.
+fn custom_line(rule: &CustomRule) -> String {
+    let target = match rule.target {
+        RuleTarget::Proxy => PROXY_GROUP,
+        RuleTarget::Direct => "DIRECT",
+    };
+    match rule.kind {
+        RuleKind::Domain => format!("DOMAIN,{},{target}", rule.value),
+        RuleKind::DomainSuffix => format!("DOMAIN-SUFFIX,{},{target}", rule.value),
+        RuleKind::DomainKeyword => format!("DOMAIN-KEYWORD,{},{target}", rule.value),
+        // no-resolve: an address rule should not trigger a DNS lookup for a
+        // domain-only connection, which would leak the name being resolved.
+        RuleKind::IpCidr => format!("IP-CIDR,{},{target},no-resolve", rule.value),
     }
 }
 

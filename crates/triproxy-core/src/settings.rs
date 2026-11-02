@@ -87,6 +87,13 @@ pub struct AppSettings {
     /// need to add their own ranges, and a hard-coded list cannot know them.
     #[serde(default)]
     pub proxy_bypass: Option<String>,
+    /// User-written routing rules, one per line, in Clash syntax.
+    ///
+    /// Stored as text rather than as parsed rules: the editor is a textarea, and
+    /// a round trip through a struct would reformat what the user typed every
+    /// time the page loads.
+    #[serde(default)]
+    pub custom_rules: Option<String>,
 }
 
 fn default_log_level() -> String {
@@ -118,6 +125,7 @@ impl Default for AppSettings {
             close_to_tray: default_close_to_tray(),
             auto_connect: false,
             proxy_bypass: None,
+            custom_rules: None,
         }
     }
 }
@@ -183,6 +191,26 @@ impl AppSettings {
             rules: self.rule_mode,
             selected_node: None,
             selected_name: None,
+            custom_rules: self.parsed_rules(),
+        }
+    }
+
+    /// The custom rules, parsed.
+    ///
+    /// A malformed line is dropped here rather than failing the compile: saving
+    /// is where the user is told about it (`save_settings` validates first), and
+    /// a config that refuses to compile because of a typo in an unrelated rule
+    /// would take the whole connection down.
+    fn parsed_rules(&self) -> Vec<crate::compiler::CustomRule> {
+        let Some(text) = self.custom_rules.as_deref() else {
+            return Vec::new();
+        };
+        match crate::compiler::parse_rules(text) {
+            Ok(rules) => rules,
+            Err(error) => {
+                tracing::warn!(%error, "ignoring unparsable custom rules");
+                Vec::new()
+            }
         }
     }
 }
@@ -229,6 +257,7 @@ mod tests {
             close_to_tray: false,
             auto_connect: true,
             proxy_bypass: Some("localhost;*.internal".to_string()),
+            custom_rules: Some("DOMAIN-SUFFIX,corp.internal,DIRECT".to_string()),
         };
         settings.save(&layout).unwrap();
 
