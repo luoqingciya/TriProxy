@@ -328,6 +328,24 @@ triproxy profile refresh --all       # 刷新全部
 - **刷新失败不毁数据**：只记录 `last_error`，已存的节点原样保留，退出码为 1。
 - **自动更新只在显式调用时发生**（`--interval` 记录到期时间，`refresh --all` 只刷到期的）。没有后台常驻定时器。
 
+## Clash YAML 导入
+
+```bash
+triproxy profile add ./config.yaml --name my-clash
+```
+
+支持 URI 列表、base64 订阅与 Clash 配置三种输入，自动识别。
+
+**只取 `proxies:` 段**，`proxy-groups` 与 `rules` 忽略——本程序自己生成单一的 `PROXY` 组和自己的分流规则。
+不支持的节点类型（hysteria2、tuic 等）**会逐条报出来**，不会悄悄丢掉：
+
+```text
+$ triproxy profile check config.yaml
+config: 3 nodes, 0 errors, 1 warnings
+
+  warning clash.unsupported_proxy  `Hy2`: proxy type `hysteria2` is not supported
+```
+
 ## DNS（Phase 8）
 
 ```bash

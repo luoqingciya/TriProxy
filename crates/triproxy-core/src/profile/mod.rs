@@ -26,6 +26,7 @@
 //! them exist (Phase 3), and inventing a rule model before its two mappings
 //! (Clash rules vs sing-box route rules) are known would guarantee a rewrite.
 
+pub mod clash;
 pub mod encoding;
 pub mod node;
 pub mod parse;
@@ -75,6 +76,8 @@ pub enum InputFormat {
     UriList,
     /// A base64 blob wrapping a URI list — what most providers hand out.
     Base64Subscription,
+    /// A Clash / Clash.Meta configuration file.
+    ClashYaml,
 }
 
 impl InputFormat {
@@ -82,6 +85,7 @@ impl InputFormat {
         match self {
             InputFormat::UriList => "uri-list",
             InputFormat::Base64Subscription => "base64-subscription",
+            InputFormat::ClashYaml => "clash-yaml",
         }
     }
 }

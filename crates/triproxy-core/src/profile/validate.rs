@@ -52,7 +52,7 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    fn new(severity: Severity, code: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(severity: Severity, code: &str, message: impl Into<String>) -> Self {
         Self {
             severity,
             node: None,
