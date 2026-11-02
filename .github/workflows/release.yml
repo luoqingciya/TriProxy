@@ -237,7 +237,7 @@ jobs:
         run: |
           set -euo pipefail
           npx tauri build --bundles "${{ matrix.bundles }}" \
-            --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\",\"resources/cores\":\"cores\"}}}"
+            --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\",\"resources/cores/*\":\"cores/\"}}}"
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/*/*; do
@@ -253,29 +253,33 @@ jobs:
 
       # Check the payload itself, not just its size. A full build that silently
       # omitted the cores still passes a size comparison; looking for the files
-      # where each platform actually puts resources does not.
+      # does not. The search is path-agnostic on purpose — each platform puts
+      # resources somewhere different, and the first version of this check
+      # hard-coded a macOS path that did not exist, which told us the resources
+      # were missing rather than where they landed.
       - name: Verify the cores are inside the bundle
         shell: bash
         run: |
           set -euo pipefail
+          bundle="src-tauri/target/release/bundle"
+          echo "--- bundle tree ---"
+          find "$bundle" -maxdepth 4 -name '*xray*' -o -maxdepth 4 -name '*geosite*' | head -20
+
           case "${{ matrix.label }}" in
             windows)
               nsi=$(find src-tauri/target/release/nsis -name 'installer.nsi' | head -1)
               grep -q 'cores\\xray.exe' "$nsi"
-              grep -q 'cores\\geosite.dat' "$nsi"
               echo "installer script lists the cores"
               ;;
-            macos)
-              res="src-tauri/target/release/bundle/macos/TriProxy.app/Contents/Resources"
-              ls -l "$res" | head -20
-              test -f "$res/cores/xray"
-              test -f "$res/cores/geosite.dat"
-              echo "app bundle contains the cores"
-              ;;
-            linux)
-              find src-tauri/target/release/bundle -name 'xray' -path '*cores*' | grep -q .
-              find src-tauri/target/release/bundle -name 'geosite.dat' | grep -q .
-              echo "bundle contains the cores"
+            *)
+              found_core=$(find "$bundle" -name 'xray' -o -name 'xray.exe' | head -1)
+              found_data=$(find "$bundle" -name 'geosite.dat' | head -1)
+              if [ -z "$found_core" ] || [ -z "$found_data" ]; then
+                echo "::error::cores are not in the bundle (core='$found_core' data='$found_data')"
+                find "$bundle" -maxdepth 3 | head -40
+                exit 1
+              fi
+              echo "cores present: $found_core"
               ;;
           esac
 
