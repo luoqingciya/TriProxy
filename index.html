@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TriProxy</title>
+    <!--
+      Painted before the stylesheet loads and before the app mounts. WebView2's
+      default surface is white, so on a dark window the first frame read as a
+      white flash. The colour matches --bg in styles.css; `backgroundColor` in
+      tauri.conf.json does the same for the native window behind the webview.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0a0a0c;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

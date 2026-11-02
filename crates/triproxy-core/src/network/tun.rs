@@ -156,7 +156,7 @@ mod windows {
     /// warning about an adapter that may not exist is annoying, but hiding a real
     /// leftover means traffic silently goes into a dead interface.
     fn interface_exists(name: &str) -> bool {
-        std::process::Command::new("netsh")
+        crate::process::hidden_command("netsh")
             .args(["interface", "show", "interface", &format!("name={name}")])
             .output()
             .map(|output| output.status.success())

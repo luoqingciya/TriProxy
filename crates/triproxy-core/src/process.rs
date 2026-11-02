@@ -651,7 +651,7 @@ async fn wait_pid_gone(pid: u32, timeout: Duration) {
 pub fn force_kill(pid: u32) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        let status = std::process::Command::new("taskkill")
+        let status = hidden_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -670,19 +670,57 @@ pub fn force_kill(pid: u32) -> std::io::Result<()> {
     }
 }
 
+/// A `Command` that cannot flash a console window on Windows.
+///
+/// The GUI is built as a windows-subsystem binary and owns no console, so every
+/// console program it launches gets a fresh window of its own. `taskkill` on
+/// stop and `netsh` on TUN cleanup each produced a black box on screen for a few
+/// hundred milliseconds; users read that as the app doing something suspicious.
+///
+/// Windows-only: on unix a child inherits the parent's descriptors and there is
+/// no window to suppress, so every call site here is behind the same `cfg`.
+#[cfg(windows)]
+pub(crate) fn hidden_command(program: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 /// Is the given PID still alive?
+///
+/// Windows answers this through the kernel instead of running `tasklist`. That
+/// is not a micro-optimisation: the status poll asks once every two seconds, and
+/// with a core adopted from a previous session (the normal state right after an
+/// in-app update) every single poll spawned a console program — a console window
+/// appearing twice a second, forever.
 #[cfg(windows)]
 pub fn pid_alive(pid: u32) -> bool {
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .output();
-    match output {
-        Ok(output) => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            // The CSV row is: "image.exe","1234","Console","1","12,345 K"
-            text.split('"').any(|field| field.trim() == pid.to_string())
+    use std::ffi::c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn GetExitCodeProcess(handle: *mut c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    // LIMITED_INFORMATION rather than QUERY_INFORMATION: it also opens processes
+    // at a higher integrity level, which is what an elevated core is when the
+    // shell that adopted it is not.
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
         }
-        Err(_) => false,
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok != 0 && code == STILL_ACTIVE
     }
 }
 
@@ -706,6 +744,16 @@ mod tests {
     fn args_are_rendered_for_logging() {
         let args = vec![OsString::from("-f"), OsString::from("config.yaml")];
         assert_eq!(render_args(&args), "-f config.yaml");
+    }
+
+    /// The liveness probe runs on every status poll, so it has to be right in
+    /// both directions — a false positive leaves a dead core looking alive, a
+    /// false negative adopts nothing and kills a healthy one.
+    #[test]
+    fn pid_alive_tells_self_from_an_unused_pid() {
+        assert!(pid_alive(std::process::id()));
+        // Above the Windows PID ceiling and unused on unix.
+        assert!(!pid_alive(0x7FFF_FFF0));
     }
 
     #[tokio::test]
