@@ -125,6 +125,8 @@ triproxy core install xray --file ./Xray-windows-64.zip
 
 - **Xray 没有控制器 API**，因此「连接」「流量」「真实延迟」三项在 Xray 下不可用；界面会说明原因
 - **系统代理只在 Windows 上实测过**，macOS（`networksetup`）与 Linux（`gsettings`）的实现已写好但未经真机验证
+- **macOS 与 Linux 的桌面安装包首次提供**，构建与产物内容由 CI 校验（确认核心已打包），但没有在真机上装过。
+  Windows 版本是本地实测过的。这两个平台如果装不上，请反馈，不要当成「应该能用」
 - **订阅没有后台定时更新**，自动刷新只在显式执行 `triproxy profile refresh` 时发生
 - **`split` 分流是预设规则**（局域网 + 国内直连），尚不支持自定义规则
 - 暂无节点收藏与流量历史图表
