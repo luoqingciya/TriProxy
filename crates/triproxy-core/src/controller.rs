@@ -264,6 +264,59 @@ impl ControllerClient {
         }
     }
 
+    /// Switch which node the PROXY group uses, at runtime.
+    ///
+    /// This is what makes node switching instant instead of a config rewrite
+    /// plus a restart: the generated group is a selector, so the core will
+    /// honour the choice immediately. Xray has no controller API, so there the
+    /// choice only takes effect on the next start.
+    pub async fn select_proxy(&self, group: &str, node_name: &str) -> Result<()> {
+        let encoded = urlencode(group);
+        let response = self
+            .http
+            .put(format!("{}/proxies/{encoded}", self.base))
+            .json(&serde_json::json!({ "name": node_name }))
+            .send()
+            .await
+            .map_err(|error| Error::Other(format!("cannot switch node: {error}")))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            Err(Error::Other(format!(
+                "switching to {node_name} failed (HTTP {status}): {body}"
+            )))
+        }
+    }
+
+    /// Which node the group currently uses, as reported by the core.
+    pub async fn selected_proxy(&self, group: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Group {
+            #[serde(default)]
+            now: Option<String>,
+        }
+
+        let encoded = urlencode(group);
+        let response = self
+            .http
+            .get(format!("{}/proxies/{encoded}", self.base))
+            .send()
+            .await
+            .map_err(|error| Error::Other(format!("cannot read the group: {error}")))?;
+
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let group: Group = response
+            .json()
+            .await
+            .map_err(|error| Error::Other(format!("cannot parse the group: {error}")))?;
+        Ok(group.now)
+    }
+
     /// Real proxy latency: the core makes an HTTP request through the node.
     ///
     /// Unlike the TCP probe, this fails when the credentials or protocol are

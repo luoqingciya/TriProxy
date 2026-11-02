@@ -62,6 +62,8 @@ export interface StoredProfile {
   content_id: string
   updated_at_ms: number
   subscription?: Subscription | null
+  /** Node the user picked, or null when the profile order decides. */
+  selected_node?: string | null
 }
 
 export interface ProfileLibrary {

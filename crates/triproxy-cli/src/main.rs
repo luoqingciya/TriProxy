@@ -21,7 +21,6 @@ use clap::{Parser, Subcommand};
 use triproxy_core::binaries::{InstallOptions, UpdateStatus};
 use triproxy_core::health::port_is_free;
 use triproxy_core::process::run_capture;
-use triproxy_core::ControllerClient;
 use triproxy_core::{
     compile, is_elevated, leftovers, measure_nodes, measure_proxy_delay, parse_payload,
     CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport, Diagnostic, DnsMode, Layout,
@@ -29,6 +28,7 @@ use triproxy_core::{
     RuleMode, Selector, StoredProfile, SubscriptionService, SwitchReport, SystemProxyManager,
     DEFAULT_PROBE_URL,
 };
+use triproxy_core::{select_node, ApplyOutcome, ControllerClient};
 
 #[derive(Parser)]
 #[command(
@@ -141,6 +141,11 @@ enum Command {
         /// Print as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Choose which node the proxy uses
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
     },
     /// Inspect TUN mode prerequisites and leftovers
     Tun {
@@ -298,6 +303,16 @@ enum ProfileCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum NodeCommand {
+    /// Use a node (by name, or id prefix) from the active profile
+    Use { target: String },
+    /// Show the current selection
+    Current,
+    /// Clear the selection and fall back to the profile order
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -510,6 +525,7 @@ async fn run(cli: Cli) -> Result<i32> {
             json,
         } => cmd_connections(&manager, close.as_deref(), close_all, json).await,
         Command::Traffic { json } => cmd_traffic(&manager, json).await,
+        Command::Node { command } => cmd_node(&manager, command).await,
         Command::Tun { command } => match command {
             TunCommand::Status => cmd_tun_status(&manager),
         },
@@ -622,6 +638,13 @@ async fn cmd_start(
         tun,
         dns: parse_dns_mode(dns.as_deref())?,
         rules: parse_rule_mode(rules.as_deref())?,
+        // Only when running from the stored active profile: an explicit
+        // --profile path is a different profile and its selection is unknown.
+        selected_node: if profile.is_none() {
+            selected_node_of(manager)
+        } else {
+            None
+        },
         ..Default::default()
     };
     let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
@@ -707,6 +730,13 @@ async fn cmd_switch(
         tun,
         dns: parse_dns_mode(dns.as_deref())?,
         rules: parse_rule_mode(rules.as_deref())?,
+        // Only when running from the stored active profile: an explicit
+        // --profile path is a different profile and its selection is unknown.
+        selected_node: if profile.is_none() {
+            selected_node_of(manager)
+        } else {
+            None
+        },
         ..Default::default()
     };
     let (kind, compiled) = resolve_target(manager, choice, profile, &options)?;
@@ -1020,6 +1050,9 @@ async fn cmd_profile_compile(
         tun,
         dns: parse_dns_mode(dns.as_deref())?,
         rules: parse_rule_mode(rules.as_deref())?,
+        // Compiling a file has no stored selection to apply; use `node use` for
+        // the active profile.
+        selected_node: None,
         ..Default::default()
     };
     let compiled = compile(kind, &parsed.profile, &options).map_err(|error| anyhow!("{error}"))?;
@@ -1685,6 +1718,16 @@ fn running_port(manager: &CoreManager) -> Option<u16> {
     manager.persisted_listen_port()
 }
 
+/// The node the user picked for the active profile, if any.
+fn selected_node_of(manager: &CoreManager) -> Option<String> {
+    let store = ProfileStore::new(manager.layout());
+    store
+        .active()
+        .ok()
+        .flatten()
+        .and_then(|(stored, _)| stored.selected_node)
+}
+
 fn controller(manager: &CoreManager) -> Result<ControllerClient> {
     ControllerClient::new(manager.api_port()).map_err(|error| anyhow!("{error}"))
 }
@@ -1776,6 +1819,79 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+async fn cmd_node(manager: &CoreManager, command: NodeCommand) -> Result<i32> {
+    let store = ProfileStore::new(manager.layout());
+
+    let Some((stored, profile)) = store.active()? else {
+        bail!("no active profile; choose one with profile use first");
+    };
+
+    match command {
+        NodeCommand::Current => {
+            match stored.selected_node.as_deref() {
+                Some(id) => {
+                    let name = profile
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == id)
+                        .map(|node| node.name.clone())
+                        .unwrap_or_else(|| "(missing)".to_string());
+                    println!("{name}");
+                }
+                None => println!("(none — the profile order decides)"),
+            }
+            Ok(0)
+        }
+        NodeCommand::Clear => {
+            let client = running_controller(manager).await;
+            let outcome = select_node(&store, client.as_ref(), None).await?;
+            match outcome {
+                ApplyOutcome::Applied { .. } => println!("selection cleared and applied"),
+                ApplyOutcome::SavedOnly { reason, .. } => {
+                    println!("selection cleared; takes effect on next start ({reason})")
+                }
+            }
+            Ok(0)
+        }
+        NodeCommand::Use { target } => {
+            let node = profile
+                .nodes
+                .iter()
+                .find(|node| node.name.eq_ignore_ascii_case(&target))
+                .or_else(|| {
+                    profile
+                        .nodes
+                        .iter()
+                        .find(|node| node.id.starts_with(&target))
+                })
+                .ok_or_else(|| {
+                    anyhow!("no node matching {target} in the active profile; run profile show to list them")
+                })?;
+
+            let client = running_controller(manager).await;
+            let outcome = select_node(&store, client.as_ref(), Some(&node.id)).await?;
+            match outcome {
+                ApplyOutcome::Applied { node } => {
+                    println!("using {node} (applied to the running core)")
+                }
+                ApplyOutcome::SavedOnly { node, reason } => {
+                    let name = node.unwrap_or_default();
+                    println!("using {name}");
+                    println!("  saved; takes effect on next start ({reason})");
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// The controller client, but only when a core is actually answering on it.
+async fn running_controller(manager: &CoreManager) -> Option<ControllerClient> {
+    let client = ControllerClient::new(manager.api_port()).ok()?;
+    client.version().await.ok()?;
+    Some(client)
 }
 
 fn cmd_tun_status(manager: &CoreManager) -> Result<i32> {

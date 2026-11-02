@@ -61,6 +61,10 @@ pub struct CompileOptions {
     pub dns: DnsMode,
     /// How traffic is split between the proxy and a direct connection.
     pub rules: RuleMode,
+    /// Node the user picked, by id. Moved to the front of the outbound list so
+    /// every core starts on it; a running core with a controller API is switched
+    /// at runtime instead of being restarted.
+    pub selected_node: Option<String>,
 }
 
 /// Routing strategy.
@@ -128,6 +132,7 @@ impl Default for CompileOptions {
             tun: false,
             dns: DnsMode::Off,
             rules: RuleMode::Global,
+            selected_node: None,
         }
     }
 }
@@ -213,6 +218,21 @@ pub trait ConfigCompiler: Send + Sync {
     ) -> Result<CompiledConfig, CompileError>;
 }
 
+/// Clone a profile with the chosen node moved to the front.
+///
+/// Order matters because every core treats the first outbound as the default:
+/// Mihomo uses the first member of a select group, sing-box the first outbound,
+/// Xray the first entry in its outbounds list. Reordering here means the
+/// compilers stay unaware of selection entirely.
+fn with_selected_first(profile: &Profile, id: &str) -> Profile {
+    let mut clone = profile.clone();
+    if let Some(index) = clone.nodes.iter().position(|node| node.id == id) {
+        let chosen = clone.nodes.remove(index);
+        clone.nodes.insert(0, chosen);
+    }
+    clone
+}
+
 pub fn compiler_for(kind: CoreKind) -> Box<dyn ConfigCompiler> {
     match kind {
         CoreKind::Mihomo => Box::new(mihomo::MihomoCompiler),
@@ -230,6 +250,18 @@ pub fn compile(
     if profile.nodes.is_empty() {
         return Err(CompileError::NoNodes);
     }
+
+    // Put the user-selected node first. All three cores take the first outbound
+    // (or first group member) as the default, so this is the one place that
+    // needs to know about the choice.
+    let ordered;
+    let profile = match options.selected_node.as_deref() {
+        Some(id) if profile.nodes.iter().any(|node| node.id == id) => {
+            ordered = with_selected_first(profile, id);
+            &ordered
+        }
+        _ => profile,
+    };
 
     let capability = CoreCapability::for_core(kind);
     let mut unmet = profile.requirement().unmet_by(&capability);
@@ -320,6 +352,68 @@ mod tests {
         };
         node.refresh_id();
         node
+    }
+
+    #[test]
+    fn the_selected_node_is_compiled_first() {
+        // Every core treats the first outbound (or first group member) as the
+        // default, so "which node is used" is purely a matter of ordering.
+        let a = node(Protocol::Trojan, "a.example.com");
+        let b = node(Protocol::Trojan, "b.example.com");
+        let profile = Profile::new("p", vec![a.clone(), b.clone()]);
+
+        let options = CompileOptions {
+            selected_node: Some(b.id.clone()),
+            ..Default::default()
+        };
+
+        let mihomo = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        // The first member after the group name is the default selection.
+        let group_start = mihomo.text.find("proxy-groups").unwrap();
+        let group = &mihomo.text[group_start..];
+        let b_at = group.find(&b.name).unwrap();
+        let a_at = group.find(&a.name).unwrap();
+        assert!(
+            b_at < a_at,
+            "selected node should come first:\n{}",
+            mihomo.text
+        );
+
+        let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
+        let b_at = singbox.text.find(&b.name).unwrap();
+        let a_at = singbox.text.find(&a.name).unwrap();
+        assert!(
+            b_at < a_at,
+            "selected node should come first:\n{}",
+            singbox.text
+        );
+
+        let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
+        let b_at = xray.text.find(&b.name).unwrap();
+        let a_at = xray.text.find(&a.name).unwrap();
+        assert!(
+            b_at < a_at,
+            "selected node should come first:\n{}",
+            xray.text
+        );
+    }
+
+    #[test]
+    fn an_unknown_selection_falls_back_to_the_profile_order() {
+        let a = node(Protocol::Trojan, "a.example.com");
+        let b = node(Protocol::Trojan, "b.example.com");
+        let profile = Profile::new("p", vec![a.clone(), b.clone()]);
+
+        let options = CompileOptions {
+            selected_node: Some("not-a-real-id".to_string()),
+            ..Default::default()
+        };
+
+        // A stale selection must not fail the compile; the profile order wins.
+        let compiled = compile(CoreKind::Mihomo, &profile, &options).unwrap();
+        let group_start = compiled.text.find("proxy-groups").unwrap();
+        let group = &compiled.text[group_start..];
+        assert!(group.find(&a.name).unwrap() < group.find(&b.name).unwrap());
     }
 
     #[test]

@@ -324,6 +324,47 @@ fn to_view(line: LogLine) -> LogEntryView {
     }
 }
 
+#[derive(Serialize)]
+pub struct SelectResult {
+    applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[tauri::command]
+pub async fn select_node(
+    state: State<'_, AppState>,
+    node_id: Option<String>,
+) -> CmdResult<SelectResult> {
+    let store = ProfileStore::new(state.manager.layout());
+
+    // Only hand the client over when the API actually answers: a stale port on a
+    // stopped core would otherwise turn every click into an error.
+    let client = match ControllerClient::new(state.manager.api_port()) {
+        Ok(client) if client.version().await.is_ok() => Some(client),
+        _ => None,
+    };
+
+    let outcome = triproxy_core::select_node(&store, client.as_ref(), node_id.as_deref())
+        .await
+        .map_err(err)?;
+
+    Ok(match outcome {
+        triproxy_core::ApplyOutcome::Applied { node } => SelectResult {
+            applied: true,
+            node: Some(node),
+            reason: None,
+        },
+        triproxy_core::ApplyOutcome::SavedOnly { node, reason } => SelectResult {
+            applied: false,
+            node,
+            reason: Some(reason),
+        },
+    })
+}
+
 #[tauri::command]
 pub async fn test_proxy_delay(
     state: State<'_, AppState>,

@@ -47,6 +47,7 @@ pub mod network;
 pub mod paths;
 pub mod process;
 pub mod profile;
+pub mod selection;
 pub mod selector;
 pub mod settings;
 pub mod state;
@@ -79,6 +80,7 @@ pub use profile::{
     parse_payload, parse_uri, Credentials, Diagnostic, InputFormat, Node, ParsedProfile, Profile,
     Severity, Transport, VlessFlow,
 };
+pub use selection::{select_node, ApplyOutcome};
 pub use selector::{
     CoreEvaluation, CorePreference, NetworkRequirements, SelectError, Selection, Selector,
 };

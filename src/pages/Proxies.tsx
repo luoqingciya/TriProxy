@@ -13,7 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Activity, Search } from 'lucide-react'
+import { Activity, Check, Search } from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
@@ -40,10 +40,12 @@ export function Proxies() {
   const testing = useApp((state) => state.testing)
   const testLatency = useApp((state) => state.testLatency)
   const testProxyDelay = useApp((state) => state.testProxyDelay)
+  const selectNode = useApp((state) => state.selectNode)
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
 
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
+  const selectedNodeId = activeProfile?.selected_node ?? null
 
   const protocols = useMemo(() => {
     const seen = new Set<Protocol>()
@@ -144,12 +146,25 @@ export function Proxies() {
               <div>传输</div>
               <div className="text-right">延迟</div>
             </div>
-            {visible.map((node) => (
+            {visible.map((node) => {
+              const isSelected = node.id === selectedNodeId
+              return (
               <div
                 key={node.id}
-                className="grid grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line px-5 py-3 text-[13px] last:border-b-0 hover:bg-panel-hover"
+                onClick={() => selectNode(node.id)}
+                title="点击切换到此节点"
+                className={
+                  isSelected
+                    ? 'grid cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line bg-accent-soft px-5 py-3 text-[13px]'
+                    : 'grid cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line px-5 py-3 text-[13px] last:border-b-0 hover:bg-panel-hover'
+                }
               >
-                <div className="truncate text-fg">{node.name}</div>
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={isSelected ? 'text-accent' : 'text-transparent'}>
+                    <Check size={14} strokeWidth={2.6} />
+                  </span>
+                  <span className="truncate text-fg">{node.name}</span>
+                </div>
                 <div>
                   <Badge>{PROTOCOL_LABEL[node.protocol]}</Badge>
                 </div>
@@ -166,7 +181,8 @@ export function Proxies() {
                   <LatencyCell sample={latency[node.id]} />
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </Card>

@@ -48,6 +48,7 @@ let library: ProfileLibrary = {
       node_count: 4,
       content_id: '837dc357d6deeb27',
       updated_at_ms: now - 1000 * 60 * 12,
+      selected_node: 'n2',
       subscription: {
         url: 'https://example.com/api/v1/client/subscribe?token=demo',
         interval_secs: 86400,
@@ -228,6 +229,8 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       } as T
     case 'close_connection':
       return undefined as T
+    case 'select_node':
+      return { applied: false, node: 'mock', reason: 'mock mode' } as T
     case 'test_proxy_delay':
       return nodes.map((n, i) => ({
         node_id: n.id,
