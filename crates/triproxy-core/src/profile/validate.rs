@@ -183,6 +183,45 @@ pub fn validate_node(node: &Node, index: usize) -> Vec<Diagnostic> {
                 ));
             }
         }
+        Credentials::Tuic {
+            uuid,
+            password,
+            congestion_control,
+            udp_relay_mode,
+        } => {
+            check_uuid(&mut out, index, node, uuid);
+            if password.is_empty() {
+                out.push(Diagnostic::for_node(
+                    Severity::Error,
+                    index,
+                    node,
+                    "tuic.empty_password",
+                    "tuic password is empty",
+                ));
+            }
+            if let Some(control) = congestion_control {
+                if !matches!(control.as_str(), "bbr" | "cubic" | "new_reno") {
+                    out.push(Diagnostic::for_node(
+                        Severity::Warning,
+                        index,
+                        node,
+                        "tuic.unknown_congestion_control",
+                        format!("unrecognised congestion control {control}"),
+                    ));
+                }
+            }
+            if let Some(mode) = udp_relay_mode {
+                if !matches!(mode.as_str(), "native" | "quic") {
+                    out.push(Diagnostic::for_node(
+                        Severity::Warning,
+                        index,
+                        node,
+                        "tuic.unknown_udp_relay_mode",
+                        format!("unrecognised udp relay mode {mode}"),
+                    ));
+                }
+            }
+        }
         Credentials::Hysteria2 {
             password,
             obfs,

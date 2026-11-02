@@ -226,6 +226,24 @@ fn proxy_entry(node: &Node) -> Result<Yaml, String> {
             // Hysteria2 is always TLS; there is no plaintext mode to opt out of.
             apply_tls(entry, node, "sni")
         }
+        Credentials::Tuic {
+            uuid,
+            password,
+            congestion_control,
+            udp_relay_mode,
+        } => {
+            let mut entry = entry
+                .with("uuid", Yaml::str(uuid.clone()))
+                .with("password", Yaml::str(password.clone()));
+            if let Some(control) = congestion_control {
+                entry = entry.with("congestion-controller", Yaml::str(control.clone()));
+            }
+            if let Some(mode) = udp_relay_mode {
+                entry = entry.with("udp-relay-mode", Yaml::str(mode.clone()));
+            }
+            // TUIC is TLS-only, same as Hysteria2.
+            apply_tls(entry, node, "sni")
+        }
     };
 
     Ok(apply_transport(entry, node))
@@ -238,6 +256,7 @@ fn protocol_type(node: &Node) -> &'static str {
         Credentials::Vless { .. } => "vless",
         Credentials::Trojan { .. } => "trojan",
         Credentials::Hysteria2 { .. } => "hysteria2",
+        Credentials::Tuic { .. } => "tuic",
     }
 }
 

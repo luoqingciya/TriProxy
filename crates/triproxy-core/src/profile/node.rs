@@ -141,8 +141,18 @@ pub enum Credentials {
     Trojan {
         password: String,
     },
+    /// QUIC-based, like Hysteria2, but with a uuid/password pair instead of a
+    /// single password, and congestion control as a first-class knob.
+    Tuic {
+        uuid: String,
+        password: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        congestion_control: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        udp_relay_mode: Option<String>,
+    },
     /// QUIC-based protocol. Always TLS; the obfuscation layer is optional and
-    /// only  is in scope.
+    /// only `salamander` is in scope.
     Hysteria2 {
         password: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -171,6 +181,16 @@ impl Credentials {
             } => format!("vmess:{uuid}:{alter_id}:{security}"),
             Credentials::Vless { uuid, flow } => format!("vless:{uuid}:{}", flow.as_str()),
             Credentials::Trojan { password } => format!("trojan:{password}"),
+            Credentials::Tuic {
+                uuid,
+                password,
+                congestion_control,
+                udp_relay_mode,
+            } => format!(
+                "tuic:{uuid}:{password}:{}:{}",
+                congestion_control.clone().unwrap_or_default(),
+                udp_relay_mode.clone().unwrap_or_default()
+            ),
             Credentials::Hysteria2 {
                 password,
                 obfs,
@@ -190,6 +210,7 @@ impl Credentials {
             Credentials::Vless { .. } => Protocol::Vless,
             Credentials::Trojan { .. } => Protocol::Trojan,
             Credentials::Hysteria2 { .. } => Protocol::Hysteria2,
+            Credentials::Tuic { .. } => Protocol::Tuic,
         }
     }
 }

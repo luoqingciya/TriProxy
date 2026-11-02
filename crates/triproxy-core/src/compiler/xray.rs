@@ -242,6 +242,9 @@ fn outbound(node: &Node) -> Result<Value, String> {
         Credentials::Hysteria2 { .. } => {
             return Err("Xray does not support hysteria2".to_string());
         }
+        Credentials::Tuic { .. } => {
+            return Err("Xray does not support tuic".to_string());
+        }
         Credentials::Trojan { password } => {
             outbound.insert("protocol".to_string(), json!("trojan"));
             outbound.insert(

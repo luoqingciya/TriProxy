@@ -67,6 +67,7 @@ pub fn parse_uri(line: &str) -> Result<Node, ParseIssue> {
         "vless" => parse_vless(rest),
         "trojan" => parse_trojan(rest),
         "hysteria2" | "hy2" => parse_hysteria2(rest),
+        "tuic" => parse_tuic(rest),
         other => Err(ParseIssue::new(
             "unsupported_scheme",
             format!("unsupported scheme `{other}://`"),
@@ -591,6 +592,80 @@ fn parse_vless(rest: &str) -> Result<Node, ParseIssue> {
 /// Always TLS — the protocol has no plaintext mode, so a link without
 /// `security` is still TLS. `insecure=1` maps to skip-cert-verify, and the
 /// obfuscation pair only makes sense together.
+/// TUIC share link.
+///
+/// The userinfo is `uuid:password`, unlike the other protocols which carry a
+/// single secret. QUIC means TLS is mandatory, and the default ALPN is h3.
+fn parse_tuic(rest: &str) -> Result<Node, ParseIssue> {
+    let uri = parse_standard(rest)?;
+
+    let (uuid, password) = uri
+        .userinfo
+        .split_once(':')
+        .ok_or_else(|| ParseIssue::new("tuic.missing_password", "tuic link needs uuid:password"))?;
+
+    if uuid.trim().is_empty() {
+        return Err(ParseIssue::new("tuic.empty_uuid", "tuic link has no uuid"));
+    }
+    if password.is_empty() {
+        return Err(ParseIssue::new(
+            "tuic.empty_password",
+            "tuic link has no password",
+        ));
+    }
+
+    let congestion_control = query_non_empty(&uri.query, "congestion_control")
+        .or_else(|| query_non_empty(&uri.query, "congestion_control_type"))
+        .map(str::to_string);
+    let udp_relay_mode = query_non_empty(&uri.query, "udp_relay_mode").map(str::to_string);
+
+    let allow_insecure = query_non_empty(&uri.query, "allow_insecure")
+        .or_else(|| query_non_empty(&uri.query, "insecure"))
+        .map(|value| matches!(value, "1" | "true" | "yes"))
+        .unwrap_or(false);
+
+    let alpn = query_non_empty(&uri.query, "alpn")
+        .map(|value| {
+            value
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| vec!["h3".to_string()]);
+
+    let tls = Some(TlsConfig {
+        server_name: Some(
+            query_non_empty(&uri.query, "sni")
+                .unwrap_or(&uri.server)
+                .to_string(),
+        ),
+        allow_insecure,
+        alpn,
+        fingerprint: None,
+        reality: None,
+    });
+
+    Ok(finish(
+        Protocol::Tuic,
+        Credentials::Tuic {
+            uuid: uuid.to_string(),
+            password: password.to_string(),
+            congestion_control,
+            udp_relay_mode,
+        },
+        NodeParts {
+            name: uri.fragment,
+            server: uri.server,
+            port: uri.port,
+            transport: Transport::Tcp,
+            tls,
+            plugin: None,
+        },
+    ))
+}
+
 fn parse_hysteria2(rest: &str) -> Result<Node, ParseIssue> {
     let uri = parse_standard(rest)?;
 
@@ -828,6 +903,41 @@ mod tests {
         };
         let error = parse_uri(&format!("vmess://{encoded}")).unwrap_err();
         assert_eq!(error.code, "vmess_unsupported_transport");
+    }
+
+    #[test]
+    fn tuic_splits_uuid_and_password_and_defaults_to_h3() {
+        let uri = "tuic://11111111-2222-3333-4444-555555555555:secret@tuic.example.com:443\
+                   ?congestion_control=bbr&udp_relay_mode=native&sni=www.bing.com#Tuic";
+        let node = parse_uri(uri).unwrap();
+
+        assert_eq!(node.protocol, Protocol::Tuic);
+        match &node.credentials {
+            Credentials::Tuic {
+                uuid,
+                password,
+                congestion_control,
+                udp_relay_mode,
+            } => {
+                assert_eq!(uuid, "11111111-2222-3333-4444-555555555555");
+                assert_eq!(password, "secret");
+                assert_eq!(congestion_control.as_deref(), Some("bbr"));
+                assert_eq!(udp_relay_mode.as_deref(), Some("native"));
+            }
+            other => panic!("expected tuic, got {other:?}"),
+        }
+
+        let tls = node.tls.expect("tuic is always TLS");
+        // QUIC requires h3; a link that omits alpn must still end up with it.
+        assert_eq!(tls.alpn, vec!["h3".to_string()]);
+        assert_eq!(tls.server_name.as_deref(), Some("www.bing.com"));
+    }
+
+    #[test]
+    fn tuic_without_a_password_is_rejected() {
+        let error = parse_uri("tuic://11111111-2222-3333-4444-555555555555@x.example.com:443#x")
+            .unwrap_err();
+        assert_eq!(error.code, "tuic.missing_password");
     }
 
     #[test]

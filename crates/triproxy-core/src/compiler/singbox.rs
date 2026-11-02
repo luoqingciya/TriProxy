@@ -296,6 +296,23 @@ fn outbound(node: &Node) -> Result<Value, String> {
                 map.insert("obfs".to_string(), Value::Object(obfs_object));
             }
         }
+        Credentials::Tuic {
+            uuid,
+            password,
+            congestion_control,
+            udp_relay_mode,
+        } => {
+            map.insert("type".to_string(), json!("tuic"));
+            map.insert("uuid".to_string(), json!(uuid));
+            map.insert("password".to_string(), json!(password));
+            // sing-box spells these with underscores; mihomo uses hyphens.
+            if let Some(control) = congestion_control {
+                map.insert("congestion_control".to_string(), json!(control));
+            }
+            if let Some(mode) = udp_relay_mode {
+                map.insert("udp_relay_mode".to_string(), json!(mode));
+            }
+        }
     }
 
     if node.tls.is_some() {

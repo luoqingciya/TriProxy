@@ -966,12 +966,20 @@ sing-box  ok
 xray      ok
 ```
 
-## 21. Hysteria2
+## 21. QUIC 协议（Hysteria2 / TUIC）
 
-### 21.1 第一个「只有两个核心能用」的协议
+### 21.1 第一批「只有两个核心能用」的协议
 
 之前所有节点三个核心都能跑，能力门禁（硬约束淘汰）从未真正触发过。
-Hysteria2 基于 QUIC，**Xray 完全不支持**——门禁第一次有了实际意义：
+Hysteria2 与 TUIC 都基于 QUIC，**Xray 完全不支持**——门禁第一次有了实际意义。
+
+混合配置时理由会逐条列出：
+
+```text
+smart: selected `sing-box` — ...; eliminated: xray (protocol tuic, protocol hysteria2)
+```
+
+单个协议时：
 
 ```text
 $ triproxy start auto
@@ -1022,6 +1030,20 @@ sni: www.bing.com
 
 两种都被各自的核心校验通过（`mihomo -t` / `sing-box check`）。
 
+### 21.5 TUIC 与 Hysteria2 的三处不同
+
+| 维度 | Hysteria2 | TUIC |
+|---|---|---|
+| 凭据 | 单个 `password` | `uuid:password`，userinfo 里用冒号分隔 |
+| 混淆 | `obfs` + `obfs-password` | 无 |
+| 默认 ALPN | 无要求 | `h3`，链接没写也要补上 |
+
+最后一条容易漏：QUIC 需要 h3，缺了它握手会失败，而失败信息不会提到 ALPN。
+所以解析阶段就把 `h3` 作为默认值填进去，而不是指望核心补。
+
+TUIC 的拥塞控制（`bbr` / `cubic` / `new_reno`）和 UDP 中继模式（`native` / `quic`）
+都是可选字段，未知值在校验阶段给警告——它们不影响能否连接，只影响传输表现。
+
 ## 22. 尚未实现（明确的边界）
 
 这一节按「缺了会影响什么」排序，而不是按规划书章节。**状态会过时，改动功能时请同步更新。**
@@ -1042,7 +1064,7 @@ Mihomo 与 sing-box 的控制器 API 支持运行时切换（`PUT /proxies/PROXY
 
 | 缺口 | 说明 |
 |---|---|
-| 协议 | VLESS / VMess / Trojan / Shadowsocks / Hysteria2。TUIC、SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
+| 协议 | VLESS / VMess / Trojan / Shadowsocks / Hysteria2 / TUIC。SOCKS、HTTP、WireGuard、SSH、AnyTLS 都没有 |
 | 订阅格式 | 支持 URI 列表、base64 与 Clash YAML 的 proxies 段；**不导入 proxy-groups 与 rules** |
 | 流量历史 | 只有瞬时采样，没有曲线图；数据不落盘 |
 | 节点管理 | 没有收藏、分组、手动排序 |
