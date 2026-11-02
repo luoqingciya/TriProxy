@@ -676,14 +676,15 @@ pub fn force_kill(pid: u32) -> std::io::Result<()> {
 /// console program it launches gets a fresh window of its own. `taskkill` on
 /// stop and `netsh` on TUN cleanup each produced a black box on screen for a few
 /// hundred milliseconds; users read that as the app doing something suspicious.
+///
+/// Windows-only: on unix a child inherits the parent's descriptors and there is
+/// no window to suppress, so every call site here is behind the same `cfg`.
+#[cfg(windows)]
 pub(crate) fn hidden_command(program: &str) -> std::process::Command {
-    #[allow(unused_mut)]
+    use std::os::windows::process::CommandExt;
+
     let mut cmd = std::process::Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
 }
 
