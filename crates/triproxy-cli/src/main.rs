@@ -1364,7 +1364,7 @@ async fn cmd_profile_add(
     // Re-importing under an existing name updates that record instead of
     // creating a second entry with the same title.
     let existing = store.find_by_name(&name)?;
-    let saved = store.save(
+    let saved = store.save_activating_if_first(
         &parsed.profile,
         existing.as_ref().map(|entry| entry.id.as_str()),
     )?;

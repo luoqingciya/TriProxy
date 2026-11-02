@@ -129,7 +129,11 @@ export function Proxies() {
       <Card className="p-0">
         {visible.length === 0 ? (
           <Empty>
-            {nodes.length === 0 ? '导入并启用一份配置后，节点会显示在这里' : '没有匹配的节点'}
+            {nodes.length > 0
+              ? '没有匹配的节点'
+              : library.profiles.length > 0
+                ? '已有配置，但没有启用任何一份。到「配置」页点「设为活动」后，节点会显示在这里'
+                : '还没有配置。到「配置」页导入订阅或分享链接'}
           </Empty>
         ) : (
           <div>

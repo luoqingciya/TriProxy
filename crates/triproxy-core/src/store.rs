@@ -179,6 +179,27 @@ impl ProfileStore {
             .find(|stored| stored.name.eq_ignore_ascii_case(name)))
     }
 
+    /// Store a profile, making it active if nothing is active yet.
+    ///
+    /// The first import should just work. Importing a config and finding an
+    /// empty node list because the profile was saved but never activated is a
+    /// dead end the user cannot diagnose — the profile is there, the nodes are
+    /// there, the page is empty.
+    ///
+    /// Later imports do not steal the active slot: adding a second subscription
+    /// is not a request to switch to it.
+    pub fn save_activating_if_first(
+        &self,
+        profile: &Profile,
+        id: Option<&str>,
+    ) -> Result<StoredProfile> {
+        let saved = self.save(profile, id)?;
+        if self.active_id()?.is_none() {
+            self.set_active(Some(&saved.id))?;
+        }
+        Ok(saved)
+    }
+
     /// Store a profile.
     ///
     /// Passing an existing `id` updates that record (a subscription refresh);
@@ -432,6 +453,42 @@ mod tests {
 
     fn profile(name: &str, servers: &[&str]) -> Profile {
         Profile::new(name, servers.iter().map(|s| node(s)).collect())
+    }
+
+    /// The reported bug: import a config, node list is empty because nothing
+    /// was ever made active.
+    #[test]
+    fn the_first_saved_profile_becomes_active() {
+        let layout = layout("auto-active");
+        let store = ProfileStore::new(&layout);
+
+        let saved = store
+            .save_activating_if_first(&profile("first", &["a.example.com"]), None)
+            .unwrap();
+
+        assert_eq!(
+            store.active_id().unwrap().as_deref(),
+            Some(saved.id.as_str())
+        );
+    }
+
+    #[test]
+    fn a_later_save_does_not_steal_the_active_slot() {
+        let layout = layout("no-steal");
+        let store = ProfileStore::new(&layout);
+
+        let first = store
+            .save_activating_if_first(&profile("first", &["a.example.com"]), None)
+            .unwrap();
+        store
+            .save_activating_if_first(&profile("second", &["b.example.com"]), None)
+            .unwrap();
+
+        // Adding a second subscription is not a request to switch to it.
+        assert_eq!(
+            store.active_id().unwrap().as_deref(),
+            Some(first.id.as_str())
+        );
     }
 
     #[test]
