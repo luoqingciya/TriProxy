@@ -24,6 +24,10 @@
  * `dark:` variants through every component.
  */
 :root {
+  /* Native widgets (select popups, scrollbars, date pickers) follow the theme.
+     Without this, WebKitGTK draws a light popup under a dark page and the
+     selected value becomes light-on-light. */
+  color-scheme: light;
   --bg: #f6f6f8;
   --panel: #ffffff;
   --panel-2: #fbfbfc;
@@ -41,6 +45,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --bg: #0a0a0c;
   --panel: #121216;
   --panel-2: #17171d;
@@ -116,4 +121,15 @@ body {
 /* Numbers in tables should not jitter while values change. */
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Popup lists are drawn by the engine, not by the page. `color-scheme` above
+ * already tells it to use dark widgets; these two declarations cover the engines
+ * that also honour per-option colours, so the open list matches the closed
+ * control instead of flashing white.
+ */
+select option {
+  background: var(--panel-2);
+  color: var(--fg);
 }

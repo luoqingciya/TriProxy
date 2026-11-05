@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
-import { Button, Card, SectionTitle, SettingRow, Toggle } from '../components/ui'
+import { Button, Card, SectionTitle, Select, SettingRow, Toggle } from '../components/ui'
 import { formatMemory } from '../format'
 import { api } from '../services/api'
 import {
@@ -137,24 +137,20 @@ export function Settings() {
           title="核心选择"
           hint="Smart 由选核引擎决定；固定核心会在不兼容时直接报错"
         >
-          <select
+          <Select
             value={settings.core_preference ?? 'smart'}
-            onChange={(event) =>
+            onChange={(value) =>
               update({
-                core_preference:
-                  event.target.value === 'smart'
-                    ? null
-                    : (event.target.value as CoreKind),
+                core_preference: value === 'smart' ? null : (value as CoreKind),
               })
             }
-            className="rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg outline-none"
           >
             {CORES.map((core) => (
               <option key={core ?? 'smart'} value={core ?? 'smart'}>
                 {core === null ? 'Smart（推荐）' : CORE_LABEL[core]}
               </option>
             ))}
-          </select>
+          </Select>
         </SettingRow>
         <SettingRow
           title="关闭窗口时驻留托盘"
@@ -318,42 +314,39 @@ export function Settings() {
       <Card>
         <SectionTitle title="高级" />
         <SettingRow title="分流模式" hint="global 全部走代理；split 局域网与国内站点直连">
-          <select
+          <Select
             value={settings.rule_mode}
-            onChange={(event) =>
-              update({ rule_mode: event.target.value as AppSettings['rule_mode'] })
+            onChange={(value) =>
+              update({ rule_mode: value as AppSettings['rule_mode'] })
             }
-            className="rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg outline-none"
           >
             <option value="global">global</option>
             <option value="split">split</option>
-          </select>
+          </Select>
         </SettingRow>
         <SettingRow title="DNS 模式" hint="split：走代理解析；fake-ip：TUN 下最快，但部分应用不兼容">
-          <select
+          <Select
             value={settings.dns_mode}
-            onChange={(event) =>
-              update({ dns_mode: event.target.value as AppSettings['dns_mode'] })
+            onChange={(value) =>
+              update({ dns_mode: value as AppSettings['dns_mode'] })
             }
-            className="rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg outline-none"
           >
             <option value="off">关闭</option>
             <option value="split">split</option>
             <option value="fake_ip">fake-ip</option>
-          </select>
+          </Select>
         </SettingRow>
         <SettingRow title="日志级别">
-          <select
+          <Select
             value={settings.log_level}
-            onChange={(event) => update({ log_level: event.target.value })}
-            className="rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg outline-none"
+            onChange={(value) => update({ log_level: value })}
           >
             {['debug', 'info', 'warn', 'error'].map((level) => (
               <option key={level} value={level}>
                 {level}
               </option>
             ))}
-          </select>
+          </Select>
         </SettingRow>
         <SettingRow title="数据目录" hint="配置、核心二进制与日志都存放在这里">
           <span className="max-w-[380px] truncate text-[12.5px] text-muted tabular">
