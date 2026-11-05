@@ -75,6 +75,33 @@ export function App() {
     }
   }, [])
 
+  /**
+   * Suppress the WebView's page context menu.
+   *
+   * Right-clicking anywhere used to offer 返回 / 刷新 / 另存为 / 打印 / 更多工具 —
+   * a browser's menu inside a desktop window. "Back" is the worst of them: the
+   * pages navigate through `history.replaceState`, so it can jump to a state the
+   * UI no longer matches.
+   *
+   * Editable fields keep the native menu on purpose: there it is the *editing*
+   * menu (undo, cut, copy, paste), and pasting a subscription URL by right-click
+   * is how a lot of people work.
+   *
+   * Development builds keep everything, because "Inspect element" lives in that
+   * same menu and is the only way to open the inspector from a release-style
+   * window.
+   */
+  useEffect(() => {
+    if (import.meta.env.DEV) return undefined
+    const onContextMenu = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return
+      event.preventDefault()
+    }
+    window.addEventListener('contextmenu', onContextMenu)
+    return () => window.removeEventListener('contextmenu', onContextMenu)
+  }, [])
+
   return (
     <div className="flex h-full overflow-hidden bg-bg text-fg">
       <Sidebar />
