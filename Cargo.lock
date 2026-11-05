@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "triproxy-cli"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "triproxy-core"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

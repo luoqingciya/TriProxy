@@ -19,7 +19,7 @@ members = ["crates/triproxy-core", "crates/triproxy-cli"]
 exclude = ["src-tauri"]
 
 [workspace.package]
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 rust-version = "1.82"
 license = "GPL-3.0-or-later"
