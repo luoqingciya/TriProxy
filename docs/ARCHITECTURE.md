@@ -1280,6 +1280,33 @@ mihomo -f <configs/mihomo/config.yaml> -d <configs/mihomo>
 `--rules` 上已经出现过一次（§23.3 的 CLI 默认值覆盖），形态不同，本质一样——
 **「默认值」和「用户没说过」是两件事。**
 
+### 25.5 随包核心：谁先知道，谁后知道
+
+三个平台把 `cores/` 放在三个地方：Windows 在安装目录旁边，macOS 在
+`Contents/Resources/cores`，Linux `.deb` 与 AppImage 在 `usr/lib/triproxy/cores`。
+后两个位置**无法从 `current_exe()` 推出来**，只有 Tauri 的 `resource_dir()` 知道。
+
+而管理器是在 `run()` 里构造的，`resource_dir()` 只有 `setup` 里才有。于是启动顺序变成：
+
+```text
+CoreManager::new()          ← 此时还不知道 cores/ 在哪，映射表是空的
+  └─ setup()
+       ├─ resolve_bundled_cores()   ← 现在才把 TRIPROXY_BUNDLED_CORES 设上
+       └─ recover()
+```
+
+中间这一段时间里，`status()` 会重新解析（所以界面显示出版本号和「更新」按钮），
+而 `core()` 读的是构造时那张表（所以点「连接」报 `binary for sing-box not found`）。
+**同一个核心，两个答案。**
+
+修法是让映射表不再是权威：`core()` 查不到时现场重新解析并写回。`recover()` 也改走
+`core()`——否则一个上一轮遗留、仍在监听端口的核心会被判定为「二进制缺失」而被遗忘，
+进程留在后台占着 7890。
+
+更彻底的做法是把管理器构造搬进 `setup`，但那会让 `AppState` 在单实例插件的回调之前
+不存在；「查不到就重新解析」既修了顺序问题，也顺带修了「运行期间用 CLI 装了核心」这个
+同样真实的情况。
+
 ---
 
 ## 26. 配置备份

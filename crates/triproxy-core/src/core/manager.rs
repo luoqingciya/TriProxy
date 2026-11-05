@@ -219,7 +219,12 @@ impl CoreManager {
 
         match (state.active_core, state.pid) {
             (Some(kind), Some(pid)) if pid_alive(pid) => {
-                let core = self.cores_read().get(&kind).cloned();
+                // `core()` rather than the map: on Linux the bundled cores are
+                // only discoverable once the shell has told us where they are,
+                // which happens after this manager was built. Reading the map
+                // directly would "forget" a core that is in fact running and
+                // leave it orphaned on the listen port.
+                let core = self.core(kind).ok();
                 if let Some(core) = core {
                     let port = state.listen_port.unwrap_or(kind.default_listen_port());
                     if core.adopt(pid, port).await {
@@ -607,16 +612,36 @@ impl CoreManager {
     }
 
     fn core(&self, kind: CoreKind) -> Result<Arc<dyn ProxyCore>> {
-        self.cores_read()
-            .get(&kind)
-            .cloned()
-            .ok_or_else(|| Error::BinaryNotFound {
-                core: kind.as_str().to_string(),
-                hint: format!(
-                    "run `triproxy core install {kind}` or set {}",
-                    kind.bin_env_var()
-                ),
-            })
+        if let Some(core) = self.cores_read().get(&kind).cloned() {
+            return Ok(core);
+        }
+
+        // The map is built once, at construction. A binary that appears later —
+        // installed by the CLI, by a package upgrade, or by another instance —
+        // is otherwise invisible until the app restarts, and `start` reports
+        // "binary not found" for a file that is sitting right there. The status
+        // panel already re-resolves on every poll, so without this the UI shows
+        // a version and an Update button next to a core that cannot be started.
+        if let Some((path, source)) = self.binaries.resolve(kind) {
+            tracing::info!(
+                core = kind.as_str(),
+                path = %path.display(),
+                source = source.as_str(),
+                "core binary appeared after startup"
+            );
+            let core = build_core(kind, path, self.logs.clone(), &self.layout);
+            self.cores_write().insert(kind, core.clone());
+            return Ok(core);
+        }
+
+        Err(Error::BinaryNotFound {
+            core: kind.as_str().to_string(),
+            hint: format!(
+                "run `triproxy core install {kind}`, set {}, or put the binary at {}",
+                kind.bin_env_var(),
+                self.layout.managed_binary(kind.exe_stem()).display()
+            ),
+        })
     }
 
     async fn running_core_except(&self, excluded: CoreKind) -> Option<CoreKind> {
@@ -759,6 +784,32 @@ mod tests {
             Error::BinaryNotFound { hint, .. } => assert!(hint.contains("core install xray")),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    /// The reported bug: cores installed after the window opened (from a
+    /// terminal, or by a package upgrade) were invisible until the app
+    /// restarted, so `start` said "binary not found" while the status panel
+    /// showed that core's version and an Update button.
+    #[test]
+    fn a_binary_installed_after_startup_is_picked_up() {
+        let layout = temp_layout("late-binary");
+        layout.ensure().unwrap();
+        for kind in CoreKind::ALL {
+            std::env::remove_var(kind.bin_env_var());
+        }
+
+        // Nothing installed yet: the manager is built without any core.
+        let manager = CoreManager::new(layout.clone()).unwrap();
+        assert!(manager.cores_read().is_empty());
+
+        // Now the binary shows up, exactly as `core install` would leave it.
+        let binary = layout.managed_binary(CoreKind::SingBox.exe_stem());
+        std::fs::write(&binary, b"not a real binary").unwrap();
+
+        let resolved = manager.core(CoreKind::SingBox).expect("resolved on demand");
+        assert_eq!(resolved.kind(), CoreKind::SingBox);
+        // Cached afterwards, so the second call does not rebuild it.
+        assert!(manager.cores_read().contains_key(&CoreKind::SingBox));
     }
 
     #[tokio::test]

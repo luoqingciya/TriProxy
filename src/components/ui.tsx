@@ -13,6 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
+import { ChevronDown } from 'lucide-react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
 
 import type { CoreState } from '../types'
@@ -177,6 +178,45 @@ export function Empty({ children }: { children: ReactNode }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-14 text-center">
       <p className="text-[13.5px] text-faint">{children}</p>
+    </div>
+  )
+}
+
+/**
+ * A `<select>` that keeps the app's colours on every platform.
+ *
+ * A bare `<select>` is drawn by the platform, not by the page: on Linux
+ * (WebKitGTK) it paints a light GTK widget with the page's text colour, which in
+ * the dark theme means light text on a light background — the selected value
+ * becomes unreadable. `appearance: none` plus our own chevron makes the closed
+ * control ours to style; `color-scheme` (set in styles.css) tells the engine to
+ * render the popup list dark as well.
+ */
+export function Select({
+  value,
+  onChange,
+  children,
+  className = '',
+}: {
+  value: string
+  onChange: (value: string) => void
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <div className={`relative inline-flex ${className}`}>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full appearance-none rounded-lg border border-line bg-panel-2 py-1.5 pr-8 pl-2.5 text-[13px] text-fg outline-none hover:bg-panel-hover focus:border-accent"
+      >
+        {children}
+      </select>
+      <ChevronDown
+        size={13}
+        strokeWidth={2.2}
+        className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-faint"
+      />
     </div>
   )
 }
