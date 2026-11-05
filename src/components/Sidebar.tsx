@@ -23,6 +23,7 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react'
 
+import appIcon from '../../src-tauri/icons/128x128.png'
 import { useApp, type Page } from '../store/app'
 import { CORE_LABEL, type CoreKind } from '../types'
 import { StateDot } from './ui'
@@ -47,9 +48,19 @@ export function Sidebar() {
   return (
     <aside className="flex w-[212px] shrink-0 flex-col border-r border-line bg-panel/60">
       <div className="flex items-center gap-2.5 px-4 py-5">
-        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-[13px] font-bold text-white">
-          T
-        </div>
+        {/*
+          The real application icon, imported from the shell's icon set rather
+          than copied into `src/`: two copies of a logo drift apart the first
+          time one of them is regenerated, and a sidebar showing last year's
+          logo next to a taskbar showing this year's is exactly the kind of
+          detail nobody reports and everybody notices.
+        */}
+        <img
+          src={appIcon}
+          alt=""
+          aria-hidden
+          className="h-7 w-7 shrink-0 rounded-[7px] object-cover ring-1 ring-white/10"
+        />
         <div className="leading-tight">
           <div className="text-[14px] font-semibold text-fg">TriProxy</div>
           <div className="text-[11px] text-faint">三核代理客户端</div>
