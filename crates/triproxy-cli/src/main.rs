@@ -142,6 +142,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Measure the delay of the node the proxy is using right now
+    ///
+    /// Unlike the `LOOPBACK` column in `status` — which times a local socket
+    /// handshake and is always under a millisecond — this asks the core to make
+    /// one HTTP request through the selected node.
+    Delay {
+        /// Timeout in seconds
+        #[arg(long, value_name = "SECS", default_value_t = 3)]
+        timeout: u64,
+        /// Print as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Choose which node the proxy uses
     Node {
         #[command(subcommand)]
@@ -525,6 +538,7 @@ async fn run(cli: Cli) -> Result<i32> {
             json,
         } => cmd_connections(&manager, close.as_deref(), close_all, json).await,
         Command::Traffic { json } => cmd_traffic(&manager, json).await,
+        Command::Delay { timeout, json } => cmd_delay(&manager, timeout, json).await,
         Command::Node { command } => cmd_node(&manager, command).await,
         Command::Tun { command } => match command {
             TunCommand::Status => cmd_tun_status(&manager),
@@ -1829,6 +1843,56 @@ async fn cmd_traffic(manager: &CoreManager, json: bool) -> Result<i32> {
     Ok(0)
 }
 
+async fn cmd_delay(manager: &CoreManager, timeout_secs: u64, json: bool) -> Result<i32> {
+    // Xray has no controller API at all, so the raw failure would be a bare
+    // connection error. Naming the reason is the difference between "this
+    // feature is broken" and "this core cannot do this".
+    //
+    // `status()` rather than the persisted record: a one-shot CLI process has
+    // not adopted the running core yet, so the in-memory field is still empty.
+    if manager.status().await.active_core == Some(CoreKind::Xray) {
+        let reason =
+            "Xray 没有控制器 API，无法测量真实延迟；`triproxy profile test` 测的是 TCP 握手";
+        if json {
+            let result = triproxy_core::ActiveDelay {
+                node: None,
+                latency_ms: None,
+                error: Some(reason.to_string()),
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("—  {reason}");
+        }
+        return Ok(1);
+    }
+
+    let client = controller(manager)?;
+    let result = triproxy_core::active_delay(
+        &client,
+        triproxy_core::PROXY_GROUP,
+        triproxy_core::DEFAULT_PROBE_URL,
+        timeout_secs.max(1) * 1000,
+    )
+    .await;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        match (&result.node, result.latency_ms) {
+            (Some(node), Some(ms)) => println!("{node}  {ms} ms"),
+            (Some(node), None) => println!(
+                "{node}  —  {}",
+                result.error.as_deref().unwrap_or("measurement failed")
+            ),
+            (None, _) => println!("—  {}", result.error.as_deref().unwrap_or("no node")),
+        }
+    }
+
+    // Exit 1 when there is no figure: a script polling this should be able to
+    // tell "measured" from "could not measure" without parsing prose.
+    Ok(if result.latency_ms.is_some() { 0 } else { 1 })
+}
+
 fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
@@ -2118,7 +2182,14 @@ fn print_status(status: &ManagerStatus) {
 }
 
 fn print_core_table(cores: &[CoreReport]) {
-    let headers = ["CORE", "STATE", "PID", "PORT", "LATENCY", "BINARY"];
+    // "LOOPBACK" rather than "LATENCY": this is the handshake against the local
+    // inbound port, which is always under a millisecond. Calling it latency made
+    // every running core report `0 ms` and invited the reading "my node is
+    // instant" — node latency needs an HTTP request through the core and lives
+    // in `profile test --http`.
+    let headers = [
+        "CORE", "STATE", "PID", "PORT", "LOOPBACK", "MEMORY", "BINARY",
+    ];
     let rows: Vec<Vec<String>> = cores
         .iter()
         .map(|core| {
@@ -2132,7 +2203,10 @@ fn print_core_table(cores: &[CoreReport]) {
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "-".to_string()),
                 core.latency_ms
-                    .map(|ms| format!("{ms} ms"))
+                    .map(format_loopback)
+                    .unwrap_or_else(|| "-".to_string()),
+                core.memory_bytes
+                    .map(format_bytes)
                     .unwrap_or_else(|| "-".to_string()),
                 describe_binary(core),
             ]
@@ -2145,6 +2219,16 @@ fn print_core_table(cores: &[CoreReport]) {
             println!();
             println!("  ! {} — {}", core.kind, error);
         }
+    }
+}
+
+/// Sub-millisecond loopback handshakes are the normal case, so `0 ms` would be
+/// technically true and completely useless.
+fn format_loopback(ms: u64) -> String {
+    if ms == 0 {
+        "<1 ms".to_string()
+    } else {
+        format!("{ms} ms")
     }
 }
 

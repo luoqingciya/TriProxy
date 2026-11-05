@@ -611,6 +611,46 @@ pub async fn test_proxy_delay(
     .await)
 }
 
+/// Delay of whatever the `PROXY` group is currently using.
+///
+/// The status payload carries a `latency_ms`, but that is the loopback handshake
+/// against the inbound port — always under a millisecond, which is why the
+/// dashboard showed `0 ms` on every connection. The measurement itself lives in
+/// `triproxy-core` so the CLI reports the same number for the same node.
+#[tauri::command]
+pub async fn active_delay(state: State<'_, AppState>) -> CmdResult<triproxy_core::ActiveDelay> {
+    let client = match ControllerClient::new(state.manager.api_port()) {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok(triproxy_core::ActiveDelay {
+                node: None,
+                latency_ms: None,
+                error: Some(error.to_string()),
+            })
+        }
+    };
+
+    // A stopped core leaves a stale port behind; asking the controller first
+    // turns that into one clear sentence instead of a connection error.
+    if let Err(error) = client.version().await {
+        return Ok(triproxy_core::ActiveDelay {
+            node: None,
+            latency_ms: None,
+            error: Some(format!(
+                "需要运行中的 Mihomo 或 sing-box（Xray 没有控制器 API）：{error}"
+            )),
+        });
+    }
+
+    Ok(triproxy_core::active_delay(
+        &client,
+        triproxy_core::PROXY_GROUP,
+        triproxy_core::DEFAULT_PROBE_URL,
+        3000,
+    )
+    .await)
+}
+
 #[tauri::command]
 pub async fn traffic(
     state: State<'_, AppState>,

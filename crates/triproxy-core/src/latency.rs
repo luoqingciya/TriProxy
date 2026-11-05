@@ -179,6 +179,63 @@ pub async fn measure_nodes_with(
     samples
 }
 
+/// Delay of whatever the proxy group is currently using.
+///
+/// The status payload already carries a `latency_ms`, but that is the loopback
+/// handshake against the inbound port — always under a millisecond, which is why
+/// every dashboard rendered `0 ms`. This is the number people think they are
+/// reading: one HTTP request made by the core through the selected node.
+///
+/// Failures are data, not errors: "Xray has no controller API" and "no node
+/// picked yet" are permanent states of a running setup, and the caller needs to
+/// tell the user *why* there is no figure instead of showing a bare dash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveDelay {
+    /// Node the group resolved to, as reported by the core.
+    pub node: Option<String>,
+    /// Milliseconds, or `None` when the probe failed or is unavailable.
+    pub latency_ms: Option<u64>,
+    /// Why there is no figure; `None` on success.
+    pub error: Option<String>,
+}
+
+impl ActiveDelay {
+    fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            node: None,
+            latency_ms: None,
+            error: Some(reason.into()),
+        }
+    }
+}
+
+/// Measure the group's current node, end to end.
+pub async fn active_delay(
+    client: &crate::controller::ControllerClient,
+    group: &str,
+    probe_url: &str,
+    timeout_ms: u64,
+) -> ActiveDelay {
+    let node = match client.selected_proxy(group).await {
+        Ok(Some(node)) => node,
+        Ok(None) => return ActiveDelay::unavailable("核心还没有选定节点"),
+        Err(error) => return ActiveDelay::unavailable(error.to_string()),
+    };
+
+    match client.proxy_delay(&node, probe_url, timeout_ms).await {
+        Ok(latency_ms) => ActiveDelay {
+            node: Some(node),
+            latency_ms: Some(latency_ms),
+            error: None,
+        },
+        Err(error) => ActiveDelay {
+            node: Some(node),
+            latency_ms: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

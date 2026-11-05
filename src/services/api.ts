@@ -16,6 +16,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import type {
+  ActiveDelay,
   AppliedProxy,
   CoreKind,
   CoreUpdate,
@@ -102,6 +103,14 @@ export const api = {
 
   testProxyDelay: (timeoutSecs: number) =>
     call<LatencySample[]>('test_proxy_delay', { timeoutSecs }),
+
+  /**
+   * Delay of the node the PROXY group is using right now.
+   *
+   * Separate from `status()` on purpose: it makes one HTTP request through the
+   * proxy, so it belongs on a slower timer than the two-second status poll.
+   */
+  activeDelay: () => call<ActiveDelay>('active_delay'),
 
   testLatency: (timeoutSecs: number) =>
     call<LatencySample[]>('test_latency', { timeoutSecs }),

@@ -14,12 +14,22 @@
  */
 
 import { ChevronDown, ChevronRight, Power, Zap } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { useApp } from '../store/app'
 import { CORE_LABEL, STATE_LABEL, type Selection } from '../types'
 import { Badge, Button, Card, SectionTitle, StateDot } from '../components/ui'
 import { PageHeader } from '../components/Sidebar'
+import { formatMemory } from '../format'
+
+/**
+ * How often the active node is re-measured.
+ *
+ * Each measurement is a real HTTP request through the proxy, so this cannot ride
+ * on the two-second status poll: that would turn a status indicator into a
+ * steady stream of requests and distort the traffic graph it sits next to.
+ */
+const DELAY_INTERVAL_MS = 15_000
 
 function formatRate(bytesPerSecond: number): string {
   if (bytesPerSecond < 1024) return `${bytesPerSecond} B/s`
@@ -82,6 +92,8 @@ export function Dashboard() {
   const proxy = useApp((state) => state.proxy)
   const traffic = useApp((state) => state.traffic)
   const trafficHistory = useApp((state) => state.trafficHistory)
+  const delay = useApp((state) => state.delay)
+  const measureDelay = useApp((state) => state.measureDelay)
   const busy = useApp((state) => state.busy)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
@@ -93,6 +105,18 @@ export function Dashboard() {
   const running = status?.cores.find((core) => core.state === 'running')
   const connected = Boolean(running)
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
+
+  // Measure only while something is running: a stopped core has no node to
+  // measure, and the timer would just produce a stream of "unavailable" results.
+  // Depending on the core as well as the boolean means switching cores shows the
+  // new node's figure instead of the previous core's for a quarter of a minute.
+  const runningKind = running?.kind ?? null
+  useEffect(() => {
+    if (!runningKind) return undefined
+    void measureDelay()
+    const timer = window.setInterval(() => void measureDelay(), DELAY_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [runningKind, measureDelay])
 
   return (
     <div>
@@ -131,7 +155,30 @@ export function Dashboard() {
                   <span className="text-faint">·</span>
                   <span>127.0.0.1:{running!.listen_port ?? 7890}</span>
                   <span className="text-faint">·</span>
-                  <span>{running!.latency_ms ?? '—'} ms</span>
+                  {/*
+                    Real proxy delay, not `running.latency_ms`: that field is the
+                    handshake against the loopback inbound port, which is always
+                    under a millisecond and was rendered as "0 ms" on every
+                    connection. A dash with the reason in the tooltip is more
+                    useful than a number that cannot be wrong because it never
+                    measures anything.
+                  */}
+                  <button
+                    onClick={() => void measureDelay()}
+                    title={
+                      delay?.error ??
+                      (delay?.node
+                        ? `当前节点 ${delay.node}，点击重新测量`
+                        : '点击测量当前节点延迟')
+                    }
+                    className="underline decoration-dotted decoration-line underline-offset-4 hover:text-fg"
+                  >
+                    {delay?.latency_ms != null ? `延迟 ${delay.latency_ms} ms` : '延迟 —'}
+                  </button>
+                  <span className="text-faint">·</span>
+                  <span title="核心进程的常驻内存（RSS）">
+                    内存 {formatMemory(running!.memory_bytes)}
+                  </span>
                   <span className="text-faint">·</span>
                   <span>已运行 {formatUptime(running!.uptime_secs)}</span>
                   {traffic && (
@@ -259,11 +306,12 @@ export function Dashboard() {
           cores is first-class information, and switching is one click away. */}
       <Card className="mt-4">
         <SectionTitle title="核心" hint="同一时刻只有一个核心运行" />
-        <div className="grid grid-cols-[92px_110px_1fr_1fr_96px] gap-3 border-b border-line pb-2 text-[11px] font-semibold tracking-wide text-faint uppercase">
+        <div className="grid grid-cols-[92px_110px_1fr_1fr_88px_96px] gap-3 border-b border-line pb-2 text-[11px] font-semibold tracking-wide text-faint uppercase">
           <div>核心</div>
           <div>状态</div>
           <div>版本</div>
           <div>监听</div>
+          <div className="text-right">内存</div>
           <div className="text-right">操作</div>
         </div>
         {status?.cores.map((core) => {
@@ -271,7 +319,7 @@ export function Dashboard() {
           return (
             <div
               key={core.kind}
-              className="grid grid-cols-[92px_110px_1fr_1fr_96px] items-center gap-3 border-b border-line py-2.5 text-[13px] last:border-b-0"
+              className="grid grid-cols-[92px_110px_1fr_1fr_88px_96px] items-center gap-3 border-b border-line py-2.5 text-[13px] last:border-b-0"
             >
               <div className={running ? 'font-medium text-fg' : 'text-muted'}>
                 {CORE_LABEL[core.kind]}
@@ -297,6 +345,9 @@ export function Dashboard() {
               </div>
               <div className="text-muted tabular">
                 {running ? `127.0.0.1:${core.listen_port ?? '—'}` : '—'}
+              </div>
+              <div className="text-right text-muted tabular">
+                {formatMemory(core.memory_bytes)}
               </div>
               <div className="flex justify-end gap-2 text-[12px]">
                 {running ? (

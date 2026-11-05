@@ -135,7 +135,8 @@ function status(): ManagerStatus {
     uptime_secs: states[kind] === 'running' ? 320 + index * 7 : null,
     listen_port: 7890,
     listening: states[kind] === 'running',
-    latency_ms: states[kind] === 'running' ? 1 : null,
+    latency_ms: states[kind] === 'running' ? 0 : null,
+    memory_bytes: states[kind] === 'running' ? 86_400_000 : null,
     last_error: null,
   }))
 
@@ -143,6 +144,7 @@ function status(): ManagerStatus {
     active_core: activeCore,
     exclusive: true,
     data_dir: 'C:\\Users\\you\\AppData\\Roaming\\TriProxy',
+    process_memory_bytes: 41_200_000,
     cores,
   }
 }
@@ -261,6 +263,8 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return { applied: false, node: 'mock', reason: 'mock mode' } as T
     case 'set_favorite':
       return Boolean(args?.favorite) as T
+    case 'active_delay':
+      return { node: nodes[0]?.name ?? null, latency_ms: 128, error: null } as T
     case 'test_proxy_delay':
       return nodes.map((n, i) => ({
         node_id: n.id,

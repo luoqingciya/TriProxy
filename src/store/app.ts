@@ -18,6 +18,7 @@ import { create } from 'zustand'
 import { api } from '../services/api'
 import { CORE_LABEL } from '../types'
 import type {
+  ActiveDelay,
   AppliedProxy,
   ConnectionsSnapshot,
   LatencySample,
@@ -76,6 +77,13 @@ interface AppState {
   latency: Record<string, LatencySample>
   traffic: TrafficSample | null
   /**
+   * Delay of the node the PROXY group is using, measured through the core.
+   *
+   * Not part of : each measurement is a real HTTP request through
+   * the proxy, so it runs on its own slower timer instead of every two seconds.
+   */
+  delay: ActiveDelay | null
+  /**
    * Recent traffic samples, oldest first, one per poll.
    *
    * Kept in memory only: the chart answers "what has my connection been doing
@@ -109,6 +117,7 @@ interface AppState {
   setSystemProxy: (enabled: boolean) => Promise<void>
   testLatency: () => Promise<void>
   testProxyDelay: () => Promise<void>
+  measureDelay: () => Promise<void>
   closeConnection: (id: string | null) => Promise<void>
   selectNode: (nodeId: string | null) => Promise<void>
   toggleFavorite: (nodeId: string) => Promise<void>
@@ -131,6 +140,7 @@ export const useApp = create<AppState>((set, get) => ({
   proxy: null,
   latency: {},
   traffic: null,
+  delay: null,
   trafficHistory: [],
   connections: null,
   testing: false,
@@ -379,6 +389,22 @@ export const useApp = create<AppState>((set, get) => ({
       set({ error: describe(error) })
     } finally {
       set({ testing: false })
+    }
+  },
+
+  /**
+   * Measure the delay of whatever the group is using right now.
+   *
+   * Failures land in `delay.error` rather than the global banner: "Xray has no
+   * controller API" is a permanent property of the running core, not an error
+   * the user can act on, and a toast every ten seconds would be noise.
+   */
+  measureDelay: async () => {
+    try {
+      const delay = await api.activeDelay()
+      set({ delay })
+    } catch (error) {
+      set({ delay: { node: null, latency_ms: null, error: describe(error) } })
     }
   },
 
