@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
 import { Button, Card, SectionTitle, SettingRow, Toggle } from '../components/ui'
+import { formatMemory } from '../format'
 import { api } from '../services/api'
 import {
   checkForUpdate,
@@ -357,6 +358,14 @@ export function Settings() {
         <SettingRow title="数据目录" hint="配置、核心二进制与日志都存放在这里">
           <span className="max-w-[380px] truncate text-[12.5px] text-muted tabular">
             {status?.data_dir ?? '—'}
+          </span>
+        </SettingRow>
+        <SettingRow
+          title="应用内存"
+          hint="Rust 侧进程的常驻内存；WebView 的渲染进程另算，任务管理器里能看到"
+        >
+          <span className="text-[12.5px] text-muted tabular">
+            {formatMemory(status?.process_memory_bytes)}
           </span>
         </SettingRow>
         <SettingRow

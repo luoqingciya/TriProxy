@@ -78,7 +78,15 @@ pub struct CoreReport {
     pub uptime_secs: Option<u64>,
     pub listen_port: Option<u16>,
     pub listening: Option<bool>,
+    /// Latency of the *loopback* handshake against the inbound port.
+    ///
+    /// This is a local socket round trip, so it is always under a millisecond
+    /// and therefore reported as `0` on every platform. It answers "is the port
+    /// accepting connections", not "how far away is my node" — real node latency
+    /// needs an HTTP request through the core and is measured separately.
     pub latency_ms: Option<u64>,
+    /// Resident memory of the core process, in bytes.
+    pub memory_bytes: Option<u64>,
     pub last_error: Option<String>,
 }
 
@@ -87,6 +95,12 @@ pub struct ManagerStatus {
     pub active_core: Option<CoreKind>,
     pub exclusive: bool,
     pub data_dir: PathBuf,
+    /// Resident memory of the process hosting the manager, in bytes.
+    ///
+    /// For the CLI that is the CLI itself; for the desktop shell it is the Rust
+    /// side, which excludes the WebView's own processes. Naming it "self"
+    /// rather than "app" keeps the number from being read as the whole window.
+    pub process_memory_bytes: Option<u64>,
     pub cores: Vec<CoreReport>,
 }
 
@@ -270,6 +284,7 @@ impl CoreManager {
                 listen_port: health.listen_port,
                 listening: health.listening,
                 latency_ms: health.latency_ms,
+                memory_bytes: health.pid.and_then(crate::memory::resident_bytes),
                 last_error: health.last_error,
             });
         }
@@ -278,6 +293,7 @@ impl CoreManager {
             active_core: active,
             exclusive: true,
             data_dir: self.layout.root().to_path_buf(),
+            process_memory_bytes: crate::memory::self_resident_bytes(),
             cores,
         }
     }

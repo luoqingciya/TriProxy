@@ -35,7 +35,15 @@ export interface CoreReport {
   uptime_secs: number | null
   listen_port: number | null
   listening: boolean | null
+  /**
+   * Loopback handshake against the inbound port, not node latency.
+   *
+   * Always 0: it is a local socket round trip. Real node latency comes from
+   * `activeDelay()` and is shown separately.
+   */
   latency_ms: number | null
+  /** Resident memory of the core process, in bytes. */
+  memory_bytes: number | null
   last_error: string | null
 }
 
@@ -51,7 +59,17 @@ export interface ManagerStatus {
   active_core: CoreKind | null
   exclusive: boolean
   data_dir: string
+  /** Resident memory of the process hosting the shell, in bytes. */
+  process_memory_bytes: number | null
   cores: CoreReport[]
+}
+
+/** Delay of the node the PROXY group is currently using. */
+export interface ActiveDelay {
+  node: string | null
+  latency_ms: number | null
+  /** Why there is no figure (Xray, no node, probe failed). */
+  error: string | null
 }
 
 export interface Subscription {

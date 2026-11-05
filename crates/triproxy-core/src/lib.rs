@@ -43,6 +43,7 @@ pub mod error;
 pub mod health;
 pub mod latency;
 pub mod logging;
+pub mod memory;
 pub mod network;
 pub mod paths;
 pub mod process;
@@ -60,7 +61,7 @@ pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
     compile, compile_all, parse_rule_sets, parse_rules, CompileError, CompileOptions,
     CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleError, RuleKind, RuleMode, RuleSet,
-    RuleSetBehavior, RuleSetFormat, RuleTarget, SkippedNode,
+    RuleSetBehavior, RuleSetFormat, RuleTarget, SkippedNode, AUTO_GROUP, PROXY_GROUP,
 };
 pub use controller::{ConnectionInfo, ConnectionsSnapshot, ControllerClient, TrafficSample};
 pub use core::{
@@ -70,7 +71,8 @@ pub use core::{
 pub use error::{Error, Result};
 pub use health::CoreHealth;
 pub use latency::{
-    measure_nodes, measure_proxy_delay, tcp_latency, LatencyKind, LatencySample, DEFAULT_PROBE_URL,
+    active_delay, measure_nodes, measure_proxy_delay, tcp_latency, ActiveDelay, LatencyKind,
+    LatencySample, DEFAULT_PROBE_URL,
 };
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{

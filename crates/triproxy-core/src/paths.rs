@@ -37,7 +37,20 @@ pub struct Layout {
 
 impl Layout {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        // A relative root is a trap, not a convenience: cores are launched with
+        // `-d <directory of the config>` and mihomo resolves a relative `-f`
+        // against it, so `--data-dir ./data` made the core look for
+        // `./data/configs/mihomo/./data/configs/mihomo/config.yaml`, find
+        // nothing, and silently start from its own default config — profile
+        // ignored, no controller API, no explanation. Anchoring the root to the
+        // working directory once, here, keeps every derived path meaningful no
+        // matter what a child process does with its cwd.
+        let root = match std::env::current_dir() {
+            Ok(cwd) if !root.is_absolute() => cwd.join(root),
+            _ => root,
+        };
+        Self { root }
     }
 
     /// Resolve the default layout.
@@ -269,16 +282,28 @@ mod tests {
 
     #[test]
     fn layout_is_fully_derived_from_root() {
-        let layout = Layout::new("/tmp/triproxy-test");
-        assert_eq!(layout.bin_dir(), Path::new("/tmp/triproxy-test/bin"));
+        // `temp_dir()` rather than a literal "/tmp": on Windows that string has
+        // no drive letter and is therefore *relative*, so the layout anchors it
+        // to the working directory and every assertion below would shift.
+        let root = std::env::temp_dir().join("triproxy-test");
+        let layout = Layout::new(&root);
+        assert_eq!(layout.bin_dir(), root.join("bin"));
         assert_eq!(
             layout.core_config_dir("sing-box"),
-            Path::new("/tmp/triproxy-test/configs/sing-box")
+            root.join("configs/sing-box")
         );
-        assert_eq!(
-            layout.state_file(),
-            Path::new("/tmp/triproxy-test/state.json")
+        assert_eq!(layout.state_file(), root.join("state.json"));
+    }
+
+    #[test]
+    fn a_relative_root_is_anchored_to_the_working_directory() {
+        let layout = Layout::new("some-relative-dir");
+        assert!(
+            layout.root().is_absolute(),
+            "a relative root breaks core launch: {}",
+            layout.root().display()
         );
+        assert!(layout.root().ends_with("some-relative-dir"));
     }
 
     #[test]

@@ -194,6 +194,7 @@ pub fn run() {
             commands::select_node,
             commands::set_favorite,
             commands::test_proxy_delay,
+            commands::active_delay,
             commands::traffic,
             commands::connections,
             commands::close_connection,
