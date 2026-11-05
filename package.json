@@ -1,7 +1,7 @@
 {
   "name": "triproxy",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "description": "TriProxy desktop client (Tauri + React)",
   "scripts": {
