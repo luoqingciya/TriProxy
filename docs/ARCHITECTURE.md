@@ -1361,18 +1361,23 @@ sing-box 读 `.srs`，同一个 URL 喂不了两边。所以界面上一条规�
 | 应用更新 | 核心与应用都能更新，但应用更新只在包含该功能的版本之后生效 |
 | 多语言 | 界面只有中文 |
 | 备份 | 不含核心二进制（设计如此：能重新下载） |
-| 内存 | 三平台都读 RSS，但只在 Windows 上核对过数值 |
+| 内存 | 三平台都读 RSS，Windows 核对过数值，Linux 只确认了数值合理、会随核心变化 |
 
 ### 27.3 只在部分平台成立
 
+以下结论以 **v0.2.8** 为基准：Windows 与 Linux 的「实测」来自真机（Linux 为 Ubuntu 26.10
+Desktop），macOS 的部分来自代码审查与 CI 构建，不是真机。
+
 - **系统代理**：Windows 实测过；macOS（`networksetup`）与 Linux（`gsettings`）代码写好但未真机验证
-- **托盘**：Windows 实测过；macOS / Linux 走同一套 Tauri 接口，没有真机点验
+- **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop，GNOME 的 StatusNotifier）实测过；macOS 走同一套
+  Tauri 接口，没有真机点验
 - **深链接**：Windows 上 `register_all()` 已接；macOS 依赖打包后的 Info.plist，未真机验证
 - **连接 / 流量 / 真实延迟**：依赖控制器 API，Xray 没有，界面上会说明
-- **内存**：三平台都由 `sysinfo` 读取 RSS，只有 Windows 上核对过数值（macOS 的 `proc_pidinfo`
-  路径无法在本项目的开发环境里验证）
+- **内存**：三平台都由 `sysinfo` 读取 RSS，Windows 上核对过数值；Linux 只确认了数字会随核心运行出现
+  并变化，没有与 `ps` 逐项比对（macOS 的 `proc_pidinfo` 路径无法在本项目的开发环境里验证）
 - **开机自启**：Windows 走 Run 键，会弹一次 UAC（应用清单要求管理员权限）；改用计划任务是已知的后续
-- **macOS / Linux 安装包**：v0.2.2 起提供，构建与产物内容经 CI 校验，但没有在真机上装过
+- **安装包**：Windows 本地实测；Linux（`.deb` 与 AppImage）在 Ubuntu 26.10 Desktop 上实测可用；
+  macOS 的 `.dmg` 只经 CI 构建与产物内容校验，没有在真机上装过
 
 ### 27.4 明确不做
 

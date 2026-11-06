@@ -144,17 +144,20 @@ triproxy core install xray --file ./Xray-windows-64.zip
 - **规则集只能按核心格式订阅**：`.mrs`/`.yaml` 归 Mihomo，`.srs` 归 sing-box，Xray 不支持；
   一条 URL 喂不了两个核心，因为两种格式不通用
 - **流量曲线不落盘**：只有最近 3 分钟，关掉窗口就没了
-- **内存数字只在 Windows 上核对过**：三个平台都读 RSS，但 macOS 与 Linux 的数值没有真机对比；
-  「应用内存」不含 WebView 的渲染进程，任务管理器里看到的总和会更大
+- **内存数字只在 Windows 上核对过**：三个平台都读 RSS，Linux 上确认过数字会随核心运行出现并变化，
+  但没有与 `ps` 逐项比对；「应用内存」不含 WebView 的渲染进程，任务管理器里看到的总和会更大
 - **下拉框的弹出列表在 Linux 上依赖引擎支持**：关闭状态的控件由我们自己绘制，任何平台都一致；
-  展开后的列表仍由 GTK 画，`color-scheme` 能让它变深，但无法在所有发行版上保证
+  展开后的列表仍由 GTK 画，`color-scheme` 能让它变深——Ubuntu 26.10 上正常，其他发行版的
+  主题设置仍可能有差异
 - **节点管理**：能搜索、按协议过滤、点选切换、收藏并只看收藏，但没有分组和手动排序
 - **系统代理只在 Windows 上实测过**，macOS（`networksetup`）与 Linux（`gsettings`）的实现已写好但未经真机验证
-- **托盘与深链接只在 Windows 上验证过**：macOS 与 Linux 走同一套 Tauri 接口，但没有真机点验；
+- **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop）实测正常；macOS 走同一套 Tauri 接口，没有真机点验。
   没有托盘环境时应用会退回「关闭即退出」的行为
+- **深链接只在 Windows 上验证过**：macOS 依赖打包后的 Info.plist，Linux 需要 `.desktop` 注册，均未真机点验
 - **开机自启在 Windows 上会弹一次 UAC**（应用清单要求管理员权限）；改用计划任务可以静默启动，尚未做
-- **macOS 与 Linux 的桌面安装包仍未经真机验证**：构建与产物内容由 CI 校验（确认核心已打包），
-  但没有实际安装过。Windows 版本是本地实测的。这两个平台如果装不上，请反馈，不要当成「应该能用」
+- **macOS 的桌面安装包仍未经真机验证**：构建与产物内容由 CI 校验（确认核心已打包），但没有实际安装过。
+  Windows 与 Linux（`.deb` / AppImage，Ubuntu 26.10 Desktop）是实测的。macOS 如果装不上，请反馈，
+  不要当成「应该能用」
 
 ## 授权
 
