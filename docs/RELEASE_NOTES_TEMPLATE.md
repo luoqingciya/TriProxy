@@ -150,7 +150,8 @@ triproxy core install xray --file ./Xray-windows-64.zip
   展开后的列表仍由 GTK 画，`color-scheme` 能让它变深——Ubuntu 26.10 上正常，其他发行版的
   主题设置仍可能有差异
 - **节点管理**：能搜索、按协议过滤、点选切换、收藏并只看收藏，但没有分组和手动排序
-- **系统代理只在 Windows 上实测过**，macOS（`networksetup`）与 Linux（`gsettings`）的实现已写好但未经真机验证
+- **系统代理**：Windows 与 Linux（Ubuntu 26.10 Desktop，`gsettings`）实测可用；macOS 的
+  `networksetup` 路径按同一接口实现，未经真机验证
 - **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop）实测正常；macOS 走同一套 Tauri 接口，没有真机点验。
   没有托盘环境时应用会退回「关闭即退出」的行为
 - **深链接只在 Windows 上验证过**：macOS 依赖打包后的 Info.plist，Linux 需要 `.desktop` 注册，均未真机点验

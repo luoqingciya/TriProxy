@@ -524,15 +524,17 @@ triproxy-core                   （与 CLI 完全相同的代码）
 |---|---|---|
 | Windows | `HKCU\...\Internet Settings` + `InternetSetOption` 刷新 WinINET | **已在本机实测** |
 | macOS | `networksetup` 逐服务设置 | 未验证 |
-| Linux | `gsettings org.gnome.system.proxy` | 未验证 |
+| Linux | `gsettings org.gnome.system.proxy` | **Ubuntu 26.10 Desktop 实测可用** |
 
 Windows 必须调用 `InternetSetOption(INTERNET_OPTION_SETTINGS_CHANGED / REFRESH)`，
 否则已经在运行的应用会继续用旧代理，用户看到的现象是「开关没反应」。
 
-macOS 与 Linux 的实现按同一 trait 编写，但**没有在真实机器上验证过**——这点在 PR 里明确标注，
+macOS 的实现按同一 trait 编写，但**没有在真实机器上验证过**——这点在 PR 里明确标注，
 不要当成已完成的能力。
 
-### 11.4 实测结果（Windows）
+### 11.4 实测结果
+
+**Windows**
 
 ```text
 启用前：ProxyServer = 127.0.0.1:10808   （用户原本的代理）
@@ -544,6 +546,11 @@ proxy on → 外部杀掉核心进程（模拟崩溃，注册表仍指向 7890�
 下一次任意命令 → "restored the system proxy left behind by a previous session"
                 → 注册表回到 10808
 ```
+
+**Linux（Ubuntu 26.10 Desktop）**
+
+`gsettings` 路径实测可用：`proxy on` 后 GNOME 的网络代理指向 `127.0.0.1:7890`，`proxy off`
+恢复原值。快照与崩溃恢复走的是同一份代码，但没有在 Linux 上单独演练「杀进程后自愈」。
 
 ## 12. Phase 7 — TUN 模式
 
@@ -1368,7 +1375,8 @@ sing-box 读 `.srs`，同一个 URL 喂不了两边。所以界面上一条规�
 以下结论以 **v0.2.8** 为基准：Windows 与 Linux 的「实测」来自真机（Linux 为 Ubuntu 26.10
 Desktop），macOS 的部分来自代码审查与 CI 构建，不是真机。
 
-- **系统代理**：Windows 实测过；macOS（`networksetup`）与 Linux（`gsettings`）代码写好但未真机验证
+- **系统代理**：Windows 与 Linux（Ubuntu 26.10 Desktop，`gsettings`）实测过；macOS 的
+  `networksetup` 路径按同一接口实现，未真机验证
 - **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop，GNOME 的 StatusNotifier）实测过；macOS 走同一套
   Tauri 接口，没有真机点验
 - **深链接**：Windows 上 `register_all()` 已接；macOS 依赖打包后的 Info.plist，未真机验证
