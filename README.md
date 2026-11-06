@@ -157,6 +157,9 @@ npm run dev            # 只跑界面，使用假数据：http://localhost:1420
 - 设置里关掉「关闭窗口时驻留托盘」就退回普通窗口行为；系统托盘不可用时（例如没有
   StatusNotifier 的 Linux 会话）关闭窗口按普通退出处理，不会出现「窗口没了但进程还在」。
 
+托盘在 Windows 与 Linux（Ubuntu 26.10 Desktop，GNOME / StatusNotifier）上实测正常；
+macOS 走同一套 Tauri 接口，未真机点验。
+
 **单实例**：再次启动不会起第二个管理器去抢同一个端口，而是把参数转交给运行中的实例并显示窗口。
 
 **深链接**：
@@ -344,8 +347,8 @@ triproxy proxy off                # 还原 TriProxy 改动前的设置
 **绕过列表可配**（设置 → 代理绕过列表，分号分隔）。留空等于用默认列表，而不是「什么都不绕过」：
 把 localhost 也代理走会毁掉本机所有开发服务器。
 
-Windows 已实测（含外部杀进程模拟崩溃后的自动恢复）；macOS 与 Linux 按同一接口实现，
-未在真机验证。
+Windows 已实测（含外部杀进程模拟崩溃后的自动恢复），Linux（Ubuntu 26.10 Desktop，`gsettings`）
+也已实测可用；macOS 的 `networksetup` 路径按同一接口实现，未在真机验证。
 
 ### TUN
 
@@ -549,7 +552,7 @@ triproxy core update --all       # 安装全部更新
 | 节点管理 | 能搜索、按协议过滤、收藏；没有分组和手动排序 |
 | 流量历史 | 只有 3 分钟，不落盘 |
 | 多语言 | 界面只有中文 |
-| 平台验证 | 系统代理、托盘、深链接、内存数字只在 Windows 上核对过；macOS / Linux 代码按同一接口实现，未经真机验证 |
+| 平台验证 | Windows 与 Linux（Ubuntu 26.10 Desktop）实测可用，系统代理与托盘正常；macOS 仍未经真机验证；深链接只在 Windows 上核对过 |
 | 开机自启 | Windows 走 Run 键，登录时会弹一次 UAC；计划任务方案未做 |
 | 应用更新 | 只在包含该功能的版本之后生效 |
 
