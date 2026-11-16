@@ -63,6 +63,12 @@ jobs:
     name: fedora
     runs-on: ubuntu-latest
     container: fedora:latest
+    # Container jobs set HOME=/github/home while the process runs as root, and
+    # rustup refuses to install when the two disagree ("$HOME differs from
+    # euid-obtained home directory"). Pointing HOME at root's real home fixes it
+    # and keeps the cargo cache where rust-cache expects it.
+    env:
+      HOME: /root
     steps:
       # Before checkout: the checkout action shells out to git, and the bare
       # Fedora image does not carry it.
