@@ -20,13 +20,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use triproxy_core::binaries::{InstallOptions, UpdateStatus};
 use triproxy_core::health::port_is_free;
+use triproxy_core::platform;
 use triproxy_core::process::run_capture;
 use triproxy_core::{
     compile, is_elevated, leftovers, measure_nodes, measure_proxy_delay, parse_payload,
-    AppSettings, CompileOptions, CompiledConfig, CoreKind, CoreManager, CoreReport, Diagnostic,
-    DnsMode, Layout, ManagerStatus, NetworkRequirements, Node, ParsedProfile, Profile,
-    ProfileStore, RefreshStatus, RuleMode, Selector, StoredProfile, SubscriptionService,
-    SwitchReport, SystemProxyManager, DEFAULT_API_PORT, DEFAULT_PROBE_URL,
+    tun_unavailable_reason, AppSettings, CompileOptions, CompiledConfig, CoreKind, CoreManager,
+    CoreReport, Diagnostic, DnsMode, Layout, ManagerStatus, NetworkRequirements, Node,
+    ParsedProfile, Profile, ProfileStore, RefreshStatus, RuleMode, Selector, StoredProfile,
+    SubscriptionService, SwitchReport, SystemProxyManager, DEFAULT_API_PORT, DEFAULT_PROBE_URL,
 };
 use triproxy_core::{select_node, ApplyOutcome, ControllerClient};
 
@@ -640,8 +641,8 @@ async fn cmd_start(
     dns: Option<String>,
     rules: Option<String>,
 ) -> Result<i32> {
-    if tun && !is_elevated() {
-        bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
+    if tun {
+        check_tun_ready()?;
     }
 
     let choice = match core {
@@ -748,8 +749,8 @@ async fn cmd_switch(
     dns: Option<String>,
     rules: Option<String>,
 ) -> Result<i32> {
-    if tun && !is_elevated() {
-        bail!("TUN 模式需要管理员权限：请以管理员身份重新运行终端");
+    if tun {
+        check_tun_ready()?;
     }
 
     let choice = parse_core_choice(core)?;
@@ -1981,12 +1982,34 @@ async fn running_controller(manager: &CoreManager) -> Option<ControllerClient> {
     Some(client)
 }
 
+/// Refuse to start TUN when a prerequisite is visibly missing.
+///
+/// Shared by `start` and `switch`: they differ in what they do to a running
+/// core, not in what TUN needs before it can work.
+fn check_tun_ready() -> Result<()> {
+    if let Some(reason) = tun_unavailable_reason() {
+        bail!("{reason}");
+    }
+    Ok(())
+}
+
 fn cmd_tun_status(manager: &CoreManager) -> Result<i32> {
     println!("TUN 模式");
     if is_elevated() {
         println!("  权限      管理员");
     } else {
         println!("  权限      普通用户 — TUN 需要以管理员身份运行");
+    }
+
+    // Only Linux reports a device node; the other platforms have nothing to say
+    // here and stay quiet rather than print a meaningless "-".
+    if let Some(present) = platform::tun_device_present() {
+        let device = platform::TUN_DEVICE;
+        if present {
+            println!("  设备      {device}");
+        } else {
+            println!("  设备      {device} 不存在 — 执行 sudo modprobe tun 后重试");
+        }
     }
 
     match manager.persisted_listen_port() {
@@ -2060,8 +2083,56 @@ async fn cmd_doctor(manager: &CoreManager) -> Result<i32> {
     println!("TriProxy doctor");
     println!();
 
-    let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    println!("  platform   {platform}");
+    let target = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    println!("  platform   {target}");
+
+    // The distribution is what turns "linux" into an actionable sentence: which
+    // package manager, whether SELinux is watching, whether this session has a
+    // tray to hide into.
+    if let Some(distro) = platform::distro() {
+        let family = distro.family();
+        println!(
+            "  distro     {} ({}, {})",
+            distro.label(),
+            distro.id,
+            family.as_str()
+        );
+    }
+
+    if let Some(desktop) = platform::desktop() {
+        match platform::tray_host_available() {
+            Some(true) => println!("  desktop    {} — 托盘可用", desktop.as_str()),
+            Some(false) => {
+                println!(
+                    "  desktop    {} — 托盘不可用，关闭窗口将退出",
+                    desktop.as_str()
+                );
+                println!("             {}", platform::appindicator_install_hint());
+            }
+            // Unknown: the tray either shows up or it does not, and guessing
+            // wrong is more annoying than saying nothing.
+            None => println!("  desktop    {}", desktop.as_str()),
+        }
+    }
+
+    if let Some(selinux) = platform::selinux() {
+        println!("  selinux    {}", selinux.as_str());
+    }
+
+    if platform::tun_device_present() == Some(false) {
+        println!(
+            "  tun device {} 不存在 — 先执行 sudo modprobe tun",
+            platform::TUN_DEVICE
+        );
+    }
+
+    let proxy = SystemProxyManager::new(manager.layout());
+    let proxy_state = if proxy.supported() {
+        "可用"
+    } else {
+        "不可用（当前桌面没有可驱动的代理设置）"
+    };
+    println!("  proxy      {} — {proxy_state}", proxy.backend_name());
 
     let data_dir = manager.layout().root();
     let writable = probe_writable(data_dir);

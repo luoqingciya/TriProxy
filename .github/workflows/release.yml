@@ -24,8 +24,13 @@
 #
 # Platform differences this pipeline has to absorb:
 #   - the CLI binary is triproxy.exe on Windows, triproxy elsewhere
-#   - bundle formats differ (nsis / dmg / AppImage + deb)
+#   - bundle formats differ (nsis / dmg / AppImage + deb + rpm)
 #   - Linux needs webkit and packaging dependencies installed first
+#
+# Linux ships three formats on purpose. `.deb` covers Debian/Ubuntu, `.rpm`
+# covers Fedora and the rest of the RHEL family — where a `.deb` is not
+# installable at all and an AppImage needs FUSE 2 to be present — and AppImage
+# stays because it is the only Linux format the updater can replace.
 
 name: release
 
@@ -60,7 +65,7 @@ jobs:
           - label: linux
             os: ubuntu-latest
             cli: triproxy
-            bundles: appimage,deb
+            bundles: appimage,deb,rpm
             arch: x64
           - label: macos
             os: macos-latest
@@ -77,8 +82,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # `rpm` is only needed to inspect the built package (rpm -qlp / -qpR
+          # in the verification step): tauri writes the RPM itself with the
+          # pure-Rust `rpm` crate, so no rpmbuild is involved.
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
 
       - uses: actions/setup-node@v4
         with:
@@ -157,6 +165,7 @@ jobs:
               */dmg/*.dmg)         keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.dmg" ;;
               */appimage/*.AppImage) keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.AppImage" ;;
               */deb/*.deb)         keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.deb" ;;
+              */rpm/*.rpm)         keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.rpm" ;;
               # macOS update payload: the updater replaces the .app bundle from
               # this tarball, not from the dmg.
               */macos/*.app.tar.gz) keep "$f" "TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-lite.app.tar.gz" ;;
@@ -294,6 +303,7 @@ jobs:
               */dmg/*.dmg)   cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.dmg" ;;
               */appimage/*.AppImage) cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.AppImage" ;;
               */deb/*.deb)   cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.deb" ;;
+              */rpm/*.rpm)   cp "$f" "artifacts/TriProxy-${version}-${{ matrix.label }}-${{ matrix.arch }}-full.rpm" ;;
             esac
           done
           ls -l artifacts/
@@ -329,6 +339,45 @@ jobs:
               echo "cores present: $found_core"
               ;;
           esac
+
+      # Tauri writes the RPM with the pure-Rust `rpm` crate, not `rpmbuild`, and
+      # unlike the deb bundler it never looks inside the ELF. The requirement
+      # list is therefore exactly `bundle.linux.rpm.depends` — a typo there
+      # yields a package `dnf` refuses with "nothing provides webkit2gtk4.1",
+      # and nothing else in the pipeline would notice. Fedora users would find
+      # out at install time, which is the worst possible time.
+      - name: Verify the RPM payload and its dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          full=$(ls artifacts/*-full.rpm | head -1)
+          lite=$(ls artifacts/*-lite.rpm | head -1)
+
+          echo "--- $full: bundled cores ---"
+          payload=$(rpm -qlp "$full")
+          for core in mihomo sing-box xray; do
+            printf '%s\n' "$payload" | grep -qE "/cores/${core}$" \
+              || { echo "::error::$core is missing from the RPM payload"; exit 1; }
+          done
+          printf '%s\n' "$payload" | grep -qE '/cores/THIRD-PARTY-NOTICES.txt$' \
+            || { echo "::error::the RPM ships cores without their notices"; exit 1; }
+          printf '%s\n' "$payload" | grep -qE '^/usr/bin/' \
+            || { echo "::error::the RPM installs no binary under /usr/bin"; exit 1; }
+
+          echo "--- $lite: must not carry cores ---"
+          if rpm -qlp "$lite" | grep -qE '/cores/'; then
+            echo "::error::the lite RPM carries cores"
+            exit 1
+          fi
+
+          echo "--- declared requirements ---"
+          requires=$(rpm -qpR "$full")
+          printf '%s\n' "$requires"
+          for pkg in webkit2gtk4.1 gtk3 libappindicator-gtk3; do
+            printf '%s\n' "$requires" | grep -qx "$pkg" \
+              || { echo "::error::the RPM does not require $pkg"; exit 1; }
+          done
 
       - name: Verify both variants were produced
         shell: bash

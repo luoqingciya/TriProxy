@@ -65,6 +65,12 @@ Windows 一直没暴露这个问题，因为安装包恰好把 `cores/` 放在 e
 - 连接列表带进程与命中规则；流量曲线；节点收藏
 - 配置备份 / 恢复（合并而非覆盖）、应用自更新
 
+**平台**
+
+- Fedora / RHEL 系：Linux 增加 `.rpm` 包；CI 在 Fedora 容器里编译并跑测试
+- `triproxy doctor` 报出发行版与包族、桌面会话与托盘宿主、SELinux 状态、`/dev/net/tun`、系统代理后端
+- TUN 启动前检查设备节点：缺 `/dev/net/tun` 时直接给 `sudo modprobe tun`，而不是让核心抛日志
+
 ## 下载哪一个？
 
 每个平台都提供桌面安装包，两个变体：
@@ -78,10 +84,22 @@ Windows 一直没暴露这个问题，因为安装包恰好把 `cores/` 放在 e
 |---|---|---|
 | Windows | `TriProxy-<版本>-windows-x64-{lite,full}.exe` | 双击安装到 `C:\Program Files\TriProxy` |
 | macOS (Apple Silicon) | `TriProxy-<版本>-macos-arm64-{lite,full}.dmg` | 打开后拖进「应用程序」 |
-| Linux | `TriProxy-<版本>-linux-x64-{lite,full}.AppImage` / `.deb` | AppImage 加执行权限直接运行；deb 用包管理器安装 |
+| Linux | `TriProxy-<版本>-linux-x64-{lite,full}.AppImage` / `.deb` / `.rpm` | AppImage 加执行权限直接运行；deb / rpm 用包管理器安装 |
 
 文件名读作「平台-架构-变体」：`windows-x64-lite` 就是 Windows / 64 位 Intel / 精简版，
 不用再靠扩展名反推系统。
+
+Linux 三种格式对应三种机器：
+
+```bash
+sudo apt install ./TriProxy-<版本>-linux-x64-lite.deb    # Debian / Ubuntu
+sudo dnf install ./TriProxy-<版本>-linux-x64-lite.rpm    # Fedora / RHEL / Rocky / AlmaLinux
+chmod +x TriProxy-<版本>-linux-x64-lite.AppImage         # 任意发行版（需 FUSE 2）
+```
+
+Fedora 用 `.rpm`：`dnf` 装不了 `.deb`，而 AppImage 还要求 FUSE 2 在位。装完先跑一次
+`triproxy doctor`——它会报出这台机器上的两件 Fedora 常见事（托盘缺 AppIndicator 扩展、
+`/dev/net/tun` 不存在导致 TUN 起不来）并给出对应命令。
 
 **命令行都在同一个包里**，与图形界面共用同一份数据，不需要单独下载。
 
@@ -151,9 +169,16 @@ triproxy core install xray --file ./Xray-windows-64.zip
   主题设置仍可能有差异
 - **节点管理**：能搜索、按协议过滤、点选切换、收藏并只看收藏，但没有分组和手动排序
 - **系统代理**：Windows 与 Linux（Ubuntu 26.10 Desktop，`gsettings`）实测可用；macOS 的
-  `networksetup` 路径按同一接口实现，未经真机验证
+  `networksetup` 路径按同一接口实现，未经真机验证。Linux 上只驱动 GNOME，KDE Plasma 会话里
+  `doctor` 会显示「不可用」
 - **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop）实测正常；macOS 走同一套 Tauri 接口，没有真机点验。
-  没有托盘环境时应用会退回「关闭即退出」的行为
+  没有托盘环境时应用会退回「关闭即退出」的行为。Fedora Workstation 默认不带 AppIndicator 扩展，
+  开箱状态下托盘不可用，装扩展即可（`sudo dnf install gnome-shell-extension-appindicator`）
+- **Linux 的应用内自更新只对 AppImage 有效**：`.deb` / `.rpm` 装的那份用包管理器升级
+  （`sudo dnf upgrade triproxy` / `sudo apt install --only-upgrade triproxy`）
+- **Fedora 的 RPM 由 CI 构建并校验载荷与依赖，未在真机上装过**：Fedora 45 上核对了发行版与桌面
+  探测、TUN 设备检查、`gsettings` 代理写入与还原；完整构建由 CI 的 Fedora 任务覆盖（容器里
+  `cargo check` + `cargo test` + 桌面外壳编译）。如果 `dnf install` 失败，请反馈
 - **深链接只在 Windows 上验证过**：macOS 依赖打包后的 Info.plist，Linux 需要 `.desktop` 注册，均未真机点验
 - **开机自启在 Windows 上会弹一次 UAC**（应用清单要求管理员权限）；改用计划任务可以静默启动，尚未做
 - **macOS 的桌面安装包仍未经真机验证**：构建与产物内容由 CI 校验（确认核心已打包），但没有实际安装过。

@@ -93,6 +93,36 @@ pub fn is_elevated() -> bool {
     }
 }
 
+/// Why TUN cannot start here, in words the user can act on.
+///
+/// Two things can be missing before a core ever tries: the privilege to create
+/// an interface, and — on Linux — the device node the kernel exposes for it.
+/// Both otherwise surface as a core-internal failure that names neither, which
+/// is the worst possible shape for an error: the user is told something broke
+/// and given nothing to do about it.
+///
+/// Returns `None` when nothing is visibly missing. That is not a promise the
+/// start will succeed — only that the check found no reason to refuse early,
+/// and the core's own validation stays authoritative.
+pub fn unavailable_reason() -> Option<String> {
+    if !is_elevated() {
+        return Some(if cfg!(windows) {
+            "TUN 模式需要管理员权限：请以管理员身份重新启动 TriProxy".to_string()
+        } else {
+            "TUN 模式需要 root 权限：请用 sudo 运行，或为该核心授予 cap_net_admin".to_string()
+        });
+    }
+
+    if crate::platform::tun_device_present() == Some(false) {
+        return Some(format!(
+            "TUN 模式需要 {}，但该设备不存在：先执行 `sudo modprobe tun` 再重试",
+            crate::platform::TUN_DEVICE
+        ));
+    }
+
+    None
+}
+
 /// Adapters that look like a TUN interface left behind by a core.
 pub fn leftovers() -> Result<Vec<TunAdapter>> {
     #[cfg(windows)]
@@ -261,5 +291,18 @@ mod tests {
         // The value depends on how the test runner was started; this asserts the
         // FFI call does not crash or return garbage.
         let _elevated = is_elevated();
+    }
+
+    /// The pre-flight check has to say *what* is missing, not just that
+    /// something is: "TUN failed" leaves the user with nothing to do.
+    #[test]
+    fn an_unelevated_process_is_told_about_the_privilege() {
+        if is_elevated() {
+            // Running as root: there is no privilege to complain about, and the
+            // device check below it is machine-dependent.
+            return;
+        }
+        let reason = unavailable_reason().expect("an unelevated process is refused");
+        assert!(reason.contains("权限"), "{reason}");
     }
 }

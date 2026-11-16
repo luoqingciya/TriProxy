@@ -17,4 +17,9 @@ pub mod system_proxy;
 pub mod tun;
 
 pub use system_proxy::{AppliedProxy, ProxyBackend, SystemProxyManager};
-pub use tun::{is_elevated, leftovers, TunAdapter, INTERFACE_NAME};
+// Renamed on the way out: inside `tun` the bare name is unambiguous, but at the
+// crate root `unavailable_reason` says nothing about *what* is unavailable.
+pub use tun::{
+    is_elevated, leftovers, unavailable_reason as tun_unavailable_reason, TunAdapter,
+    INTERFACE_NAME,
+};

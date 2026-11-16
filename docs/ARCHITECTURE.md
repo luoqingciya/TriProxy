@@ -211,18 +211,45 @@ GitHub 的 Intel runner 也长期排队，维护一条几乎无人使用的构�
 `binaries/manifest.rs` 仍保留该目标的资产匹配规则，用户自行编译时可以正常使用，
 只是不发布官方包。
 
-每个任务产出两个包：
+每个任务产出两个变体，格式与平台原生安装器一致（不是 zip / tar.gz 归档）：
 
-1. 编译 → `dist/lite/`（二进制 + README/LICENSE/NOTICE/ADDITIONAL-TERMS）
-2. 用刚编译出的二进制执行 `core install mihomo|sing-box|xray --data-dir <tmp>`，
-   把 `bin/` 下的二进制与安装记录复制进 `dist/full/cores/`
-3. 用 `jq` 读安装记录生成 `cores/THIRD-PARTY-NOTICES.txt`（版本 / 授权 / 源码 tag 地址 / sha256）
-4. **冒烟验证**：用全新数据目录运行 `dist/full/triproxy cores`，断言输出含 `bundled`。
-   这一步能拦住「包做出来了但程序找不到核心」这类只在发布后才暴露的问题
-5. 打包（Windows `zip` / Unix `tar.gz`）并上传 artifact
+1. `lite` —— 界面 + CLI，核心首次运行时下载；
+2. `full` —— 在此基础上把三个核心与各自许可全文放进 `cores/`。
+
+核心由刚编译出的 CLI 自己下载（`core install ... --data-dir <tmp>`），所以 SHA256 与上游 Release
+一致；`THIRD-PARTY-NOTICES.txt` 由安装记录里的 tag 与 sha256 生成。构建后还要验证**载荷里真的
+有核心**（Windows 查 NSIS 脚本，其余平台在 bundle 目录里找 `xray` 与 `geosite.dat`）——只比大小
+不够：两个变体都缺核心时，大小关系依然成立。
 
 release 任务汇总所有 artifact，`gh release create` 发布，说明取自
 `docs/RELEASE_NOTES_TEMPLATE.md`（两种包的取舍、lite 版安装指引、授权与随包核心的合规说明）。
+
+### 5.1 分发格式与发行版差异
+
+Linux 出三种包，覆盖三种机器的三种装法：
+
+| 格式 | 目标发行版 | 为什么需要它 |
+|---|---|---|
+| `.deb` | Debian / Ubuntu | 常规路径 |
+| `.rpm` | Fedora / RHEL / Rocky / AlmaLinux | `dnf` 装不了 `.deb`，而 AppImage 还要求 FUSE 2 |
+| `.AppImage` | 任意 | 免安装；也是 Linux 上**唯一**能被应用内更新器替换的格式 |
+
+**RPM 的依赖要手写，deb 的不用。** 两个打包器的行为不一样：deb 打包器读 ELF 的 `NEEDED`，
+映射成 Debian 包名；RPM 打包器（`rpm` crate，纯 Rust，不调 `rpmbuild`，本地也不需要它）只写
+`bundle.linux.rpm.depends` 里列的项，**完全不看二进制**。所以 `webkit2gtk4.1`、`gtk3`、
+`libappindicator-gtk3` 是写在 `tauri.conf.json` 里的。写错的后果是 `dnf install` 报
+`nothing provides …`——安装那一刻才暴露，所以流水线用 `rpm -qpR` 断言这三项真在依赖里，
+再用 `rpm -qlp` 断言 `full` 包里有 `cores/xray`、`lite` 包里没有。
+
+**这三个名字只对 Fedora / RHEL 系成立。** openSUSE 里同一个库叫 `libwebkit2gtk-4.1-0`，
+硬写 Fedora 名字等于宣布这份 RPM 只服务一个家族——文档里也就只写「Fedora / RHEL / Rocky」，
+不写「所有 RPM 发行版」。写一串架构无关的 soname（`libwebkit2gtk-4.1.so.0`）看着更通用，
+实际匹配不上任何包：RPM 的能力名带 `()(64bit)` 后缀，换个架构后缀又不一样。
+
+**发行版差异在 CI 里单独跑一遍。** `ci.yml` 的 `fedora` 任务在 `fedora:latest` 容器里
+`cargo check` + `cargo test` + `cargo check src-tauri`：同一份代码在 Ubuntu 上过、在 Fedora 上
+因为 glib / WebKitGTK 版本或包名不同而不过，是这类项目最常见的惊喜。任务里那份 `dnf install`
+清单与 README「从源码」一节逐项对应，等于把文档里的命令也测了。
 
 ## 6. Phase 2 — Unified Profile
 
@@ -524,7 +551,13 @@ triproxy-core                   （与 CLI 完全相同的代码）
 |---|---|---|
 | Windows | `HKCU\...\Internet Settings` + `InternetSetOption` 刷新 WinINET | **已在本机实测** |
 | macOS | `networksetup` 逐服务设置 | 未验证 |
-| Linux | `gsettings org.gnome.system.proxy` | **Ubuntu 26.10 Desktop 实测可用** |
+| Linux | `gsettings org.gnome.system.proxy` | **Ubuntu 26.10 Desktop 实测可用**；Fedora 45（GNOME）上五个键的写入与逐字还原已核对 |
+
+Linux 的实现只驱动 GNOME 的 `gsettings`，因为那是唯一一个既跨发行版、又能用一个键位问出
+「你这台机器有没有这个开关」的接口：`supported()` 真去读一次 `org.gnome.system.proxy mode`，
+读得到才算可用。KDE Plasma（Fedora 也提供这个版本）用的是 `kioslaverc` + KIO，
+**没有实现**——与其猜着写一段没人验证过的 `kwriteconfig`，不如让 `doctor` 明说「不可用」，
+用户还能用环境变量或 TUN。
 
 Windows 必须调用 `InternetSetOption(INTERNET_OPTION_SETTINGS_CHANGED / REFRESH)`，
 否则已经在运行的应用会继续用旧代理，用户看到的现象是「开关没反应」。
@@ -552,6 +585,20 @@ proxy on → 外部杀掉核心进程（模拟崩溃，注册表仍指向 7890�
 `gsettings` 路径实测可用：`proxy on` 后 GNOME 的网络代理指向 `127.0.0.1:7890`，`proxy off`
 恢复原值。快照与崩溃恢复走的是同一份代码，但没有在 Linux 上单独演练「杀进程后自愈」。
 
+**Linux（Fedora 45 Workstation）**
+
+同一套五个键在 Fedora 上逐字往返，且**用户原有的值被完整还原**——这一条比「能不能设」更重要，
+因为还原是快照机制唯一的存在理由：
+
+```text
+启用前：mode='none'  http=127.0.0.1:10808   https=127.0.0.1:10808
+写入：  mode='manual' http/https=127.0.0.1:7890
+还原：  mode='none'  http=127.0.0.1:10808   https=127.0.0.1:10808   ← 与启用前逐字一致
+```
+
+不在 KDE 上测，是因为那里根本没实现（`gsettings` 写了也不会被 KIO 读取，测出来的「成功」
+是假的）。
+
 ## 12. Phase 7 — TUN 模式
 
 ### 12.1 TriProxy 不自己创建 TUN 设备
@@ -565,8 +612,10 @@ TriProxy 只负责**生成配置**、**检查前提**、**发现残留**。自�
 1. **配置生成**：sing-box 的 `tun` inbound（`interface_name: TriProxy`）、mihomo 的 `tun` 段。
    Xray 没有 TUN，`compile()` 在 `options.tun` 为真时直接返回 `Incompatible`——
    而不是生成一份核心会拒绝的配置。
-2. **权限前置检查**：创建 TUN 需要管理员/root。启动前检查，把「核心启动失败 + 一段看不懂的
-   日志」变成一句可执行的提示。
+2. **前置检查**：创建 TUN 需要管理员/root，Linux 上还需要内核暴露 `/dev/net/tun`。两件事都在
+   启动前查，把「核心启动失败 + 一段不提设备的日志」变成一句可执行的提示：
+   `sudo modprobe tun`，或者给核心 `cap_net_admin`。`unavailable_reason()` 是 CLI 与 GUI
+   共用的唯一判定，`start`、`switch` 和 `tun status` 不会各说各话。
 3. **残留发现**：核心被硬杀后网卡与其路由可能残留。`leftovers()` 枚举疑似我们的网卡并给出
    清理命令。
 
@@ -1373,11 +1422,12 @@ sing-box 读 `.srs`，同一个 URL 喂不了两边。所以界面上一条规�
 ### 27.3 只在部分平台成立
 
 以下结论以 **v0.2.8** 为基准：Windows 与 Linux 的「实测」来自真机（Linux 为 Ubuntu 26.10
-Desktop），macOS 的部分来自代码审查与 CI 构建，不是真机。
+Desktop 与 Fedora 45 Workstation），macOS 的部分来自代码审查与 CI 构建，不是真机。
 
-- **系统代理**：Windows 与 Linux（Ubuntu 26.10 Desktop，`gsettings`）实测过；macOS 的
-  `networksetup` 路径按同一接口实现，未真机验证
-- **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop，GNOME 的 StatusNotifier）实测过；macOS 走同一套
+- **系统代理**：Windows 与 Linux（Ubuntu 26.10 Desktop）实测过；Fedora 45 上核对过五个 `gsettings`
+  键的写入与逐字还原；macOS 的 `networksetup` 路径按同一接口实现，未真机验证
+- **托盘**：Windows 与 Linux（Ubuntu 26.10 Desktop，GNOME 的 StatusNotifier）实测过；Fedora 45
+  的 Workstation 会话里**没有** AppIndicator 扩展，托盘不可用这件事由 `doctor` 报出；macOS 走同一套
   Tauri 接口，没有真机点验
 - **深链接**：Windows 上 `register_all()` 已接；macOS 依赖打包后的 Info.plist，未真机验证
 - **连接 / 流量 / 真实延迟**：依赖控制器 API，Xray 没有，界面上会说明
@@ -1385,6 +1435,7 @@ Desktop），macOS 的部分来自代码审查与 CI 构建，不是真机。
   并变化，没有与 `ps` 逐项比对（macOS 的 `proc_pidinfo` 路径无法在本项目的开发环境里验证）
 - **开机自启**：Windows 走 Run 键，会弹一次 UAC（应用清单要求管理员权限）；改用计划任务是已知的后续
 - **安装包**：Windows 本地实测；Linux（`.deb` 与 AppImage）在 Ubuntu 26.10 Desktop 上实测可用；
+  Fedora 的 `.rpm` 只经 CI 构建与载荷 / 依赖校验，没有在真机上 `dnf install` 过；
   macOS 的 `.dmg` 只经 CI 构建与产物内容校验，没有在真机上装过
 
 ### 27.4 明确不做
@@ -1393,3 +1444,44 @@ Desktop），macOS 的部分来自代码审查与 CI 构建，不是真机。
   内联规则已经覆盖绝大多数需求，剩下的复杂度换不来同等收益
 - **内置节点分享 / 订阅分发**：与软件定位无关
 - **TUN 之外的流量劫持手段**（如 WFP 驱动）：TUN 已经够用，驱动层风险不值得
+
+## 28. 发行版：`linux` 不是平台
+
+`std::env::consts::OS` 只说得出 `linux`，而 Fedora 与 Ubuntu 的差别足以让同一个二进制
+出现两种完全不同的现场：一个没有托盘图标，一个 TUN 起不来。这些都不该靠 README 交代，
+因为用户不会先读 README 再报错。
+
+`platform.rs` 因此只做四件只读的事，全部是「读一个文件 / 三个环境变量」级别：
+
+| 事实 | 来源 | 用来干什么 |
+|---|---|---|
+| 发行版与包族 | `/etc/os-release`（回退 `/usr/lib/os-release`） | 一条命令该写 `dnf` 还是 `apt` |
+| SELinux 状态 | `/sys/fs/selinux/enforce` | 排错时先说清「这台机器在强制模式」 |
+| `/dev/net/tun` 是否存在 | `stat` | TUN 前置检查，失败时给 `modprobe tun` |
+| 桌面会话与托盘宿主 | `XDG_CURRENT_DESKTOP` 等 + 扩展目录 | 托盘能不能出现 |
+
+**托盘是这次最实际的发现**：GNOME 自己没有托盘，图标由 AppIndicator 扩展提供，
+而 Fedora Workstation 默认不装这个扩展。于是 `TrayIconBuilder` 失败、程序退回「关窗口即退出」，
+用户看到的是一个「没有图标的托盘应用」。在 Fedora 45 Workstation 上，这一段现在是这样：
+
+```text
+  distro     Fedora Linux 45 (fedora, rpm)
+  desktop    GNOME — 托盘不可用，关闭窗口将退出
+             sudo dnf install gnome-shell-extension-appindicator
+  selinux    enforcing
+  tun device /dev/net/tun 不存在 — 先执行 sudo modprobe tun
+```
+
+四行里三行是「用户不查文档就不会知道」的事：Fedora Workstation 开箱状态没有 AppIndicator 扩展
+（`/usr/share/gnome-shell/extensions` 里只有 `window-list` 那几个）、SELinux 在 enforcing、
+以及 `tun` 模块没被任何东西拉起来时 `/dev/net/tun` 根本不存在。
+
+**`None` 不等于 `false`。** `tray_host_available()` 只在自己真知道的时候给布尔值：
+GNOME 下查扩展目录，Plasma 下返回可用，其他桌面（sway、i3、Cinnamon）返回 `None`，
+调用方什么都不说。托盘警告猜错的代价比缺失高——一个「你大概没有托盘」的提示，
+会让本来用得好好的用户去查一个不存在的问题。
+
+**没有做的事**：KDE 的系统代理（见 11.3）、对 SELinux 的自动适配（Fedora 用户默认在 `unconfined_t`
+下，核心从数据目录启动通常不会被拦；真被拦时的 AVC 日志也不属于本程序的错误，`doctor` 报出
+enforcing 状态已经够定位了——这一条没有做过针对性验证）、以及任何 `sudo` 提权——
+装包、加载内核模块、改系统设置都由用户自己执行，程序只给命令。

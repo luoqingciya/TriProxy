@@ -66,19 +66,49 @@
 未经修改，并随包附带 `cores/THIRD-PARTY-NOTICES.txt`（版本、授权、对应源码地址）与
 `cores/LICENSE-<core>.txt`（取自与二进制相同 tag 的许可全文）。
 
+Linux 同时提供三种格式，装的东西不一样：
+
+| 格式 | 适用发行版 | 安装 | 说明 |
+|---|---|---|---|
+| `.deb` | Debian / Ubuntu | `sudo apt install ./TriProxy-<版本>-linux-x64-lite.deb` | |
+| `.rpm` | Fedora / RHEL / Rocky / AlmaLinux | `sudo dnf install ./TriProxy-<版本>-linux-x64-lite.rpm` | Fedora 只有这一条路：`dnf` 装不了 `.deb` |
+| `.AppImage` | 任意 | 加可执行位后直接运行 | 需要 FUSE 2；**唯一**支持应用内自更新的 Linux 包 |
+
+RPM 的依赖写死在包里（`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`），`dnf` 从仓库解析它们，
+卸载走 `dnf remove triproxy`。
+
 当前平台：Windows x86_64、Linux x86_64、macOS Apple Silicon。
 macOS Intel 不在支持范围（Apple 已停售 Intel Mac），自行编译仍可用。
 
+Fedora 上有两件与本程序相关的事值得先知道，`triproxy doctor` 会直接报出这两项：
+
+- **托盘**：GNOME 自己没有托盘，图标依赖 AppIndicator 扩展，而 Fedora Workstation 默认不装。
+  缺扩展时托盘图标创建失败，程序按「关闭窗口即退出」运行——不会出现「窗口没了进程还在」。
+  装上即可：`sudo dnf install gnome-shell-extension-appindicator`，注销重登生效。
+- **TUN**：需要 root，也需要内核暴露 `/dev/net/tun`。设备不存在时 `start --tun` 会直接让你
+  执行 `sudo modprobe tun`，而不是让核心抛一段不提设备的日志。
+
 ### 从源码
 
-需要 Rust 1.82+；前端构建另需 Node。
+需要 Rust 1.82+；前端构建另需 Node。桌面端还要 WebView 与打包依赖：
+
+```bash
+# Debian / Ubuntu
+sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+# Fedora
+sudo dnf install webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel
+```
 
 ```bash
 git clone https://github.com/luoqingciya/TriProxy.git
 cd TriProxy
-cargo build --release            # CLI
-npm install && npm run tauri build   # 桌面端
+cargo build --release                     # CLI
+npm install && npm run tauri build        # 桌面端：AppImage + deb + rpm
 ```
+
+RPM 由 tauri 自己用纯 Rust 的 `rpm` crate 生成，不需要 `rpmbuild`，所以在任何 Linux 上都能出包；
+但它**不会**替你推断依赖——`webkit2gtk4.1` / `gtk3` / `libappindicator-gtk3` 写在
+`tauri.conf.json` 的 `bundle.linux.rpm.depends` 里，改打包目标时要一起看。
 
 ### 核心从哪里来
 
@@ -158,7 +188,9 @@ npm run dev            # 只跑界面，使用假数据：http://localhost:1420
   StatusNotifier 的 Linux 会话）关闭窗口按普通退出处理，不会出现「窗口没了但进程还在」。
 
 托盘在 Windows 与 Linux（Ubuntu 26.10 Desktop，GNOME / StatusNotifier）上实测正常；
-macOS 走同一套 Tauri 接口，未真机点验。
+macOS 走同一套 Tauri 接口，未真机点验。Fedora Workstation 默认不带 AppIndicator 扩展，
+所以托盘在**开箱状态**下不可用——`triproxy doctor` 会说明缺什么、给出一条安装命令，
+而不是让用户对着一个没有图标的「托盘应用」猜。
 
 **单实例**：再次启动不会起第二个管理器去抢同一个端口，而是把参数转交给运行中的实例并显示窗口。
 
@@ -212,8 +244,8 @@ triproxy logs [-n N] [--core X] [-f]
 | `triproxy traffic [--json]` | 读一次实时流量采样 |
 | `triproxy node use <名称或 id 前缀>` / `current` / `clear` | 选节点、看选择、清除选择 |
 | `triproxy proxy on [--endpoint E]` / `off` / `status` | 系统代理 |
-| `triproxy tun status` | TUN 权限与残留网卡 |
-| `triproxy doctor` | 环境自检：二进制可执行性、端口占用、数据目录可写 |
+| `triproxy tun status` | TUN 权限、设备节点与残留网卡 |
+| `triproxy doctor` | 环境自检：发行版 / 桌面 / SELinux / TUN 设备 / 系统代理后端，二进制可执行性、端口占用、数据目录可写 |
 
 Profile 相关：
 
@@ -347,8 +379,10 @@ triproxy proxy off                # 还原 TriProxy 改动前的设置
 **绕过列表可配**（设置 → 代理绕过列表，分号分隔）。留空等于用默认列表，而不是「什么都不绕过」：
 把 localhost 也代理走会毁掉本机所有开发服务器。
 
-Windows 已实测（含外部杀进程模拟崩溃后的自动恢复），Linux（Ubuntu 26.10 Desktop，`gsettings`）
-也已实测可用；macOS 的 `networksetup` 路径按同一接口实现，未在真机验证。
+Windows 已实测（含外部杀进程模拟崩溃后的自动恢复），Linux（Ubuntu 26.10 Desktop）也已实测可用；
+在 Fedora 45 的 GNOME 会话里核对过五个 `gsettings` 键的写入与**逐字还原**（用户原有的
+`127.0.0.1:10808` 原样恢复）。macOS 的 `networksetup` 路径按同一接口实现，未在真机验证；
+KDE Plasma 没有实现，那里 `doctor` 会显示「不可用」。
 
 ### TUN
 
@@ -516,6 +550,10 @@ triproxy core update --all       # 安装全部更新
 应用自身在设置页「检查更新」。更新包只发布 `lite` 变体（更小），`latest.json` 带三个平台的
 签名，签名校验失败会拒绝安装。
 
+Linux 的自更新只对 **AppImage** 有效：Tauri 的更新器替换的就是那个文件。用 `.deb` / `.rpm`
+装的那份请交给包管理器（`sudo dnf upgrade triproxy` / `sudo apt install --only-upgrade triproxy`），
+版本号仍会随 release 递增。
+
 ---
 
 ## 设计要点
@@ -552,16 +590,17 @@ triproxy core update --all       # 安装全部更新
 | 节点管理 | 能搜索、按协议过滤、收藏；没有分组和手动排序 |
 | 流量历史 | 只有 3 分钟，不落盘 |
 | 多语言 | 界面只有中文 |
-| 平台验证 | Windows 与 Linux（Ubuntu 26.10 Desktop）实测可用，系统代理与托盘正常；macOS 仍未经真机验证；深链接只在 Windows 上核对过 |
+| 平台验证 | Windows 与 Linux（Ubuntu 26.10 Desktop）实测可用，系统代理与托盘正常；Fedora 45 上核对了发行版 / 桌面 / TUN 设备探测与 `gsettings` 代理写入与还原，完整构建由 CI 的 Fedora 任务覆盖，RPM 未在真机安装过；macOS 仍未经真机验证；深链接只在 Windows 上核对过 |
+| 系统代理 | Linux 只实现了 GNOME 的 `gsettings`。KDE Plasma 会话里 `doctor` 会显示「不可用」——不是坏了，是没实现 |
+| 应用更新 | 只在包含该功能的版本之后生效；Linux 上只对 AppImage 有效，`.deb` / `.rpm` 用包管理器升级 |
 | 开机自启 | Windows 走 Run 键，登录时会弹一次 UAC；计划任务方案未做 |
-| 应用更新 | 只在包含该功能的版本之后生效 |
 
 ---
 
 ## 开发与测试
 
 ```bash
-cargo test --workspace                       # 259 个单元测试（core + CLI）
+cargo test --workspace                       # 268 个单元测试（core + CLI）
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 npx tsc --noEmit && npm run build            # 前端
@@ -570,6 +609,11 @@ cd src-tauri && cargo test                   # 外壳的纯逻辑测试（备份
 
 编译器的测试只断言生成的文本 / JSON 结构；**真实配置的正确性靠核心自己校验**——
 `mihomo -t` / `sing-box check` / `xray -test` 在每次启动前都会跑一遍。
+
+CI 在 Ubuntu / Windows / macOS 上跑同一套检查，另外有一个 Fedora 容器任务
+（`fedora:latest` 里 `dnf install` 依赖 → `cargo check` / `cargo test` / `cargo check src-tauri`）。
+发行版差异只会在真机上暴露（包名、WebKit 版本、SELinux），所以它单独跑一遍，
+`dnf` 清单与上面「从源码」那几行逐项对应。
 
 手动验证一份配置：
 
