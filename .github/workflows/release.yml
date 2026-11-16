@@ -340,12 +340,13 @@ jobs:
               ;;
           esac
 
-      # Tauri writes the RPM with the pure-Rust `rpm` crate, not `rpmbuild`, and
-      # unlike the deb bundler it never looks inside the ELF. The requirement
-      # list is therefore exactly `bundle.linux.rpm.depends` — a typo there
-      # yields a package `dnf` refuses with "nothing provides webkit2gtk4.1",
-      # and nothing else in the pipeline would notice. Fedora users would find
-      # out at install time, which is the worst possible time.
+      # The RPM is written by the pure-Rust `rpm` crate, not `rpmbuild`, and its
+      # requirement list is `bundle.linux.rpm.depends` plus a handful of sonames
+      # tauri-cli appends from a hard-coded table (webkit2gtk 4.1, GTK 3, and —
+      # with the tray-icon feature — appindicator3). Nothing inspects the binary,
+      # so a typo in a declared package name yields a package `dnf` refuses with
+      # "nothing provides webkit2gtk4.1", and nothing else in the pipeline would
+      # notice. Fedora users would find out at install time.
       - name: Verify the RPM payload and its dependencies
         if: runner.os == 'Linux'
         shell: bash

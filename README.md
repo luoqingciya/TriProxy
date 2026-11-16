@@ -74,8 +74,15 @@ Linux 同时提供三种格式，装的东西不一样：
 | `.rpm` | Fedora / RHEL / Rocky / AlmaLinux | `sudo dnf install ./TriProxy-<版本>-linux-x64-lite.rpm` | Fedora 只有这一条路：`dnf` 装不了 `.deb` |
 | `.AppImage` | 任意 | 加可执行位后直接运行 | 需要 FUSE 2；**唯一**支持应用内自更新的 Linux 包 |
 
-RPM 的依赖写死在包里（`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`），`dnf` 从仓库解析它们，
-卸载走 `dnf remove triproxy`。
+RPM 的 Requires 由两部分组成：tauri 会**固定追加**几个 soname（`libwebkit2gtk-4.1.so.0()(64bit)`、
+`libgtk-3.so.0()(64bit)`，开了 tray-icon 再加 `libappindicator3.so.1()(64bit)`），其余得自己写在
+`bundle.linux.rpm.depends` 里（`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`）——打包器不分析动态库。
+包名是 Fedora / RHEL 系的说法，所以这份 RPM 只服务这一族。**包名是 `tri-proxy`**
+（`productName` 的 kebab-case），卸载走 `dnf remove tri-proxy`。
+
+`.deb` / `.rpm` 装完后：图形界面是 `/usr/bin/triproxy-app`，命令行在
+`/usr/lib/TriProxy/triproxy`——**不在 PATH 上**。想直接在终端里敲 `triproxy`，用 AppImage 或
+自行编译，或者自己做个软链：`sudo ln -s /usr/lib/TriProxy/triproxy /usr/local/bin/triproxy`。
 
 当前平台：Windows x86_64、Linux x86_64、macOS Apple Silicon。
 macOS Intel 不在支持范围（Apple 已停售 Intel Mac），自行编译仍可用。
@@ -551,8 +558,8 @@ triproxy core update --all       # 安装全部更新
 签名，签名校验失败会拒绝安装。
 
 Linux 的自更新只对 **AppImage** 有效：Tauri 的更新器替换的就是那个文件。用 `.deb` / `.rpm`
-装的那份请交给包管理器（`sudo dnf upgrade triproxy` / `sudo apt install --only-upgrade triproxy`），
-版本号仍会随 release 递增。
+装的那份请交给包管理器（`sudo dnf upgrade tri-proxy` / `sudo apt install --only-upgrade tri-proxy`），
+版本号仍会随 release 递增。包名是 `productName` 的 kebab-case：`tri-proxy`，不是 `triproxy`。
 
 ---
 

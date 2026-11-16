@@ -18,12 +18,14 @@ sudo dnf install ./TriProxy-0.2.9-linux-x64-lite.rpm
 ```
 
 依赖（`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`）由 `dnf` 从仓库解析，卸载走
-`dnf remove triproxy`。
+`dnf remove tri-proxy`——包名是产品名的 kebab-case，不是 `triproxy`。
 
-有一处与 deb 不同，值得写下来：**RPM 的依赖是我们手写的，不是从二进制里推出来的。** tauri 的 RPM
-打包器用纯 Rust 的 `rpm` crate，不调 `rpmbuild`，也完全不读 ELF 的 `NEEDED`（deb 打包器会）。
-这个差别唯一的症状是「安装时报 `nothing provides …`」——所以发布流水线加了 `rpm -qlp` 与
-`rpm -qpR` 两道断言：包做出来先自己验一遍载荷和依赖，不等用户装的时候才发现。
+有一处值得写下来：**RPM 的依赖不会自己长出来。** tauri 会固定追加几条 soname
+（`libwebkit2gtk-4.1.so.0()(64bit)`、`libgtk-3.so.0()(64bit)`，开了托盘再加
+`libappindicator3.so.1()(64bit)`），其余得手写在 `bundle.linux.rpm.depends` 里——打包器不做任何
+动态库分析，多一个运行时依赖不会自动出现在 Requires 里。写错的症状只有一种：安装时报
+`nothing provides …`。所以流水线在发布前先自己验一遍：`rpm -qlp` 看载荷、`rpm -qpR` 看依赖，
+不等用户装的时候才发现。
 
 ### 新：`triproxy doctor` 报出发行版事实
 
@@ -60,6 +62,10 @@ sudo dnf install ./TriProxy-0.2.9-linux-x64-lite.rpm
   Fedora / RHEL 系成立（openSUSE 里同一个库叫 `libwebkit2gtk-4.1-0`），所以文档也只写
   「Fedora / RHEL / Rocky」
 - **Linux 的应用内自更新仍只对 AppImage 有效**：`.deb` / `.rpm` 装的那份用包管理器升级
+  （`sudo dnf upgrade tri-proxy`）
+- **`.deb` / `.rpm` 装的命令行不在 PATH 上**：图形界面是 `/usr/bin/triproxy-app`，CLI 在
+  `/usr/lib/TriProxy/triproxy`。要直接敲 `triproxy`，用 AppImage、自行编译，或自己做个软链——
+  这两条都是既有布局，不是这一版引入的
 
 ### v0.2.0 起的功能
 
@@ -194,7 +200,7 @@ triproxy core install xray --file ./Xray-windows-64.zip
   没有托盘环境时应用会退回「关闭即退出」的行为。Fedora Workstation 默认不带 AppIndicator 扩展，
   开箱状态下托盘不可用，装扩展即可（`sudo dnf install gnome-shell-extension-appindicator`）
 - **Linux 的应用内自更新只对 AppImage 有效**：`.deb` / `.rpm` 装的那份用包管理器升级
-  （`sudo dnf upgrade triproxy` / `sudo apt install --only-upgrade triproxy`）
+  （`sudo dnf upgrade tri-proxy` / `sudo apt install --only-upgrade tri-proxy`）
 - **Fedora 的 RPM 由 CI 构建并校验载荷与依赖，未在真机上装过**：Fedora 45 上核对了发行版与桌面
   探测、TUN 设备检查、`gsettings` 代理写入与还原；完整构建由 CI 的 Fedora 任务覆盖（容器里
   `cargo check` + `cargo test` + 桌面外壳编译）。如果 `dnf install` 失败，请反馈

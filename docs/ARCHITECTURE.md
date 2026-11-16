@@ -234,17 +234,26 @@ Linux 出三种包，覆盖三种机器的三种装法：
 | `.rpm` | Fedora / RHEL / Rocky / AlmaLinux | `dnf` 装不了 `.deb`，而 AppImage 还要求 FUSE 2 |
 | `.AppImage` | 任意 | 免安装；也是 Linux 上**唯一**能被应用内更新器替换的格式 |
 
-**RPM 的依赖要手写，deb 的不用。** 两个打包器的行为不一样：deb 打包器读 ELF 的 `NEEDED`，
-映射成 Debian 包名；RPM 打包器（`rpm` crate，纯 Rust，不调 `rpmbuild`，本地也不需要它）只写
-`bundle.linux.rpm.depends` 里列的项，**完全不看二进制**。所以 `webkit2gtk4.1`、`gtk3`、
-`libappindicator-gtk3` 是写在 `tauri.conf.json` 里的。写错的后果是 `dnf install` 报
-`nothing provides …`——安装那一刻才暴露，所以流水线用 `rpm -qpR` 断言这三项真在依赖里，
-再用 `rpm -qlp` 断言 `full` 包里有 `cores/xray`、`lite` 包里没有。
+**RPM 的依赖一半是 tauri 塞的，一半得自己写。** 打包前 `tauri-cli` 会往 Requires 里追加几张
+**写死的 soname**：`libwebkit2gtk-4.1.so.0()(64bit)`、`libgtk-3.so.0()(64bit)` 恒有，开了
+`tray-icon` 特性再加 `libappindicator3.so.1()(64bit)`（或 ayatana 那支）——它**不看你的二进制
+里到底 NEEDED 了什么**，就是一张对照表。deb 侧对应的是 `libwebkit2gtk-4.1-0` 这类包名。
 
-**这三个名字只对 Fedora / RHEL 系成立。** openSUSE 里同一个库叫 `libwebkit2gtk-4.1-0`，
+剩下的必须写在 `bundle.linux.rpm.depends` 里：`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`。
+两者都要，因为它们回答的不是同一个问题——soname 是「哪个文件提供」，包名是「哪个包提供」
+（也顺带把适用范围钉在 Fedora / RHEL 家族）。**打包器不做任何动态库分析**，所以多加一个运行时
+依赖（比如 `librsvg2`）不会自动出现在 Requires 里，只能手写。
+
+写错的后果只有一种表现：`dnf install` 报 `nothing provides …`，安装那一刻才暴露。流水线因此用
+`rpm -qpR` 断言三项包名真在依赖里，用 `rpm -qlp` 断言 `full` 包里有 `cores/xray`、`lite` 包里没有。
+v0.2.9 的产物里，Requires 正好是「3 条包名 + 3 条 soname + rpmlib」。
+
+**还有一个容易踩的地方：包名不是产品名。** `productName` 是 `TriProxy`，`rpm` crate 用
+kebab-case 转成 `tri-proxy`，所以卸载/升级命令写 `dnf remove tri-proxy`，写成 `triproxy` 会找不到包。
+
+**这三个包名只对 Fedora / RHEL 系成立。** openSUSE 里同一个库叫 `libwebkit2gtk-4.1-0`，
 硬写 Fedora 名字等于宣布这份 RPM 只服务一个家族——文档里也就只写「Fedora / RHEL / Rocky」，
-不写「所有 RPM 发行版」。写一串架构无关的 soname（`libwebkit2gtk-4.1.so.0`）看着更通用，
-实际匹配不上任何包：RPM 的能力名带 `()(64bit)` 后缀，换个架构后缀又不一样。
+不写「所有 RPM 发行版」。
 
 **发行版差异在 CI 里单独跑一遍。** `ci.yml` 的 `fedora` 任务在 `fedora:latest` 容器里
 `cargo check` + `cargo test` + `cargo check src-tauri`：同一份代码在 Ubuntu 上过、在 Fedora 上
