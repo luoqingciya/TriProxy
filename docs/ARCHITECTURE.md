@@ -1421,7 +1421,7 @@ sing-box 读 `.srs`，同一个 URL 喂不了两边。所以界面上一条规�
 
 ### 27.3 只在部分平台成立
 
-以下结论以 **v0.2.8** 为基准：Windows 与 Linux 的「实测」来自真机（Linux 为 Ubuntu 26.10
+以下结论以 **v0.2.9** 为基准：Windows 与 Linux 的「实测」来自真机（Linux 为 Ubuntu 26.10
 Desktop 与 Fedora 45 Workstation），macOS 的部分来自代码审查与 CI 构建，不是真机。
 
 - **系统代理**：Windows 与 Linux（Ubuntu 26.10 Desktop）实测过；Fedora 45 上核对过五个 `gsettings`

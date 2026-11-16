@@ -4,43 +4,62 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
-## 本次更新（v0.2.8）
+## 本次更新（v0.2.9）
 
-**这一版全是修复，没有新功能。** 三处：Linux 上设置页的下拉框读不出字、Linux 与 macOS 上随包核心
-「明明在却找不到」、以及左上角那个不是应用图标的字母 T。
+**这一版把「Linux」拆成了「发行版」。** Fedora 用户此前装不上，装上了也有两件事会让人以为软件坏了——
+而且两件都不给原因。
 
-### 修复：Linux 下设置页的下拉框看不清
+### 新：Fedora / RHEL 系的 `.rpm`
 
-深色主题里，「核心选择」那个下拉框是浅底浅字，几乎读不出来。
+`dnf` 装不了 `.deb`，AppImage 还要求 FUSE 2 在位，所以 Fedora 上原本没有一条正常的安装路径。现在有：
 
-原因不在配色表：`<select>` 是**由平台绘制**的，不由页面绘制。Linux 上的 WebKitGTK 用 GTK 主题画控件，
-同时又套用页面的文字颜色（深色主题下是浅色），于是浅色字落在浅色底上；边框和箭头同样不受控。
+```bash
+sudo dnf install ./TriProxy-0.2.9-linux-x64-lite.rpm
+```
 
-现在下拉框由我们自己画：去掉原生外观、自绘箭头、颜色走应用主题；同时给页面声明 `color-scheme`，
-让弹出列表和滚动条这些原生部件也跟着主题走。分流模式、DNS 模式、日志级别三处一起换了。
+依赖（`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`）由 `dnf` 从仓库解析，卸载走
+`dnf remove triproxy`。
 
-### 修复：随包核心「明明在却找不到」
+有一处与 deb 不同，值得写下来：**RPM 的依赖是我们手写的，不是从二进制里推出来的。** tauri 的 RPM
+打包器用纯 Rust 的 `rpm` crate，不调 `rpmbuild`，也完全不读 ELF 的 `NEEDED`（deb 打包器会）。
+这个差别唯一的症状是「安装时报 `nothing provides …`」——所以发布流水线加了 `rpm -qlp` 与
+`rpm -qpR` 两道断言：包做出来先自己验一遍载荷和依赖，不等用户装的时候才发现。
 
-点「连接」报 `binary for 'sing-box' not found`，可同一个界面上明明写着 v1.14.4，还给了「更新」按钮。
+### 新：`triproxy doctor` 报出发行版事实
 
-`cores/` 的位置只有桌面外壳知道（macOS 在 `Contents/Resources/cores`，Linux 的 `.deb` 与 AppImage 在
-`usr/lib/triproxy/cores`），而核心管理器在知道这件事**之前**就已经建好了自己的核心表。于是：
+「linux」不是一个平台。同一个二进制在 Fedora Workstation 上与 Ubuntu 上的现场完全不同，而这两件事
+此前都不给原因。`doctor` 现在多五行：
 
-- 状态每次都重新查找 → 有版本号、有「更新」按钮
-- 启动查的是那张旧表 → 找不到
+```text
+  distro     Fedora Linux 45 (fedora, rpm)
+  desktop    GNOME — 托盘不可用，关闭窗口将退出
+             sudo dnf install gnome-shell-extension-appindicator
+  selinux    enforcing
+  tun device /dev/net/tun 不存在 — 先执行 sudo modprobe tun
+  proxy      linux-gsettings — 可用
+```
 
-**同一个核心，两个答案。** 现在查不到就当场重新查找并记住。顺带修好两种情况：
+四行里三行是「不查文档就不会知道」的：Fedora Workstation 默认不装 AppIndicator 扩展（GNOME 自己没有
+托盘，图标是这个扩展提供的）、SELinux 在 enforcing、`tun` 模块没被任何东西拉起来时 `/dev/net/tun`
+根本不存在。最后一行是系统代理后端自检——说不准时它说「不可用」，而不是假装能开。
 
-- 运行期间用命令行装了核心，界面不用重启就能用
-- 上一轮遗留、仍在监听端口的核心会被正常接管，而不是被判为「二进制缺失」后遗忘——后者会让进程
-  留在后台占着 7890，下一次启动直接失败
+发行版与包族的判断只用于**措辞**（一条命令该写 `dnf` 还是 `apt`），没有行为分支；
+托盘与 SELinux 这两项也只在真知道的时候才报，猜错一个「你大概没有托盘」比不说更烦人。
 
-Windows 一直没暴露这个问题，因为安装包恰好把 `cores/` 放在 exe 旁边。
+### 改进：TUN 起不来时说清缺什么
 
-### 修复：左上角不是应用图标
+原来只查权限。现在 `start --tun` 与界面上的「连接」会同时检查设备节点：缺 `/dev/net/tun` 就直接给
+`sudo modprobe tun`，而不是让核心抛一段一个字都不提设备的日志。命令行与界面共用同一个判定，
+不会一边说权限、一边说设备。
 
-侧边栏顶部原来是一个紫底白 T 的方块，是建页面时的占位。现在换成真正的应用图标——和任务栏、
-窗口标题、安装包里那个是同一张图，128px 显示在 28px 上。
+### 这一版新增的边界
+
+- **KDE Plasma 的系统代理没有实现**：那里 `doctor` 会明说「不可用」。与其猜着写一段没人验证过的
+  `kwriteconfig`，不如写清楚——TUN 与环境变量都还能用
+- **RPM 未在真机 `dnf install` 过**：包由 CI 构建，载荷与依赖由流水线校验；三个依赖名只对
+  Fedora / RHEL 系成立（openSUSE 里同一个库叫 `libwebkit2gtk-4.1-0`），所以文档也只写
+  「Fedora / RHEL / Rocky」
+- **Linux 的应用内自更新仍只对 AppImage 有效**：`.deb` / `.rpm` 装的那份用包管理器升级
 
 ### v0.2.0 起的功能
 
