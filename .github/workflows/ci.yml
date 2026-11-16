@@ -53,6 +53,43 @@ jobs:
       - name: Test
         run: cargo test --all
 
+  # The project targets Windows, macOS and Linux, but "Linux" is a family: a
+  # build that compiles on Ubuntu can still fail on Fedora, where the same
+  # libraries have different names and versions and SELinux is enforcing. This
+  # job compiles and tests inside a Fedora container so the RPM-family build is
+  # checked on every change instead of on release day. The dependency list here
+  # is the same one README's "从源码" section documents.
+  fedora:
+    name: fedora
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      # Before checkout: the checkout action shells out to git, and the bare
+      # Fedora image does not carry it.
+      - name: Install Fedora dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gcc-c++ make git tar curl file pkgconf-pkg-config \
+            webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel libxdo-devel
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # The desktop shell is a separate workspace and needs the webview
+      # toolchain; compiling it is what proves the GUI has what Fedora packages
+      # call the same libraries.
+      - name: Check the desktop shell
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
   frontend:
     name: frontend
     runs-on: ubuntu-latest

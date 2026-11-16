@@ -32,7 +32,8 @@
       "nsis",
       "dmg",
       "appimage",
-      "deb"
+      "deb",
+      "rpm"
     ],
     "windows": {
       "nsis": {
@@ -40,6 +41,15 @@
         "installerHooks": "installer-hooks.nsh",
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico"
+      }
+    },
+    "linux": {
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libappindicator-gtk3"
+        ]
       }
     },
     "icon": [

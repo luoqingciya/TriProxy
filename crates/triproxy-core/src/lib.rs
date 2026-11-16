@@ -46,6 +46,7 @@ pub mod logging;
 pub mod memory;
 pub mod network;
 pub mod paths;
+pub mod platform;
 pub mod process;
 pub mod profile;
 pub mod selection;
@@ -76,10 +77,11 @@ pub use latency::{
 };
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{
-    is_elevated, leftovers, AppliedProxy, ProxyBackend, SystemProxyManager, TunAdapter,
-    INTERFACE_NAME,
+    is_elevated, leftovers, tun_unavailable_reason, AppliedProxy, ProxyBackend, SystemProxyManager,
+    TunAdapter, INTERFACE_NAME,
 };
 pub use paths::Layout;
+pub use platform::{Desktop, Distro, PackageFamily, Selinux};
 pub use profile::{
     parse_payload, parse_uri, Credentials, Diagnostic, InputFormat, Node, ParsedProfile, Profile,
     Severity, Transport, VlessFlow,

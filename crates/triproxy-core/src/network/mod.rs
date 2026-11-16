@@ -17,4 +17,4 @@ pub mod system_proxy;
 pub mod tun;
 
 pub use system_proxy::{AppliedProxy, ProxyBackend, SystemProxyManager};
-pub use tun::{is_elevated, leftovers, TunAdapter, INTERFACE_NAME};
+pub use tun::{is_elevated, leftovers, tun_unavailable_reason, TunAdapter, INTERFACE_NAME};

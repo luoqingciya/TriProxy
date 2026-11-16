@@ -42,6 +42,22 @@ fn err(message: impl std::fmt::Display) -> String {
     message.to_string()
 }
 
+/// Pre-flight for TUN in the desktop app.
+///
+/// The window is not run as root in normal use, so this is where the user finds
+/// out *why* TUN refuses: the missing privilege, or (on Linux) the missing
+/// device node. Letting the core fail instead produces an error that names
+/// neither, which is the one outcome worth spending a check on.
+fn check_tun(settings: &AppSettings) -> CmdResult<()> {
+    if !settings.tun {
+        return Ok(());
+    }
+    match triproxy_core::tun_unavailable_reason() {
+        Some(reason) => Err(reason),
+        None => Ok(()),
+    }
+}
+
 /// What the tray should say it is currently doing.
 ///
 /// One line, because a tray menu is read at a glance: which core, and whether it
@@ -431,9 +447,7 @@ pub async fn start_core(
         .is_some();
 
     let settings = AppSettings::load(state.manager.layout());
-    if settings.tun && !triproxy_core::is_elevated() {
-        return Err("TUN 模式需要管理员权限：请以管理员身份重新启动 TriProxy".to_string());
-    }
+    check_tun(&settings)?;
 
     if has_profile {
         let (kind, compiled) = compile_active(&state, core)?;
@@ -504,9 +518,7 @@ pub async fn switch_core(
     };
 
     let settings = AppSettings::load(state.manager.layout());
-    if settings.tun && !triproxy_core::is_elevated() {
-        return Err("TUN 模式需要管理员权限：请以管理员身份重新启动 TriProxy".to_string());
-    }
+    check_tun(&settings)?;
 
     let (kind, compiled) = compile_active(&state, requested)?;
     state

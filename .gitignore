@@ -37,6 +37,7 @@ npm-debug.log*
 
 # Local agent workspace notes (kept on disk, not part of the repo)
 /.workbuddy-ai/
+/.workbuddy/
 
 # OS / editor
 .DS_Store
@@ -57,3 +58,4 @@ Thumbs.db
 *.dmg
 *.AppImage
 *.deb
+*.rpm
