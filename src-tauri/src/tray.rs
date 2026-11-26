@@ -58,8 +58,13 @@ pub fn is_ready() -> bool {
 fn build_menu(manager: &impl Manager<tauri::Wry>, status: &str) -> tauri::Result<Menu<tauri::Wry>> {
     let status_item = MenuItem::with_id(manager, "status", status, false, None::<&str>)?;
     let show = MenuItem::with_id(manager, "show", "显示主窗口", true, None::<&str>)?;
-    let toggle =
-        MenuItem::with_id(manager, "toggle-core", "启动 / 停止核心", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(
+        manager,
+        "toggle-core",
+        "启动 / 停止核心",
+        true,
+        None::<&str>,
+    )?;
     let quit = MenuItem::with_id(manager, "quit", "退出 TriProxy", true, None::<&str>)?;
 
     Menu::with_items(
@@ -160,7 +165,7 @@ fn toggle_window(app: &AppHandle) {
 async fn toggle_core(app: AppHandle) {
     let running = {
         let state = app.state::<AppState>();
-        state.manager.status().await.active_core.is_some()
+        state.manager.has_running_core().await
     };
 
     let result = if running {

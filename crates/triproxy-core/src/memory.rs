@@ -32,7 +32,12 @@
 //! wrong offset would produce a plausible-looking wrong number — the worst
 //! possible failure for a statistic.
 
-use sysinfo::{Pid, ProcessesToUpdate, System};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+static SYSTEM: LazyLock<Mutex<System>> = LazyLock::new(|| Mutex::new(System::new()));
 
 /// Resident memory of `pid` in bytes, or `None` when the process is gone or the
 /// platform refused the query.
@@ -41,13 +46,44 @@ use sysinfo::{Pid, ProcessesToUpdate, System};
 /// this call has no memory figure, and inventing a zero would make the UI claim
 /// the process is alive and using nothing.
 pub fn resident_bytes(pid: u32) -> Option<u64> {
-    let pid = Pid::from_u32(pid);
-    let mut system = System::new();
-    // Only the one process: refreshing everything would walk the whole process
-    // table on every poll, which on Windows is far more expensive than the
-    // single query this is here for.
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-    system.process(pid).map(|process| process.memory())
+    resident_bytes_batch(&[pid]).remove(&pid)
+}
+
+/// Resident memory for a batch of PIDs in a single `sysinfo` refresh pass.
+pub fn resident_bytes_batch(pids: &[u32]) -> HashMap<u32, u64> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let sys_pids: Vec<Pid> = pids.iter().copied().map(Pid::from_u32).collect();
+    let mut system = SYSTEM.lock().unwrap_or_else(|e| e.into_inner());
+    // Refresh only memory for the requested PIDs instead of walking the full
+    // process table or sampling CPU/env.
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&sys_pids),
+        true,
+        ProcessRefreshKind::nothing().with_memory(),
+    );
+    let mut out = HashMap::with_capacity(pids.len());
+    for &pid in pids {
+        if let Some(process) = system.process(Pid::from_u32(pid)) {
+            out.insert(pid, process.memory());
+        }
+    }
+    out
+}
+
+/// Process executable/name for `pid`, used to guard against PID reuse on adopt/kill.
+pub fn process_name(pid: u32) -> Option<String> {
+    let sys_pid = Pid::from_u32(pid);
+    let mut system = SYSTEM.lock().unwrap_or_else(|e| e.into_inner());
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sys_pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(sys_pid)
+        .map(|process| process.name().to_string_lossy().into_owned())
 }
 
 /// Resident memory of the calling process.

@@ -83,7 +83,7 @@ export interface StoredProfile {
   id: string
   name: string
   source: string
-  format: 'uri_list' | 'base64_subscription'
+  format: 'uri_list' | 'base64_subscription' | 'clash_yaml'
   node_count: number
   content_id: string
   updated_at_ms: number
@@ -162,7 +162,7 @@ export interface LatencySample {
   node_id: string
   name: string
   endpoint: string
-  kind: 'tcp'
+  kind: 'tcp' | 'http'
   latency_ms: number | null
   error: string | null
   measured_at_ms: number
@@ -201,6 +201,8 @@ export interface Settings {
   log_level: string
   /** Local inbound port for the mixed listener. */
   listen_port: number
+  /** Local controller API port (Mihomo / sing-box). */
+  api_port: number
   /** Hide to the tray instead of quitting when the window is closed. */
   close_to_tray: boolean
   /** Start a core as soon as the app launches. */

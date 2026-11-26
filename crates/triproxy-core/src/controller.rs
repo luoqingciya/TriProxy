@@ -34,6 +34,8 @@ use crate::error::{Error, Result};
 
 /// How long to wait for the streaming `/traffic` endpoint to emit one sample.
 const TRAFFIC_READ_TIMEOUT: Duration = Duration::from_secs(3);
+/// Maximum bytes buffered while searching for one `/traffic` JSON object.
+const MAX_TRAFFIC_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TrafficSample {
@@ -47,9 +49,9 @@ pub struct TrafficSample {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ConnectionsSnapshot {
-    #[serde(rename = "uploadTotal", default)]
+    #[serde(alias = "uploadTotal", default)]
     pub upload_total: u64,
-    #[serde(rename = "downloadTotal", default)]
+    #[serde(alias = "downloadTotal", default)]
     pub download_total: u64,
     // The API sends null rather than [] when there is nothing connected.
     #[serde(default, deserialize_with = "null_as_empty")]
@@ -70,7 +72,7 @@ pub struct ConnectionInfo {
     pub chains: Vec<String>,
     #[serde(default)]
     pub rule: String,
-    #[serde(rename = "rulePayload", default)]
+    #[serde(alias = "rulePayload", default)]
     pub rule_payload: String,
     #[serde(default)]
     pub start: String,
@@ -81,13 +83,13 @@ pub struct ConnectionMetadata {
     #[serde(default)]
     pub network: String,
     /// Application-level guess (`HTTP`, `HTTPS`, ...).
-    #[serde(rename = "type", default)]
+    #[serde(alias = "type", default)]
     pub kind: String,
-    #[serde(rename = "sourceIP", default)]
+    #[serde(alias = "sourceIP", default)]
     pub source_ip: String,
-    #[serde(rename = "destinationIP", default)]
+    #[serde(alias = "destinationIP", default)]
     pub destination_ip: String,
-    #[serde(rename = "destinationPort", default)]
+    #[serde(alias = "destinationPort", default)]
     pub destination_port: String,
     #[serde(default)]
     pub host: String,
@@ -98,7 +100,7 @@ pub struct ConnectionMetadata {
     /// which core answered.
     #[serde(default)]
     pub process: String,
-    #[serde(rename = "processPath", default)]
+    #[serde(alias = "processPath", default)]
     pub process_path: String,
 }
 
@@ -118,21 +120,97 @@ impl ConnectionInfo {
     }
 }
 
+#[derive(Clone)]
 pub struct ControllerClient {
     base: String,
     http: reqwest::Client,
+    stream_http: reqwest::Client,
+    secret: Option<String>,
 }
 
 impl ControllerClient {
     pub fn new(api_port: u16) -> Result<Self> {
+        Self::with_secret(api_port, None)
+    }
+
+    pub fn with_secret(api_port: u16, secret: Option<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .map_err(|error| Error::Other(format!("cannot build the API client: {error}")))?;
+        let stream_http = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(3))
+            .build()
+            .map_err(|error| {
+                Error::Other(format!("cannot build the API stream client: {error}"))
+            })?;
+        let secret = secret
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Ok(Self {
             base: format!("http://127.0.0.1:{api_port}"),
             http,
+            stream_http,
+            secret,
         })
+    }
+
+    fn auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.secret {
+            Some(secret) => request.bearer_auth(secret),
+            None => request,
+        }
+    }
+
+    /// Open a persistent `/traffic` streaming response.
+    pub async fn open_traffic_stream(&self) -> Result<reqwest::Response> {
+        let response = self
+            .auth(self.stream_http.get(format!("{}/traffic", self.base)))
+            .send()
+            .await
+            .map_err(|error| Error::Other(format!("cannot open /traffic: {error}")))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Other(format!(
+                "/traffic returned HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response)
+    }
+
+    /// Stream `/traffic` samples until the connection closes or stalls.
+    pub async fn stream_traffic<F>(&self, mut on_sample: F) -> Result<()>
+    where
+        F: FnMut(TrafficSample) + Send,
+    {
+        use futures_util::StreamExt;
+
+        let response = self.open_traffic_stream().await?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        while let Ok(Some(chunk)) =
+            tokio::time::timeout(Duration::from_secs(10), stream.next()).await
+        {
+            let chunk = chunk.map_err(|error| {
+                Error::Other(format!("cannot read the traffic stream: {error}"))
+            })?;
+            if buffer.len().saturating_add(chunk.len()) > MAX_TRAFFIC_BUFFER_BYTES {
+                buffer.clear();
+            }
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = buffer.find('}') {
+                if let Some(start) = buffer[..=end].find('{') {
+                    if let Some(sample) = parse_first_json_object(&buffer[start..=end]) {
+                        on_sample(sample);
+                    }
+                }
+                buffer.drain(..=end);
+            }
+        }
+        Ok(())
     }
 
     /// Liveness probe for the API itself.
@@ -144,8 +222,7 @@ impl ControllerClient {
         }
 
         let response = self
-            .http
-            .get(format!("{}/version", self.base))
+            .auth(self.http.get(format!("{}/version", self.base)))
             .send()
             .await
             .map_err(|error| {
@@ -177,8 +254,7 @@ impl ControllerClient {
     /// open stream it never asked for.
     pub async fn traffic_once(&self) -> Result<TrafficSample> {
         let response = self
-            .http
-            .get(format!("{}/traffic", self.base))
+            .auth(self.http.get(format!("{}/traffic", self.base)))
             .send()
             .await
             .map_err(|error| Error::Other(format!("cannot open /traffic: {error}")))?;
@@ -199,6 +275,11 @@ impl ControllerClient {
                 let chunk = chunk.map_err(|error| {
                     Error::Other(format!("cannot read the traffic stream: {error}"))
                 })?;
+                if buffer.len().saturating_add(chunk.len()) > MAX_TRAFFIC_BUFFER_BYTES {
+                    return Err(Error::Other(
+                        "traffic stream exceeded sample buffer limit".to_string(),
+                    ));
+                }
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 // Samples are newline-free JSON objects; one complete object is
                 // enough for a single reading.
@@ -218,8 +299,7 @@ impl ControllerClient {
 
     pub async fn connections(&self) -> Result<ConnectionsSnapshot> {
         let response = self
-            .http
-            .get(format!("{}/connections", self.base))
+            .auth(self.http.get(format!("{}/connections", self.base)))
             .send()
             .await
             .map_err(|error| Error::Other(format!("cannot read /connections: {error}")))?;
@@ -238,9 +318,12 @@ impl ControllerClient {
     }
 
     pub async fn close_connection(&self, id: &str) -> Result<()> {
+        let encoded = urlencode(id);
         let response = self
-            .http
-            .delete(format!("{}/connections/{id}", self.base))
+            .auth(
+                self.http
+                    .delete(format!("{}/connections/{encoded}", self.base)),
+            )
             .send()
             .await
             .map_err(|error| Error::Other(format!("cannot close the connection: {error}")))?;
@@ -257,8 +340,7 @@ impl ControllerClient {
 
     pub async fn close_all(&self) -> Result<()> {
         let response = self
-            .http
-            .delete(format!("{}/connections", self.base))
+            .auth(self.http.delete(format!("{}/connections", self.base)))
             .send()
             .await
             .map_err(|error| Error::Other(format!("cannot close connections: {error}")))?;
@@ -282,8 +364,7 @@ impl ControllerClient {
     pub async fn select_proxy(&self, group: &str, node_name: &str) -> Result<()> {
         let encoded = urlencode(group);
         let response = self
-            .http
-            .put(format!("{}/proxies/{encoded}", self.base))
+            .auth(self.http.put(format!("{}/proxies/{encoded}", self.base)))
             .json(&serde_json::json!({ "name": node_name }))
             .send()
             .await
@@ -310,8 +391,7 @@ impl ControllerClient {
 
         let encoded = urlencode(group);
         let response = self
-            .http
-            .get(format!("{}/proxies/{encoded}", self.base))
+            .auth(self.http.get(format!("{}/proxies/{encoded}", self.base)))
             .send()
             .await
             .map_err(|error| Error::Other(format!("cannot read the group: {error}")))?;
@@ -343,9 +423,13 @@ impl ControllerClient {
         }
 
         let encoded_name = urlencode(proxy_name);
+        let request_timeout = Duration::from_millis(timeout_ms.saturating_add(2000).max(5000));
         let response = self
-            .http
-            .get(format!("{}/proxies/{encoded_name}/delay", self.base))
+            .auth(
+                self.http
+                    .get(format!("{}/proxies/{encoded_name}/delay", self.base)),
+            )
+            .timeout(request_timeout)
             .query(&[("url", probe_url), ("timeout", &timeout_ms.to_string())])
             .send()
             .await
@@ -394,7 +478,7 @@ fn urlencode(value: &str) -> String {
 }
 
 /// Pull the first balanced `{...}` object out of a buffer.
-fn parse_first_json_object(buffer: &str) -> Option<TrafficSample> {
+pub fn parse_first_json_object(buffer: &str) -> Option<TrafficSample> {
     let start = buffer.find('{')?;
     let end = buffer[start..].find('}')? + start + 1;
     serde_json::from_str(&buffer[start..end]).ok()
@@ -515,5 +599,42 @@ mod tests {
             ..info
         };
         assert_eq!(ip_only.target(), "1.2.3.4:443");
+    }
+
+    #[test]
+    fn connections_serialize_as_snake_case_for_ipc() {
+        let json = r#"{
+            "downloadTotal": 2048,
+            "uploadTotal": 1024,
+            "connections": [{
+                "id": "conn-1",
+                "metadata": {
+                    "network": "tcp",
+                    "type": "HTTPS",
+                    "sourceIP": "127.0.0.1",
+                    "destinationIP": "1.1.1.1",
+                    "destinationPort": "443",
+                    "host": "one.one.one.one",
+                    "processPath": "/usr/bin/curl"
+                },
+                "upload": 10,
+                "download": 20,
+                "chains": ["PROXY"],
+                "rule": "Match",
+                "rulePayload": "payload",
+                "start": "2026-11-01T22:00:00Z"
+            }]
+        }"#;
+        let snapshot: ConnectionsSnapshot = serde_json::from_str(json).unwrap();
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["upload_total"], 1024);
+        assert_eq!(value["download_total"], 2048);
+        let conn = &value["connections"][0];
+        assert_eq!(conn["rule_payload"], "payload");
+        assert_eq!(conn["metadata"]["kind"], "HTTPS");
+        assert_eq!(conn["metadata"]["source_ip"], "127.0.0.1");
+        assert_eq!(conn["metadata"]["destination_ip"], "1.1.1.1");
+        assert_eq!(conn["metadata"]["destination_port"], "443");
+        assert_eq!(conn["metadata"]["process_path"], "/usr/bin/curl");
     }
 }

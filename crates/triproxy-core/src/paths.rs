@@ -12,8 +12,31 @@
 // Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Error, Result};
+
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Write `data` to `path` via a unique temporary file in the same directory so
+/// concurrent writers or crashes cannot leave a half-written file.
+pub fn write_atomic(path: &Path, data: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging = path.with_file_name(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
+    std::fs::write(&staging, data.as_ref()).map_err(|e| Error::io(&staging, e))?;
+    if let Err(err) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(Error::io(path, err));
+    }
+    Ok(())
+}
 
 pub const APP_DIR_NAME: &str = "TriProxy";
 

@@ -147,7 +147,7 @@ export function Connections() {
       </Card>
 
       <p className="mt-3 text-[12px] text-faint">
-        数据来自核心的控制器 API，每秒随状态刷新。Xray 没有这套 API，因此在 Xray 下此页为空。
+        数据来自核心的控制器 API，每 2 秒随状态刷新。Xray 没有这套 API，因此在 Xray 下此页为空。
       </p>
     </div>
   )

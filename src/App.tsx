@@ -35,6 +35,8 @@ export function App() {
   const notice = useApp((state) => state.notice)
   const clearNotice = useApp((state) => state.clearNotice)
   const refresh = useApp((state) => state.refresh)
+  const refreshLive = useApp((state) => state.refreshLive)
+  const refreshLibrary = useApp((state) => state.refreshLibrary)
   const loadSettings = useApp((state) => state.loadSettings)
 
   // Theme: an explicit class on <html> so both Tailwind and the CSS variables
@@ -57,23 +59,48 @@ export function App() {
   useEffect(() => {
     void loadSettings()
     void refresh()
-    // Status is polled rather than pushed: the manager is local and the payload
-    // is small, so a 2s poll is simpler than an event channel and cannot desync.
-    const timer = window.setInterval(() => void refresh(), 2000)
-    return () => window.clearInterval(timer)
-  }, [loadSettings, refresh])
+    let timer: number | undefined
+    const stopTimer = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer)
+        timer = undefined
+      }
+    }
+    const startTimer = () => {
+      stopTimer()
+      if (document.hidden) return
+      timer = window.setInterval(() => void refreshLive(), 2000)
+    }
+    const onVisibility = () => {
+      if (document.hidden) {
+        stopTimer()
+      } else {
+        void refreshLive()
+        startTimer()
+      }
+    }
+    startTimer()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stopTimer()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [loadSettings, refresh, refreshLive])
 
-  // Tray actions run in Rust with no window in front of the user. They report
-  // their result through this event so the same banner the UI uses shows it.
+  // Tray actions and background subscriptions report via Tauri events.
   useEffect(() => {
     if (!isTauri) return undefined
-    const pending = listen<string>('triproxy-notice', (event) => {
+    const pendingNotice = listen<string>('triproxy-notice', (event) => {
       useApp.setState({ notice: event.payload })
     })
+    const pendingProfiles = listen('triproxy-profiles-changed', () => {
+      void refreshLibrary()
+    })
     return () => {
-      void pending.then((off) => off())
+      void pendingNotice.then((off) => off())
+      void pendingProfiles.then((off) => off())
     }
-  }, [])
+  }, [refreshLibrary])
 
   /**
    * Suppress the WebView's page context menu.
@@ -125,29 +152,33 @@ export function App() {
         )}
       </main>
 
-      {notice && (
-        <div className="fixed right-5 bottom-5 z-50 flex max-w-[420px] items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 shadow-lg">
-          <p className="text-[12.5px] leading-relaxed text-muted">{notice}</p>
-          <button
-            onClick={clearNotice}
-            className="mt-0.5 shrink-0 text-faint hover:text-fg"
-            aria-label="关闭"
-          >
-            <X size={14} />
-          </button>
-        </div>
-      )}
+      {(notice || error) && (
+        <div className="fixed right-5 bottom-5 z-50 flex flex-col items-end gap-2">
+          {notice && (
+            <div className="flex max-w-[420px] items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 shadow-lg">
+              <p className="text-[12.5px] leading-relaxed text-muted">{notice}</p>
+              <button
+                onClick={clearNotice}
+                className="mt-0.5 shrink-0 text-faint hover:text-fg"
+                aria-label="关闭"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
 
-      {error && (
-        <div className="fixed right-5 bottom-5 z-50 flex max-w-[420px] items-start gap-3 rounded-xl border border-danger/40 bg-panel px-4 py-3 shadow-lg">
-          <p className="text-[12.5px] leading-relaxed text-fg">{error}</p>
-          <button
-            onClick={clearError}
-            className="mt-0.5 shrink-0 text-faint hover:text-fg"
-            aria-label="关闭"
-          >
-            <X size={14} />
-          </button>
+          {error && (
+            <div className="flex max-w-[420px] items-start gap-3 rounded-xl border border-danger/40 bg-panel px-4 py-3 shadow-lg">
+              <p className="text-[12.5px] leading-relaxed text-fg">{error}</p>
+              <button
+                onClick={clearError}
+                className="mt-0.5 shrink-0 text-faint hover:text-fg"
+                aria-label="关闭"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

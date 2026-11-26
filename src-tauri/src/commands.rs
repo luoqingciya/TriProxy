@@ -25,21 +25,38 @@ use triproxy_core::profile::{parse_payload, Node};
 use triproxy_core::{
     AppSettings, AppliedProxy, CompiledConfig, ControllerClient, CoreKind, CorePreference,
     InstallOptions, LogLevel, LogLine, ManagerStatus, ProfileStore, Selection, Selector,
-    StoredProfile, SystemProxyManager, UpdateCheck,
+    StoredProfile, SubscriptionService, SystemProxyManager, UpdateCheck,
 };
 
 use crate::AppState;
-
-/// Port the cores expose their controller API on.
-///
-/// Separate from the inbound port: it is loopback-only and never user-facing,
-/// so it stays fixed rather than becoming another setting to get wrong.
-const API_PORT: u16 = triproxy_core::core::DEFAULT_API_PORT;
 
 type CmdResult<T> = Result<T, String>;
 
 fn err(message: impl std::fmt::Display) -> String {
     message.to_string()
+}
+
+async fn blocking<F, T>(f: F) -> CmdResult<T>
+where
+    F: FnOnce() -> CmdResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+async fn controller_client(state: &AppState) -> CmdResult<ControllerClient> {
+    let port = state.manager.api_port();
+    let secret = state.manager.api_secret();
+    if let Some((cached_port, cached_secret, client)) = state.controller.read().await.as_ref() {
+        if *cached_port == port && *cached_secret == secret {
+            return Ok(client.clone());
+        }
+    }
+    let client = state.manager.controller_client().map_err(err)?;
+    *state.controller.write().await = Some((port, secret, client.clone()));
+    Ok(client)
 }
 
 /// Pre-flight for TUN in the desktop app.
@@ -124,7 +141,12 @@ pub async fn check_core_update(
     state: State<'_, AppState>,
     core: CoreKind,
 ) -> CmdResult<UpdateCheck> {
-    state.manager.binaries().check_update(core).await.map_err(err)
+    state
+        .manager
+        .binaries()
+        .check_update(core)
+        .await
+        .map_err(err)
 }
 
 /// Whether the OS will launch TriProxy at login.
@@ -160,11 +182,15 @@ pub struct ProfileLibrary {
 
 #[tauri::command]
 pub async fn profiles(state: State<'_, AppState>) -> CmdResult<ProfileLibrary> {
-    let store = ProfileStore::new(state.manager.layout());
-    Ok(ProfileLibrary {
-        active: store.active_id().map_err(err)?,
-        profiles: store.list().map_err(err)?,
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        Ok(ProfileLibrary {
+            active: store.active_id().map_err(err)?,
+            profiles: store.list().map_err(err)?,
+        })
     })
+    .await
 }
 
 /// Flattened node view for the list. The full node model carries credentials,
@@ -201,11 +227,15 @@ fn summarise(node: &Node) -> NodeSummary {
 
 #[tauri::command]
 pub async fn active_nodes(state: State<'_, AppState>) -> CmdResult<Vec<NodeSummary>> {
-    let store = ProfileStore::new(state.manager.layout());
-    let Some((_, profile)) = store.active().map_err(err)? else {
-        return Ok(Vec::new());
-    };
-    Ok(profile.nodes.iter().map(summarise).collect())
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        let Some((_, profile)) = store.active().map_err(err)? else {
+            return Ok(Vec::new());
+        };
+        Ok(profile.nodes.iter().map(summarise).collect())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -214,25 +244,62 @@ pub async fn import_profile(
     text: String,
     name: String,
 ) -> CmdResult<StoredProfile> {
-    let store = ProfileStore::new(state.manager.layout());
-    let mut parsed = parse_payload(&text, &name, "pasted");
-    parsed.profile.name = name.clone();
+    let trimmed = text.trim();
+    let is_single_url = !trimmed.is_empty()
+        && !trimmed.contains('\n')
+        && !trimmed.contains('\r')
+        && !trimmed.chars().any(char::is_whitespace)
+        && (trimmed.starts_with("http://") || trimmed.starts_with("https://"));
 
-    // Re-importing under an existing name updates that record rather than
-    // creating a second entry with the same title.
-    let existing = store.find_by_name(&name).map_err(err)?;
-    store
-        .save_activating_if_first(
-            &parsed.profile,
-            existing.as_ref().map(|entry| entry.id.as_str()),
-        )
-        .map_err(err)
+    if is_single_url {
+        let effective_name = if name.trim().is_empty() || name.trim() == "未命名配置" {
+            tauri::Url::parse(trimmed)
+                .ok()
+                .and_then(|parsed| parsed.host_str().map(str::to_string))
+                .unwrap_or_else(|| "订阅".to_string())
+        } else {
+            name.trim().to_string()
+        };
+        let store = ProfileStore::new(state.manager.layout());
+        let service = SubscriptionService::with_client(&store, state.subscription_client.clone());
+        let saved = service
+            .add(trimmed, &effective_name, 3600)
+            .await
+            .map_err(err)?;
+        if store.active_id().map_err(err)?.is_none() {
+            store.set_active(Some(&saved.id)).map_err(err)?;
+        }
+        return Ok(saved);
+    }
+
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        let mut parsed = parse_payload(&text, &name, "pasted");
+        parsed.profile.name = name.clone();
+
+        // Re-importing under an existing name updates that record rather than
+        // creating a second entry with the same title.
+        let existing = store.find_by_name(&name).map_err(err)?;
+        store
+            .save_activating_if_first(
+                &parsed.profile,
+                existing.as_ref().map(|entry| entry.id.as_str()),
+            )
+            .map_err(err)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn set_active_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let store = ProfileStore::new(state.manager.layout());
-    store.set_active(Some(&id)).map_err(err)
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        ProfileStore::new(&layout)
+            .set_active(Some(&id))
+            .map_err(err)
+    })
+    .await
 }
 
 /// Star or unstar a node in the active profile.
@@ -242,14 +309,18 @@ pub async fn set_favorite(
     node_id: String,
     favorite: bool,
 ) -> CmdResult<bool> {
-    let store = ProfileStore::new(state.manager.layout());
-    let (stored, _) = store
-        .active()
-        .map_err(err)?
-        .ok_or_else(|| "还没有活动配置，请先在「配置」页导入并设为活动".to_string())?;
-    store
-        .set_favorite(&stored.id, &node_id, favorite)
-        .map_err(err)
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        let (stored, _) = store
+            .active()
+            .map_err(err)?
+            .ok_or_else(|| "还没有活动配置，请先在「配置」页导入并设为活动".to_string())?;
+        store
+            .set_favorite(&stored.id, &node_id, favorite)
+            .map_err(err)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -264,7 +335,7 @@ pub struct RefreshResult {
 #[tauri::command]
 pub async fn refresh_profile(state: State<'_, AppState>, id: String) -> CmdResult<RefreshResult> {
     let store = ProfileStore::new(state.manager.layout());
-    let service = triproxy_core::SubscriptionService::new(&store).map_err(err)?;
+    let service = SubscriptionService::with_client(&store, state.subscription_client.clone());
     let outcome = service.refresh(&id).await.map_err(err)?;
     Ok(match outcome.status {
         triproxy_core::RefreshStatus::Updated { node_count } => RefreshResult {
@@ -287,28 +358,32 @@ pub async fn refresh_profile(state: State<'_, AppState>, id: String) -> CmdResul
 
 #[tauri::command]
 pub async fn delete_profile(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let store = ProfileStore::new(state.manager.layout());
-    store.delete(&id).map_err(err)
+    let layout = state.manager.layout().clone();
+    blocking(move || ProfileStore::new(&layout).delete(&id).map_err(err)).await
 }
 
 #[tauri::command]
 pub async fn settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
-    Ok(AppSettings::load(state.manager.layout()))
+    let layout = state.manager.layout().clone();
+    blocking(move || Ok(AppSettings::load(&layout))).await
 }
 
 #[tauri::command]
 pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> CmdResult<()> {
-    // Validate before writing: the compiler silently drops unparsable rules so
-    // that one typo cannot take the connection down, which means a bad line would
-    // otherwise disappear with nothing but a log entry to show for it.
-    if let Some(text) = settings.custom_rules.as_deref() {
-        triproxy_core::parse_rules(text).map_err(|error| format!("自定义规则 {error}"))?;
-    }
-    if let Some(text) = settings.rule_sets.as_deref() {
-        triproxy_core::parse_rule_sets(text)
-            .map_err(|error| format!("规则集 {error}"))?;
-    }
-    settings.save(state.manager.layout()).map_err(err)
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        // Validate before writing: the compiler silently drops unparsable rules so
+        // that one typo cannot take the connection down, which means a bad line would
+        // otherwise disappear with nothing but a log entry to show for it.
+        if let Some(text) = settings.custom_rules.as_deref() {
+            triproxy_core::parse_rules(text).map_err(|error| format!("自定义规则 {error}"))?;
+        }
+        if let Some(text) = settings.rule_sets.as_deref() {
+            triproxy_core::parse_rule_sets(text).map_err(|error| format!("规则集 {error}"))?;
+        }
+        settings.save(&layout).map_err(err)
+    })
+    .await
 }
 
 /// Check rule text without saving it, so the editor can complain in place.
@@ -352,14 +427,16 @@ pub async fn export_backup(
     };
     let path = path.into_path().map_err(err)?;
 
-    let layout = state.manager.layout();
-    let store = ProfileStore::new(layout);
-    let backup =
-        crate::backup::Backup::capture(&store, AppSettings::load(layout)).map_err(err)?;
-    let text = serde_json::to_string_pretty(&backup).map_err(err)?;
-    std::fs::write(&path, text).map_err(err)?;
-
-    Ok(Some(path.display().to_string()))
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        let backup =
+            crate::backup::Backup::capture(&store, AppSettings::load(&layout)).map_err(err)?;
+        let text = serde_json::to_string_pretty(&backup).map_err(err)?;
+        triproxy_core::paths::write_atomic(&path, text).map_err(err)?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
 }
 
 /// Ask for a backup file and merge it into the current data directory.
@@ -383,26 +460,31 @@ pub async fn import_backup(
     };
     let path = path.into_path().map_err(err)?;
 
-    let text = std::fs::read_to_string(&path).map_err(err)?;
-    let backup = crate::backup::Backup::parse(&text)?;
-
-    let layout = state.manager.layout();
-    let store = ProfileStore::new(layout);
-    let count = backup.restore(&store, layout)?;
-
-    Ok(Some(count))
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let text = std::fs::read_to_string(&path).map_err(err)?;
+        let backup = crate::backup::Backup::parse(&text)?;
+        let store = ProfileStore::new(&layout);
+        let count = backup.restore(&store, &layout)?;
+        Ok(Some(count))
+    })
+    .await
 }
 
 /// What the selector currently thinks about the active profile.
 #[tauri::command]
 pub async fn preview_selection(state: State<'_, AppState>) -> CmdResult<Option<Selection>> {
-    let store = ProfileStore::new(state.manager.layout());
-    let Some((_, profile)) = store.active().map_err(err)? else {
-        return Ok(None);
-    };
-    let settings = AppSettings::load(state.manager.layout());
-    let selector = Selector::with_preference(settings.preference());
-    Ok(selector.select(&profile, settings.network()).ok())
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        let Some((_, profile)) = store.active().map_err(err)? else {
+            return Ok(None);
+        };
+        let settings = AppSettings::load(&layout);
+        let selector = Selector::with_preference(settings.preference());
+        Ok(selector.select(&profile, settings.network()).ok())
+    })
+    .await
 }
 
 /// Compile the active profile for one core, honouring the saved settings.
@@ -424,7 +506,9 @@ fn compile_active(
     });
 
     let selection = selector.select(&profile, settings.network()).map_err(err)?;
-    let mut options = settings.compile_options(settings.listen_port, API_PORT);
+    let mut options = settings.compile_options(settings.listen_port, settings.api_port);
+    options.api_secret = Some(state.manager.ensure_api_secret());
+    options.rule_set_mirror = std::env::var(triproxy_core::binaries::MIRROR_ENV).ok();
     // The node the user picked has to survive a restart, and the only way it does
     // is by going into the config: the runtime switch through the controller is
     // gone the moment the core stops.
@@ -469,7 +553,7 @@ pub async fn start_core(
     }
 
     let settings = AppSettings::load(state.manager.layout());
-    if settings.system_proxy {
+    if !settings.tun && settings.system_proxy {
         // A failure here must not undo a successful start; surface it instead.
         if let Err(error) = enable_system_proxy(&state) {
             tracing::warn!(%error, "could not enable the system proxy");
@@ -483,7 +567,7 @@ pub async fn start_core(
 fn enable_system_proxy(state: &AppState) -> Result<(), String> {
     let port = state
         .manager
-        .persisted_listen_port()
+        .persisted_http_proxy_port()
         .ok_or_else(|| "no core is running".to_string())?;
     SystemProxyManager::new(state.manager.layout())
         .enable(&format!("127.0.0.1:{port}"))
@@ -492,15 +576,17 @@ fn enable_system_proxy(state: &AppState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn stop_core(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> CmdResult<()> {
+pub async fn stop_core(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     state.manager.stop().await.map_err(err)?;
     // The proxy is useless without a core and would break connectivity.
-    SystemProxyManager::new(state.manager.layout())
-        .disable()
-        .map_err(err)?;
+    let layout = state.manager.layout().clone();
+    blocking(move || {
+        SystemProxyManager::new(&layout)
+            .disable()
+            .map(|_| ())
+            .map_err(err)
+    })
+    .await?;
     sync_tray(&app).await;
     Ok(())
 }
@@ -526,6 +612,16 @@ pub async fn switch_core(
         .switch_with_config(kind, &compiled.text, compiled.file_name)
         .await
         .map_err(err)?;
+
+    let settings = AppSettings::load(state.manager.layout());
+    if settings.tun {
+        let _ = SystemProxyManager::new(state.manager.layout()).disable();
+    } else if settings.system_proxy {
+        if let Err(error) = enable_system_proxy(&state) {
+            tracing::warn!(%error, "could not enable the system proxy after switch");
+        }
+    }
+
     sync_tray(&app).await;
     Ok(state.manager.status().await)
 }
@@ -574,7 +670,7 @@ pub async fn select_node(
 
     // Only hand the client over when the API actually answers: a stale port on a
     // stopped core would otherwise turn every click into an error.
-    let client = match ControllerClient::new(state.manager.api_port()) {
+    let client = match controller_client(&state).await {
         Ok(client) if client.version().await.is_ok() => Some(client),
         _ => None,
     };
@@ -609,7 +705,7 @@ pub async fn test_proxy_delay(
         return Ok(Vec::new());
     };
 
-    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    let client = controller_client(&state).await?;
     client.version().await.map_err(|error| {
         format!("真实延迟需要运行中的 Mihomo 或 sing-box（Xray 没有控制器 API）：{error}")
     })?;
@@ -623,21 +719,15 @@ pub async fn test_proxy_delay(
     .await)
 }
 
-/// Delay of whatever the `PROXY` group is currently using.
-///
-/// The status payload carries a `latency_ms`, but that is the loopback handshake
-/// against the inbound port — always under a millisecond, which is why the
-/// dashboard showed `0 ms` on every connection. The measurement itself lives in
-/// `triproxy-core` so the CLI reports the same number for the same node.
 #[tauri::command]
 pub async fn active_delay(state: State<'_, AppState>) -> CmdResult<triproxy_core::ActiveDelay> {
-    let client = match ControllerClient::new(state.manager.api_port()) {
+    let client = match controller_client(&state).await {
         Ok(client) => client,
         Err(error) => {
             return Ok(triproxy_core::ActiveDelay {
                 node: None,
                 latency_ms: None,
-                error: Some(error.to_string()),
+                error: Some(error),
             })
         }
     };
@@ -667,9 +757,18 @@ pub async fn active_delay(state: State<'_, AppState>) -> CmdResult<triproxy_core
 pub async fn traffic(
     state: State<'_, AppState>,
 ) -> CmdResult<Option<triproxy_core::TrafficSample>> {
-    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
-    // The controller is only present for Mihomo and sing-box; a missing API is
-    // a normal state, not an error worth a banner.
+    if let Some(sample) = *state.latest_traffic.read().await {
+        return Ok(Some(sample));
+    }
+    if !state
+        .manager
+        .persisted_active()
+        .await
+        .is_some_and(|kind| kind.has_controller())
+    {
+        return Ok(None);
+    }
+    let client = controller_client(&state).await?;
     Ok(client.traffic_once().await.ok())
 }
 
@@ -677,13 +776,13 @@ pub async fn traffic(
 pub async fn connections(
     state: State<'_, AppState>,
 ) -> CmdResult<Option<triproxy_core::ConnectionsSnapshot>> {
-    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    let client = controller_client(&state).await?;
     Ok(client.connections().await.ok())
 }
 
 #[tauri::command]
 pub async fn close_connection(state: State<'_, AppState>, id: Option<String>) -> CmdResult<()> {
-    let client = ControllerClient::new(state.manager.api_port()).map_err(err)?;
+    let client = controller_client(&state).await?;
     match id {
         Some(id) => client.close_connection(&id).await.map_err(err),
         None => client.close_all().await.map_err(err),
@@ -720,15 +819,19 @@ pub struct TunStatus {
 
 #[tauri::command]
 pub async fn tun_status() -> CmdResult<TunStatus> {
-    Ok(TunStatus {
-        elevated: triproxy_core::is_elevated(),
-        leftovers: triproxy_core::leftovers().map_err(err)?,
+    blocking(|| {
+        Ok(TunStatus {
+            elevated: triproxy_core::is_elevated(),
+            leftovers: triproxy_core::leftovers().map_err(err)?,
+        })
     })
+    .await
 }
 
 #[tauri::command]
 pub async fn system_proxy_status(state: State<'_, AppState>) -> CmdResult<Option<AppliedProxy>> {
-    Ok(SystemProxyManager::new(state.manager.layout()).status())
+    let layout = state.manager.layout().clone();
+    blocking(move || Ok(SystemProxyManager::new(&layout).status())).await
 }
 
 #[tauri::command]
@@ -736,16 +839,18 @@ pub async fn set_system_proxy(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> CmdResult<Option<AppliedProxy>> {
-    let proxy = SystemProxyManager::new(state.manager.layout());
-    if !enabled {
-        proxy.disable().map_err(err)?;
-        return Ok(None);
-    }
+    let layout = state.manager.layout().clone();
+    let http_port = state.manager.persisted_http_proxy_port();
+    blocking(move || {
+        let proxy = SystemProxyManager::new(&layout);
+        if !enabled {
+            proxy.disable().map_err(err)?;
+            return Ok(None);
+        }
 
-    let port = state
-        .manager
-        .persisted_listen_port()
-        .ok_or_else(|| "还没有核心在运行，无法启用系统代理".to_string())?;
-    let applied = proxy.enable(&format!("127.0.0.1:{port}")).map_err(err)?;
-    Ok(Some(applied))
+        let port = http_port.ok_or_else(|| "还没有核心在运行，无法启用系统代理".to_string())?;
+        let applied = proxy.enable(&format!("127.0.0.1:{port}")).map_err(err)?;
+        Ok(Some(applied))
+    })
+    .await
 }

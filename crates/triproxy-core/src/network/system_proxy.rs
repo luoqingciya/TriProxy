@@ -36,7 +36,7 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 use crate::health::probe_tcp_blocking;
 use crate::logging::now_ms;
-use crate::paths::Layout;
+use crate::paths::{write_atomic, Layout};
 
 /// What the system currently routes through, as far as TriProxy knows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,8 +148,8 @@ impl SystemProxyManager {
             )));
         }
 
-        let previous = match self.read_snapshot() {
-            Ok(existing) => existing.previous,
+        let (previous, created_snapshot) = match self.read_snapshot() {
+            Ok(existing) => (existing.previous, false),
             Err(_) => {
                 let captured = self.backend.capture()?;
                 // Persist before touching the system, so a crash here is safe.
@@ -160,11 +160,17 @@ impl SystemProxyManager {
                     previous: captured.clone(),
                 };
                 self.write_snapshot(&pending)?;
-                captured
+                (captured, true)
             }
         };
 
-        self.backend.apply(endpoint, &self.bypass())?;
+        if let Err(err) = self.backend.apply(endpoint, &self.bypass()) {
+            if created_snapshot {
+                let _ = self.backend.restore(&previous);
+                let _ = self.remove_snapshot();
+            }
+            return Err(err);
+        }
 
         let snapshot = SnapshotFile {
             backend: self.backend.name().to_string(),
@@ -229,15 +235,8 @@ impl SystemProxyManager {
     }
 
     fn write_snapshot(&self, snapshot: &SnapshotFile) -> Result<()> {
-        if let Some(parent) = self.snapshot_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
-        }
         let text = serde_json::to_string_pretty(snapshot)?;
-        let staging = self.snapshot_path.with_extension("tmp");
-        std::fs::write(&staging, text).map_err(|e| Error::io(&staging, e))?;
-        std::fs::rename(&staging, &self.snapshot_path)
-            .map_err(|e| Error::io(&self.snapshot_path, e))?;
-        Ok(())
+        write_atomic(&self.snapshot_path, text)
     }
 
     fn remove_snapshot(&self) -> Result<()> {
@@ -419,6 +418,67 @@ mod windows {
     }
 }
 
+/// Parse a semicolon/comma-separated bypass list for macOS `networksetup`.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn parse_macos_bypass_domains(bypass: &str) -> Vec<String> {
+    let mut domains = Vec::new();
+    for raw in bypass.split([';', ',']) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let domain = if trimmed.eq_ignore_ascii_case("<local>") {
+            "*.local".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
+    }
+    domains
+}
+
+/// Format a semicolon/comma-separated bypass list as a GNOME `ignore-hosts`
+/// GVariant string array (e.g. `['localhost', '127.0.0.0/8']`).
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+pub(crate) fn format_gnome_ignore_hosts(bypass: &str) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    for raw in bypass.split([';', ',']) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("<local>") {
+            continue;
+        }
+        let normalized = match trimmed {
+            "127.*" => "127.0.0.0/8",
+            "10.*" => "10.0.0.0/8",
+            "192.168.*" => "192.168.0.0/16",
+            s if s.starts_with("172.") && s.ends_with(".*") => {
+                if let Some(second) = s
+                    .strip_prefix("172.")
+                    .and_then(|rest| rest.strip_suffix(".*"))
+                    .and_then(|num| num.parse::<u8>().ok())
+                {
+                    if (16..=31).contains(&second) {
+                        "172.16.0.0/12"
+                    } else {
+                        trimmed
+                    }
+                } else {
+                    trimmed
+                }
+            }
+            other => other,
+        };
+        let escaped = normalized.replace('\\', "\\\\").replace('\'', "\\'");
+        let quoted = format!("'{escaped}'");
+        if !entries.contains(&quoted) {
+            entries.push(quoted);
+        }
+    }
+    format!("[{}]", entries.join(", "))
+}
+
 // ---------------------------------------------------------------------------
 // macOS: networksetup per network service
 // ---------------------------------------------------------------------------
@@ -427,7 +487,7 @@ mod windows {
 mod macos {
     use serde_json::{json, Value};
 
-    use super::{Error, ProxyBackend, Result};
+    use super::{parse_macos_bypass_domains, Error, ProxyBackend, Result};
 
     pub struct MacProxyBackend;
 
@@ -475,6 +535,32 @@ mod macos {
         Ok((enabled, server, port))
     }
 
+    fn get_bypass_domains(service: &str) -> Result<Vec<String>> {
+        let text = run(&["-getproxybypassdomains", service])?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.contains("There aren't any bypass domains") {
+            return Ok(Vec::new());
+        }
+        Ok(trimmed
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    fn set_bypass_domains(service: &str, domains: &[String]) -> Result<()> {
+        let mut args = vec!["-setproxybypassdomains", service];
+        if domains.is_empty() {
+            args.push("Empty");
+        } else {
+            for domain in domains {
+                args.push(domain.as_str());
+            }
+        }
+        run(&args).map(|_| ())
+    }
+
     impl ProxyBackend for MacProxyBackend {
         fn name(&self) -> &'static str {
             "macos-networksetup"
@@ -490,23 +576,27 @@ mod macos {
                 let (web_enabled, web_server, web_port) = get_proxy("-getwebproxy", &service)?;
                 let (tls_enabled, tls_server, tls_port) =
                     get_proxy("-getsecurewebproxy", &service)?;
+                let bypass = get_bypass_domains(&service).unwrap_or_default();
                 entries.push(json!({
                     "service": service,
                     "web": { "enabled": web_enabled, "server": web_server, "port": web_port },
                     "secure": { "enabled": tls_enabled, "server": tls_server, "port": tls_port },
+                    "bypass": bypass,
                 }));
             }
             Ok(Value::Array(entries))
         }
 
-        fn apply(&self, endpoint: &str, _bypass: &str) -> Result<()> {
+        fn apply(&self, endpoint: &str, bypass: &str) -> Result<()> {
             let (host, port) = endpoint
                 .rsplit_once(':')
                 .ok_or_else(|| Error::Other(format!("invalid endpoint `{endpoint}`")))?;
+            let domains = parse_macos_bypass_domains(bypass);
 
             for service in services()? {
                 run(&["-setwebproxy", &service, host, port])?;
                 run(&["-setsecurewebproxy", &service, host, port])?;
+                set_bypass_domains(&service, &domains)?;
                 run(&["-setwebproxystate", &service, "on"])?;
                 run(&["-setsecurewebproxystate", &service, "on"])?;
             }
@@ -544,6 +634,15 @@ mod macos {
                         run(&[state_flag, service, "off"])?;
                     }
                 }
+
+                if let Some(bypass) = entry.get("bypass").and_then(Value::as_array) {
+                    let domains: Vec<String> = bypass
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    set_bypass_domains(service, &domains)?;
+                }
             }
             Ok(())
         }
@@ -558,7 +657,7 @@ mod macos {
 mod linux {
     use serde_json::{json, Value};
 
-    use super::{Error, ProxyBackend, Result};
+    use super::{format_gnome_ignore_hosts, Error, ProxyBackend, Result};
 
     pub struct LinuxProxyBackend;
 
@@ -590,8 +689,9 @@ mod linux {
         gsettings(&["set", schema, key, value]).map(|_| ())
     }
 
-    const KEYS: [&str; 5] = [
+    const KEYS: [&str; 6] = [
         "org.gnome.system.proxy mode",
+        "org.gnome.system.proxy ignore-hosts",
         "org.gnome.system.proxy.http host",
         "org.gnome.system.proxy.http port",
         "org.gnome.system.proxy.https host",
@@ -621,12 +721,16 @@ mod linux {
             Ok(Value::Object(values))
         }
 
-        fn apply(&self, endpoint: &str, _bypass: &str) -> Result<()> {
+        fn apply(&self, endpoint: &str, bypass: &str) -> Result<()> {
             let (host, port) = endpoint
                 .rsplit_once(':')
                 .ok_or_else(|| Error::Other(format!("invalid endpoint `{endpoint}`")))?;
 
             set("org.gnome.system.proxy mode", "'manual'")?;
+            set(
+                "org.gnome.system.proxy ignore-hosts",
+                &format_gnome_ignore_hosts(bypass),
+            )?;
             for scheme in ["http", "https"] {
                 set(
                     &format!("org.gnome.system.proxy.{scheme} host"),
@@ -836,5 +940,31 @@ mod tests {
     fn invalid_endpoint_is_rejected() {
         let (manager, _root) = manager("badendpoint", FakeBackend::new(serde_json::json!({})));
         assert!(manager.enable("127.0.0.1").is_err());
+    }
+
+    #[test]
+    fn formats_bypass_list_for_gnome_and_macos() {
+        let gnome = format_gnome_ignore_hosts(DEFAULT_BYPASS);
+        assert!(gnome.contains("'localhost'"), "{gnome}");
+        assert!(gnome.contains("'127.0.0.0/8'"), "{gnome}");
+        assert!(gnome.contains("'172.16.0.0/12'"), "{gnome}");
+        assert!(gnome.contains("'192.168.0.0/16'"), "{gnome}");
+        assert!(!gnome.contains("<local>"), "{gnome}");
+
+        let macos = parse_macos_bypass_domains("<local>;localhost;*.corp.internal");
+        assert_eq!(macos, vec!["*.local", "localhost", "*.corp.internal"]);
+    }
+
+    #[test]
+    fn failed_apply_cleans_up_fresh_snapshot() {
+        let mut backend = FakeBackend::new(serde_json::json!({ "server": "", "enabled": 0 }));
+        backend.fail_apply = true;
+        let (manager, root) = manager("failapply", backend);
+
+        with_listener(|port| {
+            let err = manager.enable(&format!("127.0.0.1:{port}")).unwrap_err();
+            assert!(err.to_string().contains("apply failed"));
+        });
+        assert!(!root.join("system-proxy.json").exists());
     }
 }

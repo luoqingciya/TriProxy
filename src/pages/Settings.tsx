@@ -50,11 +50,59 @@ export function Settings() {
   const [rulesError, setRulesError] = useState<string | null>(null)
   const [ruleSetsText, setRuleSetsText] = useState(settings?.rule_sets ?? '')
   const [ruleSetsError, setRuleSetsError] = useState<string | null>(null)
+  const [listenPortDraft, setListenPortDraft] = useState(
+    String(settings?.listen_port ?? 7890),
+  )
+  const [apiPortDraft, setApiPortDraft] = useState(String(settings?.api_port ?? 9090))
+  const [proxyBypassDraft, setProxyBypassDraft] = useState(settings?.proxy_bypass ?? '')
 
   useEffect(() => {
     setRulesText(settings?.custom_rules ?? '')
     setRuleSetsText(settings?.rule_sets ?? '')
-  }, [settings?.custom_rules, settings?.rule_sets])
+    if (settings) {
+      setListenPortDraft(String(settings.listen_port))
+      setApiPortDraft(String(settings.api_port))
+      setProxyBypassDraft(settings.proxy_bypass ?? '')
+    }
+  }, [
+    settings?.custom_rules,
+    settings?.rule_sets,
+    settings?.listen_port,
+    settings?.api_port,
+    settings?.proxy_bypass,
+  ])
+
+  async function commitListenPort() {
+    if (!settings) return
+    const port = Number(listenPortDraft)
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      if (port !== settings.listen_port) {
+        await update({ listen_port: port })
+      }
+    } else {
+      setListenPortDraft(String(settings.listen_port))
+    }
+  }
+
+  async function commitApiPort() {
+    if (!settings) return
+    const port = Number(apiPortDraft)
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) {
+      if (port !== settings.api_port) {
+        await update({ api_port: port })
+      }
+    } else {
+      setApiPortDraft(String(settings.api_port))
+    }
+  }
+
+  async function commitProxyBypass() {
+    if (!settings) return
+    const next = proxyBypassDraft.trim() === '' ? null : proxyBypassDraft
+    if (next !== settings.proxy_bypass) {
+      await update({ proxy_bypass: next })
+    }
+  }
 
   async function commitRules() {
     setRulesError(null)
@@ -222,19 +270,37 @@ export function Settings() {
         </SettingRow>
         <SettingRow
           title="监听端口"
-          hint="本地混合代理端口；被别的程序占用时核心会启动失败，改完需要重启核心"
+          hint="本地混合代理端口；失焦或回车保存，改完需要重启核心"
         >
           <input
             type="number"
             min={1}
             max={65535}
-            value={settings.listen_port}
-            onChange={(event) => {
-              const port = Number(event.target.value)
-              // An empty field parses as 0; saving that would make the next
-              // start fail with a port error the user did not ask for.
-              if (Number.isInteger(port) && port >= 1 && port <= 65535) {
-                update({ listen_port: port })
+            value={listenPortDraft}
+            onChange={(event) => setListenPortDraft(event.target.value)}
+            onBlur={() => void commitListenPort()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+            className="w-[104px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg tabular outline-none"
+          />
+        </SettingRow>
+        <SettingRow
+          title="控制器端口"
+          hint="Mihomo / sing-box 的本地 API 端口；失焦或回车保存，改完需要重启核心"
+        >
+          <input
+            type="number"
+            min={1}
+            max={65535}
+            value={apiPortDraft}
+            onChange={(event) => setApiPortDraft(event.target.value)}
+            onBlur={() => void commitApiPort()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
               }
             }}
             className="w-[104px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[13px] text-fg tabular outline-none"
@@ -242,18 +308,17 @@ export function Settings() {
         </SettingRow>
         <SettingRow
           title="代理绕过列表"
-          hint="分号分隔；留空用默认（localhost 与内网网段）"
+          hint="分号分隔；留空用默认（localhost 与内网网段），失焦或回车保存"
         >
           <input
-            value={settings.proxy_bypass ?? ''}
-            onChange={(event) =>
-              // Empty means "use the built-in list" rather than "bypass nothing":
-              // proxying localhost breaks every local dev server.
-              update({
-                proxy_bypass:
-                  event.target.value.trim() === '' ? null : event.target.value,
-              })
-            }
+            value={proxyBypassDraft}
+            onChange={(event) => setProxyBypassDraft(event.target.value)}
+            onBlur={() => void commitProxyBypass()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
             placeholder="localhost;*.internal;192.168.*"
             className="w-[240px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[12.5px] text-fg outline-none placeholder:text-faint"
           />

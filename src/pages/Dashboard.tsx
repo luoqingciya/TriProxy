@@ -113,9 +113,32 @@ export function Dashboard() {
   const runningKind = running?.kind ?? null
   useEffect(() => {
     if (!runningKind) return undefined
-    void measureDelay()
-    const timer = window.setInterval(() => void measureDelay(), DELAY_INTERVAL_MS)
-    return () => window.clearInterval(timer)
+    let timer: number | undefined
+    const stopTimer = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer)
+        timer = undefined
+      }
+    }
+    const startTimer = () => {
+      stopTimer()
+      if (document.hidden) return
+      void measureDelay()
+      timer = window.setInterval(() => void measureDelay(), DELAY_INTERVAL_MS)
+    }
+    const onVisibility = () => {
+      if (document.hidden) {
+        stopTimer()
+      } else {
+        startTimer()
+      }
+    }
+    startTimer()
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      stopTimer()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }, [runningKind, measureDelay])
 
   return (
@@ -235,7 +258,10 @@ export function Dashboard() {
               value={settings?.tun ? "已启用" : "未启用"}
               hint={settings?.tun ? "需要管理员" : undefined}
             />
-            <Row label="分流规则" value={settings?.rule_set ? '已启用' : '未启用'} />
+            <Row
+              label="分流规则"
+              value={settings?.rule_mode === 'split' ? '分流 (split)' : '全局 (global)'}
+            />
           </div>
         </Card>
 

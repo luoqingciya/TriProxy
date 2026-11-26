@@ -103,10 +103,11 @@ impl ProxyCore for ManagedCore {
         self.listen_port.store(port, Ordering::Relaxed);
     }
 
-    fn bootstrap_config(&self, api_port: u16, log_level: &str) -> String {
+    fn bootstrap_config(&self, api_port: u16, api_secret: Option<&str>, log_level: &str) -> String {
         self.dialect.bootstrap(&BootstrapOptions {
             listen_port: self.listen_port(),
             api_port,
+            api_secret: api_secret.map(str::to_string),
             log_level: log_level.to_string(),
         })
     }
@@ -149,11 +150,17 @@ impl ProxyCore for ManagedCore {
     }
 
     async fn start(&self, config: &Path) -> Result<()> {
+        let listen = self.listen_port();
+        let extra = match self.kind() {
+            CoreKind::Xray => vec![CoreKind::Xray.http_proxy_port(listen)],
+            _ => Vec::new(),
+        };
         self.supervisor
             .spawn(
                 config,
                 self.dialect.run_args(config),
-                self.listen_port(),
+                listen,
+                &extra,
                 DEFAULT_READY_TIMEOUT,
             )
             .await

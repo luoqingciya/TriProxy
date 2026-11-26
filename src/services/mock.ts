@@ -84,6 +84,7 @@ let settings: Settings = {
   rule_mode: 'global',
   log_level: 'info',
   listen_port: 7890,
+  api_port: 9090,
   close_to_tray: true,
   auto_connect: false,
   proxy_bypass: null,
