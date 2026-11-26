@@ -4,68 +4,26 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
-## 本次更新（v0.2.9）
+## 本次更新（v0.2.10）
 
-**这一版把「Linux」拆成了「发行版」。** Fedora 用户此前装不上，装上了也有两件事会让人以为软件坏了——
-而且两件都不给原因。
+**这一版是一次围绕稳定性、安全性、性能与前后端一致性的全面优化。**
 
-### 新：Fedora / RHEL 系的 `.rpm`
+### 控制器与连接体验
 
-`dnf` 装不了 `.deb`，AppImage 还要求 FUSE 2 在位，所以 Fedora 上原本没有一条正常的安装路径。现在有：
+- **控制器字段对齐与鉴权**：修复 Mihomo / sing-box 控制器快照及连接字段在 `camelCase` 与 `snake_case` 上的解析差异；自动生成并校验 Bearer `api_secret`，控制器请求跳过系统代理，设置页新增 `api_port` 配置
+- **流量流与轮询优化**：桌面端改为后台常驻订阅流量流并复用缓存的控制器客户端；页面不可见（`document.hidden`）时暂停后台轮询，降低空闲资源开销
 
-```bash
-sudo dnf install ./TriProxy-0.2.9-linux-x64-lite.rpm
-```
+### 路由、DNS 与内核生命周期
 
-依赖（`webkit2gtk4.1`、`gtk3`、`libappindicator-gtk3`）由 `dnf` 从仓库解析，卸载走
-`dnf remove tri-proxy`——包名是产品名的 kebab-case，不是 `triproxy`。
+- **DNS 直连分流与规则集镜像**：补齐国内域名直连 DNS 分流规则（Mihomo `nameserver-policy`；sing-box 在 `fakeip` 前让 `geosite-cn`/`cn` 走 `local-dns`），并为 sing-box 规则集补齐下载镜像支持
+- **端口与配置一致性**：修复 Xray 监听端口为 `65535` 时的 HTTP 端口冲突并统一 `http_proxy_port` 计算；`start`/`switch` 完整保留已保存的 `tun`、`system_proxy`、`api_port`、`api_secret`、`rule_set_mirror` 配置，同核心切换走重载路径
+- **代理与进程健壮性**：补齐 macOS / GNOME 系统代理绕过域名格式化与写入失败回滚；核心日志管道改为有界通道 + `BufWriter` 并支持运行时轮转；进程探测增加 PID 复用与 Linux 僵尸进程防护，核心下载更新先校验可用性再替换
 
-有一处值得写下来：**RPM 的依赖不会自己长出来。** tauri 会固定追加几条 soname
-（`libwebkit2gtk-4.1.so.0()(64bit)`、`libgtk-3.so.0()(64bit)`，开了托盘再加
-`libappindicator3.so.1()(64bit)`），其余得手写在 `bundle.linux.rpm.depends` 里——打包器不做任何
-动态库分析，多一个运行时依赖不会自动出现在 Requires 里。写错的症状只有一种：安装时报
-`nothing provides …`。所以流水线在发布前先自己验一遍：`rpm -qlp` 看载荷、`rpm -qpR` 看依赖，
-不等用户装的时候才发现。
+### 安全、存储与桌面端细节
 
-### 新：`triproxy doctor` 报出发行版事实
-
-「linux」不是一个平台。同一个二进制在 Fedora Workstation 上与 Ubuntu 上的现场完全不同，而这两件事
-此前都不给原因。`doctor` 现在多五行：
-
-```text
-  distro     Fedora Linux 45 (fedora, rpm)
-  desktop    GNOME — 托盘不可用，关闭窗口将退出
-             sudo dnf install gnome-shell-extension-appindicator
-  selinux    enforcing
-  tun device /dev/net/tun 不存在 — 先执行 sudo modprobe tun
-  proxy      linux-gsettings — 可用
-```
-
-四行里三行是「不查文档就不会知道」的：Fedora Workstation 默认不装 AppIndicator 扩展（GNOME 自己没有
-托盘，图标是这个扩展提供的）、SELinux 在 enforcing、`tun` 模块没被任何东西拉起来时 `/dev/net/tun`
-根本不存在。最后一行是系统代理后端自检——说不准时它说「不可用」，而不是假装能开。
-
-发行版与包族的判断只用于**措辞**（一条命令该写 `dnf` 还是 `apt`），没有行为分支；
-托盘与 SELinux 这两项也只在真知道的时候才报，猜错一个「你大概没有托盘」比不说更烦人。
-
-### 改进：TUN 起不来时说清缺什么
-
-原来只查权限。现在 `start --tun` 与界面上的「连接」会同时检查设备节点：缺 `/dev/net/tun` 就直接给
-`sudo modprobe tun`，而不是让核心抛一段一个字都不提设备的日志。命令行与界面共用同一个判定，
-不会一边说权限、一边说设备。
-
-### 这一版新增的边界
-
-- **KDE Plasma 的系统代理没有实现**：那里 `doctor` 会明说「不可用」。与其猜着写一段没人验证过的
-  `kwriteconfig`，不如写清楚——TUN 与环境变量都还能用
-- **RPM 未在真机 `dnf install` 过**：包由 CI 构建，载荷与依赖由流水线校验；三个依赖名只对
-  Fedora / RHEL 系成立（openSUSE 里同一个库叫 `libwebkit2gtk-4.1-0`），所以文档也只写
-  「Fedora / RHEL / Rocky」
-- **Linux 的应用内自更新仍只对 AppImage 有效**：`.deb` / `.rpm` 装的那份用包管理器升级
-  （`sudo dnf upgrade tri-proxy`）
-- **`.deb` / `.rpm` 装的命令行不在 PATH 上**：图形界面是 `/usr/bin/triproxy-app`，CLI 在
-  `/usr/lib/TriProxy/triproxy`。要直接敲 `triproxy`，用 AppImage、自行编译，或自己做个软链——
-  这两条都是既有布局，不是这一版引入的
+- **原子写入与路径校验**：配置与设置保存统一使用临时文件原子替换（`write_atomic`），profile ID 全路径校验防止路径穿越
+- **桌面端与 CLI 改进**：支持冷启动传入的 `triproxy://` 深链接并校验 `http://`/`https://` 来源；资料页支持直接导入 URL 订阅；同步 I/O 与系统平台调用移入 `spawn_blocking` 避免阻塞界面，通知与错误横幅改为分层堆叠；CLI 拆分为模块化子命令，延迟测速并发化并改用批量内存读取
+- **文档修正**：更正 Fedora RPM 依赖说明与实际卸载包名（`tri-proxy`）
 
 ### v0.2.0 起的功能
 
