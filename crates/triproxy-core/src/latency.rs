@@ -73,7 +73,7 @@ impl LatencySample {
 
 /// Measure the TCP handshake time to one endpoint.
 pub async fn tcp_latency(server: &str, port: u16, timeout: Duration) -> Result<u64> {
-    let started = Instant::now();
+    let deadline = Instant::now() + timeout;
 
     let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host((server, port)))
         .await
@@ -90,8 +90,14 @@ pub async fn tcp_latency(server: &str, port: u16, timeout: Duration) -> Result<u
 
     let mut last_error = None;
     for address in addresses {
-        match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(address)).await {
-            Ok(Ok(_stream)) => return Ok(started.elapsed().as_millis() as u64),
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            last_error.get_or_insert_with(|| "connect timed out".to_string());
+            break;
+        }
+        let connect_started = Instant::now();
+        match tokio::time::timeout(remaining, tokio::net::TcpStream::connect(address)).await {
+            Ok(Ok(_stream)) => return Ok(connect_started.elapsed().as_millis() as u64),
             Ok(Err(error)) => last_error = Some(format!("connect failed: {error}")),
             Err(_) => last_error = Some("connect timed out".to_string()),
         }
@@ -108,7 +114,7 @@ pub async fn tcp_latency(server: &str, port: u16, timeout: Duration) -> Result<u
 /// the round trip rather than the download.
 pub const DEFAULT_PROBE_URL: &str = "http://www.gstatic.com/generate_204";
 
-/// Measure real proxy delay through the running core.
+/// Measure real proxy delay through the running core, concurrently.
 ///
 /// This is the only measurement that proves a node works: the core opens an HTTP
 /// request through the node, so wrong credentials or a broken protocol fail here
@@ -120,18 +126,45 @@ pub async fn measure_proxy_delay(
     probe_url: &str,
     timeout_ms: u64,
 ) -> Vec<LatencySample> {
-    let mut samples = Vec::with_capacity(nodes.len());
+    measure_proxy_delay_with(client, nodes, probe_url, timeout_ms, DEFAULT_CONCURRENCY).await
+}
+
+pub async fn measure_proxy_delay_with(
+    client: &crate::controller::ControllerClient,
+    nodes: &[Node],
+    probe_url: &str,
+    timeout_ms: u64,
+    concurrency: usize,
+) -> Vec<LatencySample> {
+    let permits = std::sync::Arc::new(Semaphore::new(concurrency.max(1)));
+    let probe_url = probe_url.to_string();
+    let mut tasks = Vec::with_capacity(nodes.len());
+
     for node in nodes {
-        let result = client.proxy_delay(&node.name, probe_url, timeout_ms).await;
-        samples.push(LatencySample {
-            node_id: node.id.clone(),
-            name: node.name.clone(),
-            endpoint: node.endpoint(),
-            kind: LatencyKind::Http,
-            latency_ms: result.as_ref().ok().copied(),
-            error: result.err().map(|error| error.to_string()),
-            measured_at_ms: now_ms(),
-        });
+        let node = node.clone();
+        let client = client.clone();
+        let probe_url = probe_url.clone();
+        let permits = permits.clone();
+        tasks.push(tokio::spawn(async move {
+            let _permit = permits.acquire().await.ok();
+            let result = client.proxy_delay(&node.name, &probe_url, timeout_ms).await;
+            LatencySample {
+                node_id: node.id.clone(),
+                name: node.name.clone(),
+                endpoint: node.endpoint(),
+                kind: LatencyKind::Http,
+                latency_ms: result.as_ref().ok().copied(),
+                error: result.err().map(|error| error.to_string()),
+                measured_at_ms: now_ms(),
+            }
+        }));
+    }
+
+    let mut samples = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if let Ok(sample) = task.await {
+            samples.push(sample);
+        }
     }
     samples.sort_by(|a, b| a.name.cmp(&b.name));
     samples

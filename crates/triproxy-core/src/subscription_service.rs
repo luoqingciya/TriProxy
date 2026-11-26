@@ -58,6 +58,10 @@ impl<'a> SubscriptionService<'a> {
         })
     }
 
+    pub fn with_client(store: &'a ProfileStore, client: SubscriptionClient) -> Self {
+        Self { store, client }
+    }
+
     /// Fetch a URL and store it as a new subscription.
     ///
     /// Unlike a refresh, the first fetch must succeed: there is nothing to fall

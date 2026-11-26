@@ -70,18 +70,18 @@ export function Profiles() {
             </div>
             <div>
               <label className="mb-1.5 block text-[12px] text-muted">
-                订阅内容（分享链接列表，或 base64 订阅）
+                订阅地址或内容（订阅 URL、分享链接列表、base64 订阅或 Clash YAML）
               </label>
               <textarea
                 value={text}
                 onChange={(event) => setText(event.target.value)}
                 rows={6}
                 spellCheck={false}
-                placeholder={'vless://...\ntrojan://...\nss://...'}
+                placeholder={'https://example.com/sub\n或 vless://...\ntrojan://...\nss://...'}
                 className="w-full resize-y rounded-lg border border-line bg-panel-2 px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none placeholder:text-faint focus:border-line-strong"
               />
               <p className="mt-1.5 text-[12px] text-faint">
-                支持 VLESS / VMess / Trojan / Shadowsocks。单行解析失败不会影响其余节点。
+                支持订阅 URL、Shadowsocks / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS5 / HTTP。单行解析失败不会影响其余节点。
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -119,7 +119,11 @@ export function Profiles() {
                     </div>
                     <div className="mt-1 text-[12.5px] text-muted tabular">
                       {profile.node_count} 个节点 ·{' '}
-                      {profile.format === 'base64_subscription' ? 'base64 订阅' : '链接列表'}
+                      {profile.format === 'base64_subscription'
+                        ? 'base64 订阅'
+                        : profile.format === 'clash_yaml'
+                          ? 'Clash YAML'
+                          : '链接列表'}
                     </div>
                     <div className="mt-1 truncate text-[12px] text-faint">
                       {profile.source || '—'}

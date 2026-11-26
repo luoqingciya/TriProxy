@@ -71,15 +71,20 @@ impl ConfigCompiler for MihomoCompiler {
         let mut group_members: Vec<String> = Vec::new();
         // An explicit pick outranks the automatic group: the first member of a
         // select group is its default, so order is the whole mechanism.
-        if let Some(name) = options
+        let picked = options
             .selected_name
             .as_ref()
-            .filter(|name| included.contains(name))
-        {
+            .filter(|name| included.contains(name));
+        if let Some(name) = picked {
             group_members.push(name.clone());
         }
         group_members.push(AUTO_GROUP.to_string());
-        group_members.extend(included.iter().cloned());
+        group_members.extend(
+            included
+                .iter()
+                .filter(|name| picked != Some(*name))
+                .cloned(),
+        );
         group_members.push("DIRECT".to_string());
 
         let group = Yaml::map()
@@ -97,6 +102,14 @@ impl ConfigCompiler for MihomoCompiler {
                 "external-controller",
                 Yaml::str(format!("127.0.0.1:{}", options.api_port)),
             );
+
+        if let Some(secret) = options
+            .api_secret
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            document = document.with("secret", Yaml::str(secret));
+        }
 
         if !options.allow_lan {
             document = document.with("bind-address", Yaml::str("127.0.0.1"));
@@ -194,7 +207,14 @@ fn dns_block(mode: DnsMode) -> Yaml {
             "nameserver",
             Yaml::strings([format!("https://1.1.1.1/dns-query#{PROXY_GROUP}")]),
         )
-        .with("fallback", Yaml::strings(["tls://8.8.8.8:853"]));
+        .with(
+            "fallback",
+            Yaml::strings([format!("tls://8.8.8.8:853#{PROXY_GROUP}")]),
+        )
+        .with(
+            "nameserver-policy",
+            Yaml::map().with("geosite:cn", Yaml::str("223.5.5.5")),
+        );
 
     if mode == DnsMode::FakeIp {
         dns = dns
@@ -836,5 +856,53 @@ mod tests {
             let node = node_with(credentials, None);
             assert_eq!(protocol_type(&node), expected);
         }
+    }
+
+    #[test]
+    fn selected_node_is_not_duplicated_in_proxy_group() {
+        let a = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let mut b = a.clone();
+        b.name = "Seoul 01".to_string();
+        b.server = "kr.example.com".to_string();
+        b.refresh_id();
+
+        let profile = Profile::new("p", vec![a, b.clone()]);
+        let options = CompileOptions {
+            selected_name: Some(b.name.clone()),
+            ..Default::default()
+        };
+        let compiled = compile_yaml(&profile, &options).unwrap();
+        let group_start = compiled.text.find("\"name\": \"PROXY\"").unwrap();
+        let group = &compiled.text[group_start..];
+        let rules_start = group.find("\"rules\"").unwrap();
+        let proxy_section = &group[..rules_start];
+        assert_eq!(proxy_section.matches("Seoul 01").count(), 1);
+    }
+
+    #[test]
+    fn api_secret_and_dns_split_policy_are_emitted() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            api_secret: Some("s3cr3t".to_string()),
+            dns: DnsMode::Split,
+            ..Default::default()
+        };
+        let text = compile_yaml(&Profile::new("p", vec![node]), &options)
+            .unwrap()
+            .text;
+        assert!(text.contains("\"secret\": \"s3cr3t\""), "{text}");
+        assert!(text.contains("\"nameserver-policy\":"), "{text}");
+        assert!(text.contains("\"geosite:cn\": \"223.5.5.5\""), "{text}");
+        assert!(text.contains("tls://8.8.8.8:853#PROXY"), "{text}");
     }
 }

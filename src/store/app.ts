@@ -101,6 +101,8 @@ interface AppState {
 
   setPage: (page: Page) => void
   refresh: () => Promise<void>
+  refreshLive: () => Promise<void>
+  refreshLibrary: () => Promise<void>
   loadSettings: () => Promise<void>
 
   start: (core: CoreKind | null) => Promise<void>
@@ -128,6 +130,7 @@ interface AppState {
 }
 
 const emptyLibrary: ProfileLibrary = { active: null, profiles: [] }
+let liveInFlight = false
 
 export const useApp = create<AppState>((set, get) => ({
   page: initialPage(),
@@ -151,44 +154,58 @@ export const useApp = create<AppState>((set, get) => ({
   setPage: (page) => {
     window.history.replaceState(null, '', `#${page}`)
     set({ page })
+    if (page === 'connections') {
+      void get().refreshLive()
+    }
   },
 
-  /**
-   * One round trip for everything the shell shows.
-   *
-   * The backend is a single process with an in-memory manager, so a combined
-   * refresh is cheaper and keeps every panel consistent with each other.
-   */
-  refresh: async () => {
+  refreshLive: async () => {
+    if (liveInFlight) return
+    liveInFlight = true
+    const wantConnections = get().page === 'connections'
     try {
-      const [status, library, nodes, selection, proxy, traffic, connections] =
-        await Promise.all([
-          api.status(),
-          api.profiles(),
-          api.activeNodes(),
-          api.previewSelection(),
-          api.systemProxyStatus(),
-          api.traffic(),
-          api.connections(),
-        ])
+      const [status, proxy, traffic, connections] = await Promise.all([
+        api.status(),
+        api.systemProxyStatus(),
+        api.traffic(),
+        wantConnections ? api.connections() : Promise.resolve(get().connections),
+      ])
       set({
         status,
-        library,
-        nodes,
-        selection,
         proxy,
         traffic,
-        trafficHistory: traffic
-          ? [...get().trafficHistory, { up: traffic.up, down: traffic.down }].slice(
-              -TRAFFIC_HISTORY_POINTS,
-            )
-          : [],
-        connections,
-        error: null,
+        trafficHistory:
+          status.active_core === null
+            ? []
+            : traffic
+              ? [...get().trafficHistory, { up: traffic.up, down: traffic.down }].slice(
+                  -TRAFFIC_HISTORY_POINTS,
+                )
+              : get().trafficHistory,
+        ...(wantConnections ? { connections } : {}),
       })
     } catch (error) {
       set({ error: describe(error) })
+    } finally {
+      liveInFlight = false
     }
+  },
+
+  refreshLibrary: async () => {
+    try {
+      const [library, nodes, selection] = await Promise.all([
+        api.profiles(),
+        api.activeNodes(),
+        api.previewSelection(),
+      ])
+      set({ library, nodes, selection })
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  refresh: async () => {
+    await Promise.all([get().refreshLive(), get().refreshLibrary()])
   },
 
   loadSettings: async () => {
@@ -428,6 +445,8 @@ export const useApp = create<AppState>((set, get) => ({
     set({ settings: next })
     try {
       await api.saveSettings(next)
+      const selection = await api.previewSelection().catch(() => get().selection)
+      set({ selection })
     } catch (error) {
       set({ settings: current, error: describe(error) })
     }

@@ -87,6 +87,7 @@ pub enum FetchOutcome {
     NotModified,
 }
 
+#[derive(Clone)]
 pub struct SubscriptionClient {
     http: reqwest::Client,
 }

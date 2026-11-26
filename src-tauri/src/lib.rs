@@ -26,18 +26,24 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tauri::Emitter;
 use triproxy_core::{
-    AppSettings, CoreManager, Layout, ProfileStore, RefreshStatus, SubscriptionService,
-    SystemProxyManager,
+    AppSettings, ControllerClient, CoreManager, Layout, ProfileStore, RefreshStatus,
+    SubscriptionClient, SubscriptionService, SystemProxyManager, TrafficSample,
 };
 
 /// Guards the exit path: cleanup is asynchronous, so the app has to be held open
 /// once, then allowed through on the second exit request.
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
+pub const PROFILES_CHANGED_EVENT: &str = "triproxy-profiles-changed";
+
 /// Shared state handed to every command.
 pub struct AppState {
     pub manager: Arc<CoreManager>,
+    pub subscription_client: SubscriptionClient,
+    pub controller: tokio::sync::RwLock<Option<(u16, Option<String>, ControllerClient)>>,
+    pub latest_traffic: Arc<tokio::sync::RwLock<Option<TrafficSample>>>,
 }
 
 pub fn run() {
@@ -45,6 +51,9 @@ pub fn run() {
 
     let layout = Layout::discover().expect("cannot resolve the application data directory");
     let manager = Arc::new(CoreManager::new(layout).expect("cannot initialise the core manager"));
+    let subscription_client =
+        SubscriptionClient::new().expect("cannot initialise the subscription client");
+    let latest_traffic = Arc::new(tokio::sync::RwLock::new(None));
 
     tauri::Builder::default()
         // Registered before anything else: it has to be the first thing that
@@ -72,6 +81,9 @@ pub fn run() {
         ))
         .manage(AppState {
             manager: manager.clone(),
+            subscription_client,
+            controller: tokio::sync::RwLock::new(None),
+            latest_traffic: latest_traffic.clone(),
         })
         .setup(move |app| {
             use tauri::Manager;
@@ -85,6 +97,11 @@ pub fn run() {
                 if let Err(error) = app.deep_link().register_all() {
                     tracing::warn!(%error, "could not register the triproxy:// scheme");
                 }
+            }
+
+            // Handle any triproxy:// URL passed on cold launch.
+            for arg in std::env::args().skip(1) {
+                deep_link::handle(app.handle(), &arg);
             }
 
             // A link clicked while the app is already running: macOS delivers an
@@ -123,7 +140,7 @@ pub fn run() {
                 // A proxy snapshot with no running core means the previous
                 // session died before restoring it; undo that before drawing.
                 let proxy = SystemProxyManager::new(manager.layout());
-                if proxy.status().is_some() && manager.status().await.active_core.is_none() {
+                if proxy.status().is_some() && !manager.has_running_core().await {
                     if let Err(error) = proxy.recover() {
                         tracing::warn!(%error, "could not restore the system proxy");
                     }
@@ -148,8 +165,17 @@ pub fn run() {
             // scheduler runs for as long as the app does — including while it
             // sits in the tray, which is now most of the time.
             let scheduler = app.state::<AppState>().manager.clone();
+            let scheduler_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                refresh_subscriptions_forever(scheduler).await;
+                refresh_subscriptions_forever(scheduler_handle, scheduler).await;
+            });
+
+            // Keep one persistent /traffic stream open while a controller-capable
+            // core is running instead of opening a fresh HTTP stream every 2s.
+            let traffic_manager = app.state::<AppState>().manager.clone();
+            let traffic_slot = app.state::<AppState>().latest_traffic.clone();
+            tauri::async_runtime::spawn(async move {
+                stream_traffic_forever(traffic_manager, traffic_slot).await;
             });
 
             // Start the core without being asked, if the user wants that.
@@ -228,7 +254,9 @@ pub fn run() {
 /// The tick is one minute because `refresh_due` decides per profile: a longer
 /// tick would make a one-hour subscription drift by however much the tick is.
 /// The first tick is consumed without doing work so startup stays quiet.
-async fn refresh_subscriptions_forever(manager: Arc<CoreManager>) {
+async fn refresh_subscriptions_forever(app: tauri::AppHandle, manager: Arc<CoreManager>) {
+    use tauri::Manager;
+
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;
@@ -237,25 +265,26 @@ async fn refresh_subscriptions_forever(manager: Arc<CoreManager>) {
         ticker.tick().await;
 
         let store = ProfileStore::new(manager.layout());
-        let service = match SubscriptionService::new(&store) {
-            Ok(service) => service,
-            Err(error) => {
-                // A client that cannot be built will not build later either;
-                // keeping the loop alive would just log the same line forever.
-                tracing::warn!(%error, "subscription scheduler stopped");
-                return;
-            }
-        };
+        let client = app.state::<AppState>().subscription_client.clone();
+        let service = SubscriptionService::with_client(&store, client);
 
         match service.refresh_due().await {
             Ok(outcomes) if outcomes.is_empty() => {}
             Ok(outcomes) => {
+                let updated = outcomes
+                    .iter()
+                    .filter(|outcome| matches!(outcome.status, RefreshStatus::Updated { .. }))
+                    .count();
                 let failed = outcomes
                     .iter()
                     .filter(|outcome| matches!(outcome.status, RefreshStatus::Failed { .. }))
                     .count();
+                if updated > 0 {
+                    let _ = app.emit(PROFILES_CHANGED_EVENT, ());
+                }
                 tracing::info!(
                     refreshed = outcomes.len(),
+                    updated,
                     failed,
                     "subscriptions refreshed in the background"
                 );
@@ -264,6 +293,44 @@ async fn refresh_subscriptions_forever(manager: Arc<CoreManager>) {
             // tick retries it along with everything else that is due.
             Err(error) => tracing::warn!(%error, "background subscription refresh failed"),
         }
+    }
+}
+
+/// Maintain a single `/traffic` stream while Mihomo or sing-box is active.
+async fn stream_traffic_forever(
+    manager: Arc<CoreManager>,
+    slot: Arc<tokio::sync::RwLock<Option<TrafficSample>>>,
+) {
+    let (tx, mut rx) = tokio::sync::watch::channel::<Option<TrafficSample>>(None);
+    let slot_writer = slot.clone();
+    tokio::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let value = *rx.borrow_and_update();
+            *slot_writer.write().await = value;
+        }
+    });
+
+    loop {
+        let active = manager.persisted_active().await;
+        if !active.is_some_and(|kind| kind.has_controller()) {
+            let _ = tx.send(None);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        let Ok(client) = manager.controller_client() else {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+
+        let _ = client
+            .stream_traffic(|sample| {
+                let _ = tx.send(Some(sample));
+            })
+            .await;
+
+        let _ = tx.send(None);
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -285,7 +352,7 @@ fn maybe_auto_connect(app: &tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         let manager = app.state::<AppState>().manager.clone();
 
-        if manager.status().await.active_core.is_some() {
+        if manager.has_running_core().await {
             return;
         }
         if ProfileStore::new(manager.layout())

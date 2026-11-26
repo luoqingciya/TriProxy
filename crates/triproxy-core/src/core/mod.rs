@@ -87,6 +87,23 @@ impl CoreKind {
         7890
     }
 
+    /// Port where the HTTP/HTTPS system proxy should point.
+    ///
+    /// Mihomo and sing-box expose mixed HTTP+SOCKS on `listen_port`. Xray has
+    /// separate inbounds: SOCKS on `listen_port` and HTTP on the adjacent port.
+    pub fn http_proxy_port(self, listen_port: u16) -> u16 {
+        match self {
+            CoreKind::Mihomo | CoreKind::SingBox => listen_port,
+            CoreKind::Xray => {
+                if listen_port == u16::MAX {
+                    u16::MAX - 1
+                } else {
+                    listen_port + 1
+                }
+            }
+        }
+    }
+
     /// Arguments that make the binary print its version and exit.
     ///
     /// Kept here (not in the adapters) because the binary manager needs it to
@@ -147,7 +164,7 @@ pub trait ProxyCore: Send + Sync {
     /// Phase-1 placeholder so that lifecycle work can be validated without the
     /// Unified Profile. Phase 3 replaces this with `ConfigCompiler`; the method
     /// must not grow into a second compiler in the meantime.
-    fn bootstrap_config(&self, api_port: u16, log_level: &str) -> String;
+    fn bootstrap_config(&self, api_port: u16, api_secret: Option<&str>, log_level: &str) -> String;
 
     /// Version string reported by the binary itself.
     async fn version(&self) -> Result<String>;

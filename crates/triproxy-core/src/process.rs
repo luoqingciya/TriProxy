@@ -19,12 +19,12 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{mpsc, Mutex, OnceCell};
 
 use crate::core::CoreKind;
 use crate::error::{Error, Result};
 use crate::health::{port_is_free, probe_tcp, CoreHealth};
-use crate::logging::{now_ms, LogBuffer, LogStream};
+use crate::logging::{now_ms, LogBuffer, LogLevel, LogStream};
 use crate::state::CoreState;
 
 /// How long a core is given to bind its inbound before it is considered failed.
@@ -33,6 +33,8 @@ pub const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Rotate a per-core log file once it grows past this size.
 pub const MAX_LOG_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// Bounded queue between async pipe readers and the blocking log file writer.
+const LOG_WRITER_QUEUE: usize = 2048;
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -268,6 +270,7 @@ impl Supervisor {
         config: &Path,
         args: Vec<OsString>,
         listen_port: u16,
+        extra_ports: &[u16],
         ready_timeout: Duration,
     ) -> Result<()> {
         let mut guard = self.inner.lock().await;
@@ -281,12 +284,19 @@ impl Supervisor {
         }
 
         // Guard against binding conflicts before paying for process startup.
-        if !wait_port_free(listen_port, Duration::from_secs(3)).await {
+        let mut required_ports = Vec::with_capacity(1 + extra_ports.len());
+        required_ports.push(listen_port);
+        for &port in extra_ports {
+            if !required_ports.contains(&port) {
+                required_ports.push(port);
+            }
+        }
+        if let Some(conflict) = wait_ports_free(&required_ports, Duration::from_secs(3)).await {
             guard.state = CoreState::Failed;
-            guard.last_error = Some(format!("port {listen_port} already in use"));
+            guard.last_error = Some(format!("port {conflict} already in use"));
             return Err(Error::PortInUse {
                 core: self.kind.as_str().to_string(),
-                port: listen_port,
+                port: conflict,
             });
         }
 
@@ -331,13 +341,14 @@ impl Supervisor {
         };
 
         let pid = child.id();
+        let file_tx = self.log_file.clone().map(spawn_log_file_writer);
         if let Some(stdout) = child.stdout.take() {
             spawn_line_reader(
                 stdout,
                 self.logs.clone(),
                 self.kind,
                 LogStream::Stdout,
-                self.log_file.clone(),
+                file_tx.clone(),
             );
         }
         if let Some(stderr) = child.stderr.take() {
@@ -346,7 +357,7 @@ impl Supervisor {
                 self.logs.clone(),
                 self.kind,
                 LogStream::Stderr,
-                self.log_file.clone(),
+                file_tx,
             );
         }
 
@@ -425,8 +436,15 @@ impl Supervisor {
         let Some(mut child) = guard.child.take() else {
             // Adopted process: no handle, so termination goes through the PID.
             if let Some(pid) = guard.pid {
-                let _ = force_kill(pid);
-                wait_pid_gone(pid, DEFAULT_STOP_TIMEOUT).await;
+                #[cfg(unix)]
+                {
+                    let _ = send_sigterm(pid);
+                    wait_pid_gone(pid, DEFAULT_STOP_TIMEOUT).await;
+                }
+                if pid_alive(pid) {
+                    let _ = force_kill(pid);
+                    wait_pid_gone(pid, DEFAULT_STOP_TIMEOUT).await;
+                }
                 guard.pid = None;
                 guard.config = None;
             }
@@ -439,11 +457,7 @@ impl Supervisor {
         // kill is the only path there and the force fallback below covers the rest.
         #[cfg(unix)]
         if let Some(pid) = pid {
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = send_sigterm(pid);
         }
         #[cfg(windows)]
         {
@@ -561,8 +575,78 @@ impl Supervisor {
     }
 }
 
+struct LogWriteEntry {
+    ts_ms: u64,
+    level: LogLevel,
+    line: String,
+}
+
+fn open_log_writer(path: &Path) -> Option<(std::io::BufWriter<std::fs::File>, u64)> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let existing_len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if existing_len > MAX_LOG_FILE_BYTES {
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    Some((std::io::BufWriter::new(file), len))
+}
+
+fn write_log_entry(
+    path: &Path,
+    writer: &mut std::io::BufWriter<std::fs::File>,
+    written: &mut u64,
+    entry: LogWriteEntry,
+) {
+    use std::io::Write;
+
+    let formatted = format!(
+        "{}\t{}\t{}\n",
+        entry.ts_ms,
+        entry.level.as_char(),
+        entry.line
+    );
+    if written.saturating_add(formatted.len() as u64) > MAX_LOG_FILE_BYTES {
+        let _ = writer.flush();
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+        if let Some((next_writer, next_len)) = open_log_writer(path) {
+            *writer = next_writer;
+            *written = next_len;
+        }
+    }
+    if writer.write_all(formatted.as_bytes()).is_ok() {
+        *written = written.saturating_add(formatted.len() as u64);
+    }
+}
+
+fn spawn_log_file_writer(path: PathBuf) -> mpsc::Sender<LogWriteEntry> {
+    let (tx, mut rx) = mpsc::channel::<LogWriteEntry>(LOG_WRITER_QUEUE);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+
+        let Some((mut writer, mut written)) = open_log_writer(&path) else {
+            return;
+        };
+
+        while let Some(entry) = rx.blocking_recv() {
+            write_log_entry(&path, &mut writer, &mut written, entry);
+            while let Ok(more) = rx.try_recv() {
+                write_log_entry(&path, &mut writer, &mut written, more);
+            }
+            let _ = writer.flush();
+        }
+    });
+    tx
+}
+
 /// Forward one pipe of core output into the ring buffer and, when configured,
-/// into the per-core log file.
+/// into the shared per-core log file writer.
 ///
 /// File output is what makes `triproxy logs` meaningful: the ring buffer dies
 /// with the CLI process, the file does not.
@@ -571,30 +655,11 @@ fn spawn_line_reader<R>(
     logs: Arc<LogBuffer>,
     kind: CoreKind,
     stream: LogStream,
-    log_file: Option<PathBuf>,
+    file_tx: Option<mpsc::Sender<LogWriteEntry>>,
 ) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        use std::io::Write;
-
-        let mut file = log_file.and_then(|path| {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Keep a single generation so a long-running core cannot fill the disk.
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if meta.len() > MAX_LOG_FILE_BYTES {
-                    let _ = std::fs::rename(&path, path.with_extension("log.1"));
-                }
-            }
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .ok()
-        });
-
         let mut lines = BufReader::new(reader).lines();
         loop {
             match lines.next_line().await {
@@ -604,9 +669,12 @@ fn spawn_line_reader<R>(
                     // break level detection.
                     let line = crate::logging::strip_ansi(&line);
                     let level = crate::logging::infer_level(stream, &line);
-                    if let Some(file) = file.as_mut() {
-                        let _ = writeln!(file, "{}\t{}\t{}", now_ms(), level.as_char(), line);
-                        let _ = file.flush();
+                    if let Some(tx) = &file_tx {
+                        let _ = tx.try_send(LogWriteEntry {
+                            ts_ms: now_ms(),
+                            level,
+                            line: line.clone(),
+                        });
                     }
                     logs.push(kind.as_str(), stream, line);
                 }
@@ -624,14 +692,12 @@ fn render_args(args: &[OsString]) -> String {
         .join(" ")
 }
 
-async fn wait_port_free(port: u16, timeout: Duration) -> bool {
+pub(crate) async fn wait_ports_free(ports: &[u16], timeout: Duration) -> Option<u16> {
     let deadline = Instant::now() + timeout;
     loop {
-        if port_is_free(port) {
-            return true;
-        }
+        let port = ports.iter().copied().find(|&port| !port_is_free(port))?;
         if Instant::now() >= deadline {
-            return false;
+            return Some(port);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -645,6 +711,38 @@ async fn wait_pid_gone(pid: u32, timeout: Duration) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[cfg(unix)]
+fn unix_kill(pid: u32, sig: i32) -> std::io::Result<()> {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let Ok(pid_i32) = i32::try_from(pid) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pid out of range",
+        ));
+    };
+    if pid_i32 <= 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid pid",
+        ));
+    }
+    // SAFETY: `kill(pid_i32, sig)` is a standard POSIX syscall with value-only arguments.
+    let rc = unsafe { kill(pid_i32, sig) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(unix)]
+fn send_sigterm(pid: u32) -> std::io::Result<()> {
+    const SIGTERM: i32 = 15;
+    unix_kill(pid, SIGTERM)
 }
 
 /// Force-terminate a process, including its children.
@@ -661,12 +759,8 @@ pub fn force_kill(pid: u32) -> std::io::Result<()> {
     }
     #[cfg(unix)]
     {
-        std::process::Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        Ok(())
+        const SIGKILL: i32 = 9;
+        unix_kill(pid, SIGKILL)
     }
 }
 
@@ -726,14 +820,35 @@ pub fn pid_alive(pid: u32) -> bool {
 
 #[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
-        || std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        if status
+            .lines()
+            .any(|line| line.starts_with("State:") && line.contains("\tZ"))
+        {
+            return false;
+        }
+    }
+
+    const EPERM: i32 = 1;
+    match unix_kill(pid, 0) {
+        Ok(()) => true,
+        Err(error) => error.raw_os_error() == Some(EPERM),
+    }
+}
+
+/// Best-effort check that `pid` still belongs to the expected proxy core
+/// rather than an unrelated process that reused the PID after a reboot.
+pub fn process_matches_core(pid: u32, kind: CoreKind) -> bool {
+    let Some(name) = crate::memory::process_name(pid) else {
+        return true;
+    };
+    let lower = name.to_ascii_lowercase();
+    match kind {
+        CoreKind::Mihomo => lower.contains("mihomo") || lower.contains("clash"),
+        CoreKind::SingBox => lower.contains("sing-box") || lower.contains("singbox"),
+        CoreKind::Xray => lower.contains("xray"),
+    }
 }
 
 #[cfg(test)]
@@ -770,12 +885,22 @@ mod tests {
                 Path::new("config.yaml"),
                 vec![],
                 7899,
+                &[],
                 Duration::from_millis(300),
             )
             .await
             .unwrap_err();
         assert!(matches!(err, Error::StartupFailed { .. }));
         assert_eq!(supervisor.state().await, CoreState::Failed);
+    }
+
+    #[test]
+    fn process_matches_core_rejects_unrelated_process_for_self() {
+        // Test runner binary is not mihomo/sing-box/xray.
+        let self_pid = std::process::id();
+        if crate::memory::process_name(self_pid).is_some() {
+            assert!(!process_matches_core(self_pid, CoreKind::Mihomo));
+        }
     }
 
     #[tokio::test]

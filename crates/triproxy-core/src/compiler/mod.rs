@@ -75,6 +75,9 @@ pub struct CompileOptions {
     pub listen_port: u16,
     /// Local controller / API port, where the core exposes one.
     pub api_port: u16,
+    /// Optional bearer secret protecting the controller API.
+    #[serde(default)]
+    pub api_secret: Option<String>,
     pub log_level: String,
     pub allow_lan: bool,
     /// Create a TUN interface instead of only a local mixed port.
@@ -100,6 +103,9 @@ pub struct CompileOptions {
     /// Remote rule-sets, emitted only to the cores that can read their format.
     #[serde(default)]
     pub rule_sets: Vec<RuleSet>,
+    /// Optional mirror prefix applied to GitHub-hosted rule-sets (e.g. sing-box split).
+    #[serde(default)]
+    pub rule_set_mirror: Option<String>,
 }
 
 /// Routing strategy.
@@ -162,6 +168,7 @@ impl Default for CompileOptions {
         Self {
             listen_port: 7890,
             api_port: 9090,
+            api_secret: None,
             log_level: "info".to_string(),
             allow_lan: false,
             tun: false,
@@ -171,6 +178,7 @@ impl Default for CompileOptions {
             selected_name: None,
             custom_rules: Vec::new(),
             rule_sets: Vec::new(),
+            rule_set_mirror: None,
         }
     }
 }

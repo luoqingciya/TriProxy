@@ -62,8 +62,10 @@ pub fn handle(app: &AppHandle, candidate: &str) -> bool {
                 .map(|(_, value)| value.into_owned());
 
             match target {
-                Some(target) if target.starts_with("http") => install(app, target),
-                _ => notify(app, "链接里没有可用的订阅地址（需要 ?url=）"),
+                Some(target) if target.starts_with("http://") || target.starts_with("https://") => {
+                    install(app, target)
+                }
+                _ => notify(app, "链接里没有可用的订阅地址（需要 ?url=http(s)://…）"),
             }
         }
         other => notify(
@@ -82,14 +84,9 @@ pub fn handle(app: &AppHandle, candidate: &str) -> bool {
 fn install(app: &AppHandle, url: String) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let store = ProfileStore::new(app.state::<AppState>().manager.layout());
-        let service = match SubscriptionService::new(&store) {
-            Ok(service) => service,
-            Err(error) => {
-                notify(&app, format!("无法建立订阅客户端：{error}"));
-                return;
-            }
-        };
+        let state = app.state::<AppState>();
+        let store = ProfileStore::new(state.manager.layout());
+        let service = SubscriptionService::with_client(&store, state.subscription_client.clone());
 
         let name = subscription_name(&url);
         match service.add(&url, &name, DEFAULT_INTERVAL_SECS).await {
@@ -99,9 +96,13 @@ fn install(app: &AppHandle, url: String) {
                 if store.active().ok().flatten().is_none() {
                     let _ = store.set_active(Some(&stored.id));
                 }
+                let _ = app.emit("triproxy-profiles-changed", ());
                 notify(
                     &app,
-                    format!("已导入订阅「{}」，共 {} 个节点", stored.name, stored.node_count),
+                    format!(
+                        "已导入订阅「{}」，共 {} 个节点",
+                        stored.name, stored.node_count
+                    ),
                 );
             }
             Err(error) => notify(&app, format!("导入失败：{error}")),
@@ -134,9 +135,13 @@ mod tests {
     fn ignores_arguments_that_are_not_links() {
         // Windows launches us with paths and flags; only one kind of argument is
         // ours, and treating the others as errors would spam the user.
-        assert!(!handle_prefix_check("C:\\Program Files\\TriProxy\\TriProxy.exe"));
+        assert!(!handle_prefix_check(
+            "C:\\Program Files\\TriProxy\\TriProxy.exe"
+        ));
         assert!(!handle_prefix_check("--minimized"));
-        assert!(handle_prefix_check("triproxy://install?url=https%3A%2F%2Fa.example"));
+        assert!(handle_prefix_check(
+            "triproxy://install?url=https%3A%2F%2Fa.example"
+        ));
     }
 
     /// The prefix test is the only part that can run without a Tauri app, so it

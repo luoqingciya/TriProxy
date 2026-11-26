@@ -58,8 +58,8 @@ impl Backup {
     /// A wrong file picked by mistake should produce one clear error, not a
     /// half-restored library.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let backup: Backup =
-            serde_json::from_str(text).map_err(|error| format!("不是有效的 TriProxy 备份：{error}"))?;
+        let backup: Backup = serde_json::from_str(text)
+            .map_err(|error| format!("不是有效的 TriProxy 备份：{error}"))?;
         if backup.version != FORMAT_VERSION {
             return Err(format!(
                 "备份格式版本 {} 不受支持（当前支持 {FORMAT_VERSION}）",
@@ -70,7 +70,11 @@ impl Backup {
     }
 
     /// Write everything back. Returns how many profiles were restored.
-    pub fn restore(&self, store: &ProfileStore, layout: &triproxy_core::Layout) -> Result<usize, String> {
+    pub fn restore(
+        &self,
+        store: &ProfileStore,
+        layout: &triproxy_core::Layout,
+    ) -> Result<usize, String> {
         let count = store
             .restore_records(&self.records)
             .map_err(|error| error.to_string())?;
@@ -139,17 +143,27 @@ mod tests {
         let source = layout("merge-source");
         let store = ProfileStore::new(&source);
         store
-            .save(&triproxy_core::profile::Profile::new("from-backup", Vec::new()), None)
+            .save(
+                &triproxy_core::profile::Profile::new("from-backup", Vec::new()),
+                None,
+            )
             .unwrap();
-        let text = serde_json::to_string(&Backup::capture(&store, AppSettings::default()).unwrap()).unwrap();
+        let text = serde_json::to_string(&Backup::capture(&store, AppSettings::default()).unwrap())
+            .unwrap();
 
         let target = layout("merge-target");
         let target_store = ProfileStore::new(&target);
         target_store
-            .save(&triproxy_core::profile::Profile::new("already-here", Vec::new()), None)
+            .save(
+                &triproxy_core::profile::Profile::new("already-here", Vec::new()),
+                None,
+            )
             .unwrap();
 
-        Backup::parse(&text).unwrap().restore(&target_store, &target).unwrap();
+        Backup::parse(&text)
+            .unwrap()
+            .restore(&target_store, &target)
+            .unwrap();
         let names: Vec<String> = target_store
             .list()
             .unwrap()

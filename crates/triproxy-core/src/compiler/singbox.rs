@@ -73,16 +73,21 @@ impl ConfigCompiler for SingBoxCompiler {
         let mut members: Vec<Value> = Vec::new();
         let mut default = AUTO_GROUP.to_string();
         // An explicit pick outranks the automatic group, same rule as Mihomo.
-        if let Some(name) = options
+        let picked = options
             .selected_name
             .as_ref()
-            .filter(|name| included.contains(name))
-        {
+            .filter(|name| included.contains(name));
+        if let Some(name) = picked {
             members.push(json!(name));
             default = name.clone();
         }
         members.push(json!(AUTO_GROUP));
-        members.extend(included.iter().map(|name| json!(name)));
+        members.extend(
+            included
+                .iter()
+                .filter(|name| picked != Some(*name))
+                .map(|name| json!(name)),
+        );
         members.push(json!("direct"));
 
         outbounds.push(json!({
@@ -176,7 +181,7 @@ impl ConfigCompiler for SingBoxCompiler {
         // they are merged rather than overwriting each other.
         let mut declared: Vec<Value> = Vec::new();
         if options.rules == RuleMode::Split {
-            if let Some(existing) = split_rule_sets().as_array() {
+            if let Some(existing) = split_rule_sets(options.rule_set_mirror.as_deref()).as_array() {
                 declared.extend(existing.iter().cloned());
             }
         }
@@ -201,6 +206,17 @@ impl ConfigCompiler for SingBoxCompiler {
             route["default_domain_resolver"] = json!("local-dns");
         }
 
+        let mut clash_api = json!({
+            "external_controller": format!("127.0.0.1:{}", options.api_port),
+        });
+        if let Some(secret) = options
+            .api_secret
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            clash_api["secret"] = json!(secret);
+        }
+
         let mut document = json!({
             "log": {
                 "level": options.log_level,
@@ -210,14 +226,12 @@ impl ConfigCompiler for SingBoxCompiler {
             "outbounds": outbounds,
             "route": route,
             "experimental": {
-                "clash_api": {
-                    "external_controller": format!("127.0.0.1:{}", options.api_port),
-                }
+                "clash_api": clash_api
             }
         });
 
         if dns_mode != DnsMode::Off {
-            document["dns"] = dns_object(dns_mode);
+            document["dns"] = dns_object(dns_mode, options.rules);
         }
 
         let mut text =
@@ -265,26 +279,37 @@ fn custom_rule(rule: &CustomRule) -> Value {
 }
 
 /// Remote rule-sets for the split mode.
-fn split_rule_sets() -> Value {
+fn split_rule_sets(mirror: Option<&str>) -> Value {
+    let mirror = mirror
+        .and_then(crate::binaries::normalize_mirror)
+        .or_else(|| {
+            std::env::var(crate::binaries::MIRROR_ENV)
+                .ok()
+                .and_then(|value| crate::binaries::normalize_mirror(&value))
+        });
+    let with_mirror = |url: &str| match &mirror {
+        Some(prefix) => format!("{prefix}{url}"),
+        None => url.to_string(),
+    };
     json!([
         {
             "tag": "geosite-cn",
             "type": "remote",
             "format": "binary",
-            "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+            "url": with_mirror("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"),
             "download_detour": "direct",
         },
         {
             "tag": "geoip-cn",
             "type": "remote",
             "format": "binary",
-            "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+            "url": with_mirror("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"),
             "download_detour": "direct",
         },
     ])
 }
 
-fn dns_object(mode: DnsMode) -> Value {
+fn dns_object(mode: DnsMode, rules_mode: RuleMode) -> Value {
     let mut servers = vec![
         json!({
             "tag": "proxy-dns",
@@ -302,16 +327,27 @@ fn dns_object(mode: DnsMode) -> Value {
     let mut dns = serde_json::Map::new();
     dns.insert("final".to_string(), json!("proxy-dns"));
 
+    let mut dns_rules = Vec::new();
+    match rules_mode {
+        RuleMode::Split => {
+            dns_rules.push(json!({ "rule_set": "geosite-cn", "server": "local-dns" }))
+        }
+        RuleMode::Global => {
+            dns_rules.push(json!({ "domain_suffix": ["cn"], "server": "local-dns" }))
+        }
+    }
+
     if mode == DnsMode::FakeIp {
         servers.push(json!({
             "tag": "fakeip",
             "type": "fakeip",
             "inet4_range": "198.18.0.0/15",
         }));
-        dns.insert(
-            "rules".to_string(),
-            json!([{ "query_type": ["A", "AAAA"], "server": "fakeip" }]),
-        );
+        dns_rules.push(json!({ "query_type": ["A", "AAAA"], "server": "fakeip" }));
+    }
+
+    if !dns_rules.is_empty() {
+        dns.insert("rules".to_string(), json!(dns_rules));
     }
 
     dns.insert("servers".to_string(), json!(servers));
@@ -741,7 +777,9 @@ mod tests {
         let document: Value = serde_json::from_str(&compiled.text).unwrap();
         let servers = document["dns"]["servers"].as_array().unwrap();
         assert!(servers.iter().any(|s| s["type"] == "fakeip"));
-        assert_eq!(document["dns"]["rules"][0]["server"], "fakeip");
+        let rules = document["dns"]["rules"].as_array().unwrap();
+        assert_eq!(rules[0]["server"], "local-dns");
+        assert!(rules.iter().any(|r| r["server"] == "fakeip"));
     }
 
     #[test]
@@ -777,5 +815,54 @@ mod tests {
             .unwrap();
         let document: Value = serde_json::from_str(&compiled.text).unwrap();
         assert_eq!(document["inbounds"][0]["listen"], "0.0.0.0");
+    }
+
+    #[test]
+    fn selected_node_is_not_duplicated_and_api_secret_and_mirror_work() {
+        let a = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let mut b = a.clone();
+        b.name = "Seoul 01".to_string();
+        b.server = "kr.example.com".to_string();
+        b.refresh_id();
+
+        let options = CompileOptions {
+            selected_name: Some("Seoul 01".to_string()),
+            api_secret: Some("tok123".to_string()),
+            rules: RuleMode::Split,
+            dns: DnsMode::Split,
+            rule_set_mirror: Some("https://ghfast.top".to_string()),
+            ..Default::default()
+        };
+        let compiled = SingBoxCompiler
+            .compile(&Profile::new("p", vec![a, b]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+
+        let selector = document["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == PROXY_GROUP)
+            .unwrap();
+        let members = selector["outbounds"].as_array().unwrap();
+        assert_eq!(
+            members
+                .iter()
+                .filter(|m| m.as_str() == Some("Seoul 01"))
+                .count(),
+            1
+        );
+        assert_eq!(document["experimental"]["clash_api"]["secret"], "tok123");
+        assert_eq!(document["dns"]["rules"][0]["rule_set"], "geosite-cn");
+        assert_eq!(document["dns"]["rules"][0]["server"], "local-dns");
+        assert!(document["route"]["rule_set"][0]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://ghfast.top/https://raw.githubusercontent.com/"));
     }
 }

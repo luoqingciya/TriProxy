@@ -21,8 +21,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::compiler::CompileOptions;
 use crate::core::CoreKind;
-use crate::error::{Error, Result};
-use crate::paths::Layout;
+use crate::error::Result;
+use crate::paths::{write_atomic, Layout};
 use crate::selector::{CorePreference, NetworkRequirements};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -68,6 +68,9 @@ pub struct AppSettings {
     /// core simply fails to bind.
     #[serde(default = "default_listen_port")]
     pub listen_port: u16,
+    /// Local controller API port (Mihomo / sing-box).
+    #[serde(default = "default_api_port")]
+    pub api_port: u16,
     /// Keep running in the system tray when the window is closed.
     ///
     /// Defaults to true: a proxy client that exits on close would cut the
@@ -111,6 +114,10 @@ fn default_listen_port() -> u16 {
     7890
 }
 
+fn default_api_port() -> u16 {
+    crate::core::DEFAULT_API_PORT
+}
+
 fn default_close_to_tray() -> bool {
     true
 }
@@ -129,6 +136,7 @@ impl Default for AppSettings {
             rule_mode: crate::compiler::RuleMode::Global,
             log_level: default_log_level(),
             listen_port: default_listen_port(),
+            api_port: default_api_port(),
             close_to_tray: default_close_to_tray(),
             auto_connect: false,
             proxy_bypass: None,
@@ -165,10 +173,7 @@ impl AppSettings {
         layout.ensure()?;
         let path = Self::path(layout);
         let text = serde_json::to_string_pretty(self)?;
-        let staging = path.with_extension("tmp");
-        std::fs::write(&staging, text).map_err(|e| Error::io(&staging, e))?;
-        std::fs::rename(&staging, &path).map_err(|e| Error::io(&path, e))?;
-        Ok(())
+        write_atomic(&path, text)
     }
 
     /// Requirements the selector should apply on top of the profile.
@@ -192,6 +197,7 @@ impl AppSettings {
         CompileOptions {
             listen_port,
             api_port,
+            api_secret: None,
             log_level: self.log_level.clone(),
             allow_lan: self.allow_lan,
             tun: self.tun,
@@ -201,6 +207,7 @@ impl AppSettings {
             selected_name: None,
             custom_rules: self.parsed_rules(),
             rule_sets: self.parsed_rule_sets(),
+            rule_set_mirror: None,
         }
     }
 
@@ -278,6 +285,7 @@ mod tests {
             rule_mode: crate::compiler::RuleMode::Split,
             log_level: "debug".to_string(),
             listen_port: 1080,
+            api_port: 9091,
             close_to_tray: false,
             auto_connect: true,
             proxy_bypass: Some("localhost;*.internal".to_string()),

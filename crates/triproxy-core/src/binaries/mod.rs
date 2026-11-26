@@ -33,7 +33,11 @@ pub use manifest::{ReleaseAsset, ReleaseInfo, Target};
 pub use version::{compare_versions, is_newer};
 
 const GITHUB_API: &str = "https://api.github.com";
-const USER_AGENT: &str = "TriProxy/0.1 (+https://github.com/luoqingciya/TriProxy)";
+const USER_AGENT: &str = concat!(
+    "TriProxy/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/luoqingciya/TriProxy)"
+);
 /// Optional token for GitHub API calls.
 ///
 /// Unauthenticated API access is limited to 60 requests per hour **per IP**, and
@@ -401,33 +405,35 @@ impl BinaryManager {
         }
 
         let final_path = self.layout.managed_binary(kind.exe_stem());
-        self.write_binary(&final_path, &binary)?;
+        let staging = self.stage_binary(&final_path, &binary)?;
+
+        // Trust but verify on the staged binary *before* touching any existing
+        // working executable: a broken download must not delete a valid core.
+        let probe_args: Vec<OsString> = kind
+            .version_probe_args()
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let probe = run_capture(&staging, &probe_args).await?;
+        if !probe.success {
+            let _ = std::fs::remove_file(&staging);
+            return Err(Error::Other(format!(
+                "`{}` binary failed its version self-check: {}",
+                kind,
+                probe.combined()
+            )));
+        }
+
+        self.promote_staged_binary(&staging, &final_path)?;
 
         // Runtime data files (geosite.dat and friends) have to sit beside the
         // executable, otherwise geo-based routing fails at load time.
         if let Some(dir) = final_path.parent() {
             for (name, data) in &bundle.companions {
                 let path = dir.join(name);
-                std::fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
+                crate::paths::write_atomic(&path, data)?;
                 tracing::info!(file = %path.display(), bytes = data.len(), "installed companion data file");
             }
-        }
-
-        // Trust but verify: a binary that cannot even report its version is not
-        // usable, and must not be left behind for the manager to pick up.
-        let probe_args: Vec<OsString> = kind
-            .version_probe_args()
-            .iter()
-            .map(OsString::from)
-            .collect();
-        let probe = run_capture(&final_path, &probe_args).await?;
-        if !probe.success {
-            let _ = std::fs::remove_file(&final_path);
-            return Err(Error::Other(format!(
-                "`{}` binary failed its version self-check: {}",
-                kind,
-                probe.combined()
-            )));
         }
 
         let version = first_version_token(&probe.combined()).unwrap_or_else(|| {
@@ -447,7 +453,7 @@ impl BinaryManager {
         };
         let record_path = self.layout.install_record(kind.exe_stem());
         let text = serde_json::to_string_pretty(&record)?;
-        std::fs::write(&record_path, text).map_err(|e| Error::io(&record_path, e))?;
+        crate::paths::write_atomic(&record_path, text)?;
 
         Ok(InstalledBinary {
             core: kind,
@@ -705,14 +711,12 @@ impl BinaryManager {
         Ok(None)
     }
 
-    fn write_binary(&self, path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-        if let Some(parent) = path.parent() {
+    fn stage_binary(&self, final_path: &std::path::Path, bytes: &[u8]) -> Result<PathBuf> {
+        if let Some(parent) = final_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
         }
 
-        // Stage next to the destination, then rename: a half-written binary must
-        // never be visible to `resolve()`.
-        let staging = path.with_extension("staging");
+        let staging = final_path.with_extension(format!("staging.{}", std::process::id()));
         std::fs::write(&staging, bytes).map_err(|e| Error::io(&staging, e))?;
 
         #[cfg(unix)]
@@ -722,15 +726,27 @@ impl BinaryManager {
             std::fs::set_permissions(&staging, permissions).map_err(|e| Error::io(&staging, e))?;
         }
 
+        Ok(staging)
+    }
+
+    fn promote_staged_binary(
+        &self,
+        staging: &std::path::Path,
+        path: &std::path::Path,
+    ) -> Result<()> {
         if path.exists() {
-            std::fs::remove_file(path).map_err(|e| {
-                Error::Other(format!(
-                    "cannot replace {}: {e} (is the core still running?)",
+            if let Err(err) = std::fs::remove_file(path) {
+                let _ = std::fs::remove_file(staging);
+                return Err(Error::Other(format!(
+                    "cannot replace {}: {err} (is the core still running?)",
                     path.display()
-                ))
-            })?;
+                )));
+            }
         }
-        std::fs::rename(&staging, path).map_err(|e| Error::io(path, e))?;
+        if let Err(err) = std::fs::rename(staging, path) {
+            let _ = std::fs::remove_file(staging);
+            return Err(Error::io(path, err));
+        }
         Ok(())
     }
 }
@@ -748,7 +764,7 @@ fn throughput_too_low(bytes: usize, elapsed: Duration) -> bool {
 }
 
 /// Accept `ghfast.top`, `https://ghfast.top` and `https://ghfast.top/` alike.
-fn normalize_mirror(value: &str) -> Option<String> {
+pub fn normalize_mirror(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;

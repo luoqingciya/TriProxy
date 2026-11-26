@@ -30,17 +30,19 @@
 //!   its "active" flag.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 use crate::logging::now_ms;
-use crate::paths::Layout;
+use crate::paths::{write_atomic, Layout};
 use crate::profile::{InputFormat, Profile};
 use crate::subscription::Subscription;
 
 const INDEX_FILE: &str = "index.json";
+static RECORD_ID_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Summary shown in listings; the full profile lives in its own file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +171,7 @@ impl ProfileStore {
     }
 
     pub fn load(&self, id: &str) -> Result<Profile> {
+        validate_id(id)?;
         let path = self.record_path(id);
         let text = std::fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -182,6 +185,7 @@ impl ProfileStore {
     }
 
     pub fn find(&self, id: &str) -> Result<Option<StoredProfile>> {
+        validate_id(id)?;
         let path = self.record_path(id);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Ok(None);
@@ -249,21 +253,21 @@ impl ProfileStore {
         self.ensure()?;
 
         let id = match id {
-            Some(id) => id.to_string(),
+            Some(id) => {
+                validate_id(id)?;
+                id.to_string()
+            }
             None => new_record_id(&profile.name),
         };
 
-        let subscription = match subscription {
-            Some(subscription) => Some(subscription),
-            None => self
-                .record(&id)
-                .ok()
-                .and_then(|existing| existing.subscription),
-        };
-
         // Re-importing or refreshing must not forget which node the user picked,
-        // nor which ones they starred.
+        // nor which ones they starred, nor an existing subscription.
         let existing = self.record(&id).ok();
+        let subscription = subscription.or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|record| record.subscription.clone())
+        });
         let selected_node = existing
             .as_ref()
             .and_then(|record| record.selected_node.clone());
@@ -285,6 +289,7 @@ impl ProfileStore {
 
     /// Full record, including refresh state.
     pub fn record(&self, id: &str) -> Result<StoredRecord> {
+        validate_id(id)?;
         let path = self.record_path(id);
         let text = std::fs::read_to_string(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -344,6 +349,7 @@ impl ProfileStore {
     /// Persist a record verbatim (used after a refresh attempt updates the
     /// subscription state without changing the profile).
     pub fn save_record(&self, record: &StoredRecord) -> Result<StoredProfile> {
+        validate_id(&record.id)?;
         self.ensure()?;
         let stored = Record {
             id: record.id.clone(),
@@ -359,6 +365,7 @@ impl ProfileStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
+        validate_id(id)?;
         let path = self.record_path(id);
         std::fs::remove_file(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
@@ -382,6 +389,7 @@ impl ProfileStore {
     pub fn set_active(&self, id: Option<&str>) -> Result<()> {
         self.ensure()?;
         if let Some(id) = id {
+            validate_id(id)?;
             if self.find(id)?.is_none() {
                 return Err(Error::Other(format!("no profile with id `{id}`")));
             }
@@ -447,26 +455,38 @@ impl ProfileStore {
         let Some(id) = self.active_id()? else {
             return Ok(None);
         };
-        let Some(summary) = self.find(&id)? else {
-            // The record disappeared behind our back; clear the dangling flag.
+        if validate_id(&id).is_err() {
             self.set_active(None)?;
             return Ok(None);
+        }
+        let path = self.record_path(&id);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The record disappeared behind our back; clear the dangling flag.
+                self.set_active(None)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(Error::io(&path, error)),
         };
-        let profile = self.load(&id)?;
-        Ok(Some((summary, profile)))
+        let record: Record = serde_json::from_str(&text)?;
+        let summary = summarise(&record);
+        Ok(Some((summary, record.profile)))
     }
 
-    /// Every record document, verbatim, for a backup.
-    ///
-    /// The record file already carries the whole profile, so a backup is these
-    /// documents plus the settings — there is no separate content store that
-    /// could fall out of sync with them.
+    /// Every readable record, including refresh state.
     pub fn export_records(&self) -> Result<Vec<serde_json::Value>> {
         let mut documents = Vec::new();
         for entry in self.records()? {
-            let path = self.record_path(&entry.id);
-            let text = std::fs::read_to_string(&path).map_err(|error| Error::io(&path, error))?;
-            documents.push(serde_json::from_str(&text)?);
+            let record = Record {
+                id: entry.id,
+                stored_at_ms: entry.stored_at_ms,
+                profile: entry.profile,
+                subscription: entry.subscription,
+                selected_node: entry.selected_node,
+                favorites: entry.favorites,
+            };
+            documents.push(serde_json::to_value(record)?);
         }
         Ok(documents)
     }
@@ -481,6 +501,7 @@ impl ProfileStore {
         let mut restored = 0;
         for document in documents {
             let record: Record = serde_json::from_value(document.clone())?;
+            validate_id(&record.id)?;
             let text = serde_json::to_string_pretty(&record)?;
             write_atomic(&self.record_path(&record.id), &text)?;
             restored += 1;
@@ -515,18 +536,25 @@ fn summarise(record: &Record) -> StoredProfile {
 
 /// Record ids only need to be unique and stable, not meaningful.
 fn new_record_id(name: &str) -> String {
+    let seq = RECORD_ID_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());
     hasher.update(b"\x1f");
     hasher.update(now_ms().to_string().as_bytes());
+    hasher.update(b"\x1f");
+    hasher.update(seq.to_le_bytes());
     hex::encode(hasher.finalize())[..12].to_string()
 }
 
-/// Write via a temporary file so a crash cannot leave a half-written profile.
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let staging = path.with_extension("tmp");
-    std::fs::write(&staging, text).map_err(|e| Error::io(&staging, e))?;
-    std::fs::rename(&staging, path).map_err(|e| Error::io(path, e))?;
+/// Reject profile ids that could escape the profiles directory.
+fn validate_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(Error::Other(format!("invalid profile id `{id}`")));
+    }
     Ok(())
 }
 
@@ -786,5 +814,35 @@ mod tests {
 
         assert!(store.active().unwrap().is_none());
         assert!(store.active_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn path_traversal_profile_ids_are_rejected() {
+        let layout = layout("traversal");
+        let store = ProfileStore::new(&layout);
+        assert!(store.load("../evil").is_err());
+        assert!(store.find("../evil").is_err());
+        assert!(store.delete("foo/bar").is_err());
+        assert!(store.set_active(Some("..")).is_err());
+
+        let malicious = serde_json::json!({
+            "id": "../../evil",
+            "stored_at_ms": 0,
+            "profile": profile("evil", &["a.example.com"]),
+        });
+        assert!(store.restore_records(&[malicious]).is_err());
+    }
+
+    #[test]
+    fn saving_same_name_twice_within_one_millisecond_produces_distinct_ids() {
+        let layout = layout("distinct-ids");
+        let store = ProfileStore::new(&layout);
+        let first = store
+            .save(&profile("dup", &["a.example.com"]), None)
+            .unwrap();
+        let second = store
+            .save(&profile("dup", &["b.example.com"]), None)
+            .unwrap();
+        assert_ne!(first.id, second.id);
     }
 }

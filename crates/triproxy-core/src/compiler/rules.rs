@@ -295,7 +295,7 @@ pub fn parse_rule_sets(text: &str) -> Result<Vec<RuleSet>, RuleError> {
         };
 
         let base = name_from(&url);
-        let name = unique_name(&sets, &base);
+        let name = unique_name(&sets, &base, format);
         sets.push(RuleSet {
             name,
             url,
@@ -356,15 +356,23 @@ fn name_from(url: &str) -> String {
     }
 }
 
+/// Tags reserved by the built-in split mode rule-sets in sing-box.
+const RESERVED_RULE_SET_NAMES: [&str; 2] = ["geosite-cn", "geoip-cn"];
+
 /// Two rule-sets with the same file name must not collide: Mihomo keys providers
-/// by name, and a duplicate silently replaces the first.
-fn unique_name(existing: &[RuleSet], base: &str) -> String {
-    if !existing.iter().any(|set| set.name == base) {
+/// by name, and a duplicate silently replaces the first. Also avoid colliding
+/// with sing-box's built-in split-mode rule-set tags.
+fn unique_name(existing: &[RuleSet], base: &str, format: RuleSetFormat) -> String {
+    let is_taken = |candidate: &str| {
+        (format == RuleSetFormat::SingBox && RESERVED_RULE_SET_NAMES.contains(&candidate))
+            || existing.iter().any(|set| set.name == candidate)
+    };
+    if !is_taken(base) {
         return base.to_string();
     }
     for suffix in 2.. {
         let candidate = format!("{base}-{suffix}");
-        if !existing.iter().any(|set| set.name == candidate) {
+        if !is_taken(&candidate) {
             return candidate;
         }
     }
@@ -470,5 +478,15 @@ mod tests {
     fn rule_set_urls_must_be_http() {
         let error = parse_rule_sets("DIRECT,domain,file:///tmp/cn.mrs").unwrap_err();
         assert!(error.message.contains("http"), "{}", error.message);
+    }
+
+    #[test]
+    fn built_in_split_rule_set_names_are_reserved() {
+        let sets = parse_rule_sets(
+            "DIRECT,domain,https://example.com/geosite-cn.srs\nDIRECT,ipcidr,https://example.com/geoip-cn.srs",
+        )
+        .unwrap();
+        assert_eq!(sets[0].name, "geosite-cn-2");
+        assert_eq!(sets[1].name, "geoip-cn-2");
     }
 }

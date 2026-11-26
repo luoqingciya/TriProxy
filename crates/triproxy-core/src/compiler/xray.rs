@@ -88,7 +88,7 @@ impl ConfigCompiler for XrayCompiler {
                 {
                     "tag": "http-in",
                     "listen": listen,
-                    "port": options.listen_port.saturating_add(1),
+                    "port": CoreKind::Xray.http_proxy_port(options.listen_port),
                     "protocol": "http"
                 }
             ],
@@ -704,5 +704,27 @@ mod tests {
         assert_eq!(xray_log_level("WARN"), "warning");
         assert_eq!(xray_log_level("trace"), "debug");
         assert_eq!(xray_log_level("nonsense"), "info");
+    }
+
+    #[test]
+    fn port_65535_does_not_collide_between_socks_and_http_inbounds() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let options = CompileOptions {
+            listen_port: u16::MAX,
+            ..Default::default()
+        };
+        let compiled = XrayCompiler
+            .compile(&Profile::new("p", vec![node]), &options)
+            .unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        assert_ne!(
+            document["inbounds"][0]["port"],
+            document["inbounds"][1]["port"]
+        );
     }
 }

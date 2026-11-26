@@ -13,24 +13,29 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::adapters;
 use crate::binaries::{BinaryManager, InstallOptions, InstalledBinary};
 use crate::bootstrap;
+use crate::controller::ControllerClient;
 use crate::core::{CoreKind, ProxyCore};
 use crate::error::{Error, Result};
 use crate::health::CoreHealth;
 use crate::logging::{now_ms, LogBuffer};
-use crate::paths::Layout;
-use crate::process::pid_alive;
+use crate::paths::{write_atomic, Layout};
+use crate::process::{pid_alive, process_matches_core, wait_ports_free};
 use crate::state::CoreState;
 
 pub const DEFAULT_API_PORT: u16 = 9090;
 pub const DEFAULT_LOG_LEVEL: &str = "info";
+static SECRET_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Where the config for a start/switch comes from.
 enum ConfigSource<'a> {
@@ -47,6 +52,12 @@ struct PersistedState {
     pid: Option<u32>,
     binary: Option<PathBuf>,
     listen_port: Option<u16>,
+    #[serde(default)]
+    config: Option<PathBuf>,
+    #[serde(default)]
+    api_port: Option<u16>,
+    #[serde(default)]
+    api_secret: Option<String>,
     updated_at_ms: u64,
 }
 
@@ -147,7 +158,8 @@ pub struct CoreManager {
     /// Serializes lifecycle operations, mirroring "Lock CoreManager" in ch.14.
     op_lock: Mutex<()>,
     persisted: Mutex<PersistedState>,
-    api_port: u16,
+    api_port: AtomicU16,
+    api_secret: RwLock<Option<String>>,
     log_level: String,
 }
 
@@ -156,6 +168,7 @@ impl CoreManager {
         layout.ensure()?;
         let logs = Arc::new(LogBuffer::default());
         let binaries = BinaryManager::new(layout.clone())?;
+        let settings = crate::settings::AppSettings::load(&layout);
 
         let mut cores = BTreeMap::new();
         for kind in CoreKind::ALL {
@@ -177,14 +190,49 @@ impl CoreManager {
             logs,
             op_lock: Mutex::new(()),
             persisted: Mutex::new(PersistedState::default()),
-            api_port: DEFAULT_API_PORT,
+            api_port: AtomicU16::new(settings.api_port),
+            api_secret: RwLock::new(None),
             log_level: DEFAULT_LOG_LEVEL.to_string(),
         })
     }
 
     /// Port the controller API listens on (Mihomo / sing-box only).
     pub fn api_port(&self) -> u16 {
-        self.api_port
+        self.api_port.load(Ordering::Relaxed)
+    }
+
+    /// Current controller API bearer secret, if one has been generated or adopted.
+    pub fn api_secret(&self) -> Option<String> {
+        self.api_secret
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Return the active controller API secret, generating one if absent.
+    pub fn ensure_api_secret(&self) -> String {
+        if let Some(existing) = self.api_secret() {
+            return existing;
+        }
+        let mut guard = self.api_secret.write().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+        let seq = SECRET_SEQ.fetch_add(1, Ordering::Relaxed);
+        let mut hasher = Sha256::new();
+        hasher.update(now_ms().to_le_bytes());
+        hasher.update(std::process::id().to_le_bytes());
+        hasher.update(seq.to_le_bytes());
+        hasher.update(self.layout.root().to_string_lossy().as_bytes());
+        let generated = hex::encode(hasher.finalize())[..32].to_string();
+        *guard = Some(generated.clone());
+        generated
+    }
+
+    /// Build a controller client pointing at the active core's controller port
+    /// and secret.
+    pub fn controller_client(&self) -> Result<ControllerClient> {
+        ControllerClient::with_secret(self.api_port(), self.api_secret())
     }
 
     pub fn layout(&self) -> &Layout {
@@ -218,7 +266,7 @@ impl CoreManager {
         }
 
         match (state.active_core, state.pid) {
-            (Some(kind), Some(pid)) if pid_alive(pid) => {
+            (Some(kind), Some(pid)) if pid_alive(pid) && process_matches_core(pid, kind) => {
                 // `core()` rather than the map: on Linux the bundled cores are
                 // only discoverable once the shell has told us where they are,
                 // which happens after this manager was built. Reading the map
@@ -227,7 +275,16 @@ impl CoreManager {
                 let core = self.core(kind).ok();
                 if let Some(core) = core {
                     let port = state.listen_port.unwrap_or(kind.default_listen_port());
+                    core.set_listen_port(port);
                     if core.adopt(pid, port).await {
+                        if let Some(api_port) = state.api_port {
+                            self.api_port.store(api_port, Ordering::Relaxed);
+                        }
+                        if state.api_secret.is_some() {
+                            *self.api_secret.write().unwrap_or_else(|e| e.into_inner()) =
+                                state.api_secret.clone();
+                        }
+                        *self.persisted.lock().await = state;
                         report.adopted = Some(kind);
                         tracing::info!(core = kind.as_str(), pid, "adopted running core");
                     } else {
@@ -256,9 +313,16 @@ impl CoreManager {
         Ok(report)
     }
 
+    /// Cheap check for whether any core is currently running, without resolving
+    /// binary versions or sampling process memory.
+    pub async fn has_running_core(&self) -> bool {
+        self.running_core().await.is_some()
+    }
+
     pub async fn status(&self) -> ManagerStatus {
-        let mut cores = Vec::new();
+        let mut collected = Vec::with_capacity(CoreKind::ALL.len());
         let mut active = None;
+        let mut pids = vec![std::process::id()];
 
         for kind in CoreKind::ALL {
             let binary = self.binaries.status(kind);
@@ -276,8 +340,19 @@ impl CoreManager {
             if health.state.is_running() {
                 active = Some(kind);
             }
+            if let Some(pid) = health.pid {
+                pids.push(pid);
+            }
 
-            cores.push(CoreReport {
+            collected.push((kind, binary, health));
+        }
+
+        let memory_map = crate::memory::resident_bytes_batch(&pids);
+        let process_memory_bytes = memory_map.get(&std::process::id()).copied();
+
+        let cores = collected
+            .into_iter()
+            .map(|(kind, binary, health)| CoreReport {
                 kind,
                 display_name: kind.display_name().to_string(),
                 binary: binary.path,
@@ -289,16 +364,16 @@ impl CoreManager {
                 listen_port: health.listen_port,
                 listening: health.listening,
                 latency_ms: health.latency_ms,
-                memory_bytes: health.pid.and_then(crate::memory::resident_bytes),
+                memory_bytes: health.pid.and_then(|pid| memory_map.get(&pid).copied()),
                 last_error: health.last_error,
-            });
-        }
+            })
+            .collect();
 
         ManagerStatus {
             active_core: active,
             exclusive: true,
             data_dir: self.layout.root().to_path_buf(),
-            process_memory_bytes: crate::memory::self_resident_bytes(),
+            process_memory_bytes,
             cores,
         }
     }
@@ -392,14 +467,33 @@ impl CoreManager {
         config: PathBuf,
     ) -> Result<StartReport> {
         // Re-read rather than trust the value cached at construction: the user
-        // may have changed the port in settings since the manager was built.
-        core.set_listen_port(crate::settings::AppSettings::load(&self.layout).listen_port);
+        // may have changed the ports in settings since the manager was built.
+        let settings = crate::settings::AppSettings::load(&self.layout);
+        core.set_listen_port(settings.listen_port);
+        self.api_port.store(settings.api_port, Ordering::Relaxed);
+
+        if kind.has_controller() {
+            if let Some(conflict) =
+                wait_ports_free(&[settings.api_port], Duration::from_secs(3)).await
+            {
+                return Err(Error::PortInUse {
+                    core: kind.as_str().to_string(),
+                    port: conflict,
+                });
+            }
+        }
+
         core.check_config(&config).await?;
         core.start(&config).await?;
 
         let pid = core.pid().await;
-        self.persist(Some(kind), pid, Some(core.listen_port()))
-            .await?;
+        self.persist(
+            Some(kind),
+            pid,
+            Some(core.listen_port()),
+            Some(config.clone()),
+        )
+        .await?;
 
         Ok(StartReport {
             kind,
@@ -428,10 +522,15 @@ impl CoreManager {
             }
         }
 
-        // An orphan PID recorded by an older run must not survive either.
+        // An orphan PID recorded by an older run must not survive either,
+        // provided it still looks like the proxy core rather than a reused PID.
         let recorded = self.load_state().await;
         if let Some(pid) = recorded.pid {
-            if pid_alive(pid) {
+            let matches = recorded
+                .active_core
+                .map(|kind| process_matches_core(pid, kind))
+                .unwrap_or(true);
+            if pid_alive(pid) && matches {
                 let _ = crate::process::force_kill(pid);
                 tracing::warn!(pid, "terminated orphan core process");
             }
@@ -447,8 +546,15 @@ impl CoreManager {
             Some(kind) => kind,
             None => self.persisted_active().await.ok_or(Error::NoActiveCore)?,
         };
+        let existing_config = self.load_state().await.config.filter(|path| path.is_file());
         self.stop_locked().await?;
-        self.start_locked(active).await
+        match existing_config {
+            Some(config) => {
+                let core = self.core(active)?;
+                self.launch(&core, active, config).await
+            }
+            None => self.start_locked(active).await,
+        }
     }
 
     /// Stop whatever is running, then start the target core.
@@ -479,7 +585,7 @@ impl CoreManager {
         let mut steps = Vec::new();
         let previous = self.running_core().await;
 
-        if previous == Some(target) {
+        if previous == Some(target) && matches!(source, ConfigSource::Bootstrap) {
             steps.push(SwitchStep::ok(
                 "resolve target",
                 format!("`{target}` is already running"),
@@ -510,11 +616,15 @@ impl CoreManager {
                 ));
                 steps.push(SwitchStep::ok(
                     "cleanup network state",
-                    "Phase 1 has no system proxy / TUN / DNS state to restore",
+                    "ready to start target core",
                 ));
             }
             None => steps.push(SwitchStep::ok("stop current core", "no core was running")),
         }
+
+        let settings = crate::settings::AppSettings::load(&self.layout);
+        core.set_listen_port(settings.listen_port);
+        self.api_port.store(settings.api_port, Ordering::Relaxed);
 
         let config = match source {
             ConfigSource::Bootstrap => self.prepare_config(target, &core)?,
@@ -533,6 +643,17 @@ impl CoreManager {
             format!("{target} accepted the config"),
         ));
 
+        if target.has_controller() {
+            if let Some(conflict) =
+                wait_ports_free(&[settings.api_port], Duration::from_secs(3)).await
+            {
+                return Err(Error::PortInUse {
+                    core: target.as_str().to_string(),
+                    port: conflict,
+                });
+            }
+        }
+
         core.start(&config).await?;
         let health = core.health_check().await?;
         let port = core.listen_port();
@@ -548,7 +669,8 @@ impl CoreManager {
             });
         }
 
-        self.persist(Some(target), health.pid, Some(port)).await?;
+        self.persist(Some(target), health.pid, Some(port), Some(config.clone()))
+            .await?;
 
         Ok(SwitchReport {
             target,
@@ -597,17 +719,29 @@ impl CoreManager {
         state.listen_port
     }
 
+    /// HTTP proxy port recorded for the active core (differs from `listen_port`
+    /// on Xray, where SOCKS and HTTP listen on adjacent ports).
+    pub fn persisted_http_proxy_port(&self) -> Option<u16> {
+        let text = std::fs::read_to_string(self.layout.state_file()).ok()?;
+        let state: PersistedState = serde_json::from_str(&text).ok()?;
+        let port = state.listen_port?;
+        Some(match state.active_core {
+            Some(kind) => kind.http_proxy_port(port),
+            None => port,
+        })
+    }
+
     fn prepare_config(&self, kind: CoreKind, core: &Arc<dyn ProxyCore>) -> Result<PathBuf> {
-        let text = core.bootstrap_config(self.api_port, &self.log_level);
+        let secret = self.ensure_api_secret();
+        let text = core.bootstrap_config(self.api_port(), Some(&secret), &self.log_level);
         self.write_config(kind, bootstrap::config_file_name(kind), &text)
     }
 
     /// Write a rendered config into the core's live config directory.
     fn write_config(&self, kind: CoreKind, file_name: &str, text: &str) -> Result<PathBuf> {
         let dir = self.layout.core_config_dir(kind.as_str());
-        std::fs::create_dir_all(&dir).map_err(|e| Error::io(&dir, e))?;
         let path = dir.join(file_name);
-        std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+        write_atomic(&path, text)?;
         Ok(path)
     }
 
@@ -694,6 +828,7 @@ impl CoreManager {
         active: Option<CoreKind>,
         pid: Option<u32>,
         listen_port: Option<u16>,
+        config: Option<PathBuf>,
     ) -> Result<()> {
         let binary = active.and_then(|kind| {
             self.cores_read()
@@ -705,6 +840,9 @@ impl CoreManager {
             pid,
             binary,
             listen_port,
+            config,
+            api_port: active.map(|_| self.api_port()),
+            api_secret: active.and_then(|_| self.api_secret()),
             updated_at_ms: now_ms(),
         };
         self.write_state(state).await
@@ -713,7 +851,7 @@ impl CoreManager {
     async fn write_state(&self, state: PersistedState) -> Result<()> {
         let path = self.layout.state_file();
         let text = serde_json::to_string_pretty(&state)?;
-        std::fs::write(&path, text).map_err(|e| Error::io(&path, e))?;
+        write_atomic(&path, text)?;
         *self.persisted.lock().await = state;
         Ok(())
     }
