@@ -19,10 +19,12 @@
 //! behaviour, so a failure only records `last_error` and leaves the profile
 //! untouched.
 
+use futures_util::stream::{self, StreamExt, TryStreamExt};
+
 use crate::error::{Error, Result};
 use crate::logging::now_ms;
 use crate::profile::parse_payload;
-use crate::store::{ProfileStore, StoredProfile, StoredRecord};
+use crate::store::{ProfileStore, StoredProfile};
 use crate::subscription::{FetchOutcome, Subscription, SubscriptionClient};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,24 +175,28 @@ impl<'a> SubscriptionService<'a> {
     /// Refresh every subscription whose interval has elapsed.
     pub async fn refresh_due(&self) -> Result<Vec<RefreshOutcome>> {
         let now = now_ms();
-        let due: Vec<StoredRecord> = self
+        let due_ids: Vec<String> = self
             .store
-            .records()?
+            .list()?
             .into_iter()
-            .filter(|record| {
-                record
+            .filter(|stored| {
+                stored
                     .subscription
                     .as_ref()
-                    .map(|subscription| subscription.is_due(now))
-                    .unwrap_or(false)
+                    .is_some_and(|subscription| subscription.is_due(now))
             })
+            .map(|stored| stored.id)
             .collect();
 
-        let mut outcomes = Vec::with_capacity(due.len());
-        for record in due {
-            outcomes.push(self.refresh(&record.id).await?);
+        if due_ids.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(outcomes)
+
+        stream::iter(due_ids)
+            .map(|id| async move { self.refresh(&id).await })
+            .buffer_unordered(3)
+            .try_collect()
+            .await
     }
 }
 

@@ -13,14 +13,14 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { ChevronDown, ChevronRight, Power, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Power, RotateCw, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import { useApp } from '../store/app'
 import { CORE_LABEL, STATE_LABEL, type Selection } from '../types'
-import { Badge, Button, Card, SectionTitle, StateDot } from '../components/ui'
+import { Badge, Button, Card, SectionTitle, StateDot, Toggle } from '../components/ui'
 import { PageHeader } from '../components/Sidebar'
-import { formatMemory } from '../format'
+import { formatMemory, formatRate, formatUptime } from '../format'
 
 /**
  * How often the active node is re-measured.
@@ -30,27 +30,6 @@ import { formatMemory } from '../format'
  * steady stream of requests and distort the traffic graph it sits next to.
  */
 const DELAY_INTERVAL_MS = 15_000
-
-function formatRate(bytesPerSecond: number): string {
-  if (bytesPerSecond < 1024) return `${bytesPerSecond} B/s`
-  const units = ['KB/s', 'MB/s', 'GB/s']
-  let value = bytesPerSecond / 1024
-  let unit = 0
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024
-    unit += 1
-  }
-  return `${value.toFixed(1)} ${units[unit]}`
-}
-
-function formatUptime(seconds: number | null | undefined): string {
-  if (!seconds) return '—'
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (h > 0) return `${h} 小时 ${m} 分`
-  if (m > 0) return `${m} 分钟`
-  return `${seconds} 秒`
-}
 
 /**
  * Render the selection rationale in the UI language.
@@ -87,6 +66,7 @@ function describeSelection(selection: Selection): string {
 export function Dashboard() {
   const status = useApp((state) => state.status)
   const library = useApp((state) => state.library)
+  const nodes = useApp((state) => state.nodes)
   const selection = useApp((state) => state.selection)
   const settings = useApp((state) => state.settings)
   const proxy = useApp((state) => state.proxy)
@@ -95,6 +75,12 @@ export function Dashboard() {
   const delay = useApp((state) => state.delay)
   const measureDelay = useApp((state) => state.measureDelay)
   const busy = useApp((state) => state.busy)
+  const busyAction = useApp((state) => state.busyAction)
+  const needsCoreRestart = useApp((state) => state.needsCoreRestart)
+  const applySettingsRestart = useApp((state) => state.applySettingsRestart)
+  const setPage = useApp((state) => state.setPage)
+  const setSystemProxy = useApp((state) => state.setSystemProxy)
+  const updateSettings = useApp((state) => state.updateSettings)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
   const installCore = useApp((state) => state.installCore)
@@ -105,6 +91,18 @@ export function Dashboard() {
   const running = status?.cores.find((core) => core.state === 'running')
   const connected = Boolean(running)
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
+  const activeNodeName = activeProfile?.selected_node
+    ? (nodes.find((node) => node.id === activeProfile.selected_node)?.name ?? '未知节点')
+    : '自动选择'
+
+  const copyEndpoint = async (endpoint: string) => {
+    try {
+      await navigator.clipboard.writeText(endpoint)
+      useApp.setState({ notice: `已复制代理地址 ${endpoint}` })
+    } catch {
+      useApp.setState({ error: '无法访问剪贴板' })
+    }
+  }
 
   // Measure only while something is running: a stopped core has no node to
   // measure, and the timer would just produce a stream of "unavailable" results.
@@ -147,14 +145,26 @@ export function Dashboard() {
         title="仪表盘"
         description="一眼看清当前连接、核心与配置"
         actions={
-          <Button
-            variant={connected ? 'ghost' : 'primary'}
-            disabled={busy}
-            onClick={() => (connected ? stop() : start(null))}
-          >
-            <Power size={15} strokeWidth={2.2} />
-            {connected ? '断开' : '连接'}
-          </Button>
+          !connected && !activeProfile ? (
+            <Button variant="primary" onClick={() => setPage('profiles')}>
+              导入配置
+            </Button>
+          ) : (
+            <Button
+              variant={connected ? 'ghost' : 'primary'}
+              disabled={busy}
+              onClick={() => (connected ? stop() : start(null))}
+            >
+              <Power size={15} strokeWidth={2.2} />
+              {busyAction === 'connect'
+                ? '连接中…'
+                : busyAction === 'disconnect'
+                  ? '断开中…'
+                  : connected
+                    ? '断开'
+                    : '连接'}
+            </Button>
+          )
         }
       />
 
@@ -176,7 +186,26 @@ export function Dashboard() {
                 <>
                   <span>{CORE_LABEL[running!.kind]}</span>
                   <span className="text-faint">·</span>
-                  <span>127.0.0.1:{running!.listen_port ?? 7890}</span>
+                  <button
+                    type="button"
+                    onClick={() => setPage('proxies')}
+                    title="点击切换节点"
+                    className="underline decoration-dotted decoration-line underline-offset-4 hover:text-fg"
+                  >
+                    节点 {activeNodeName}
+                  </button>
+                  <span className="text-faint">·</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copyEndpoint(`127.0.0.1:${running!.listen_port ?? 7890}`)
+                    }
+                    title="点击复制代理地址"
+                    className="inline-flex items-center gap-1 hover:text-fg"
+                  >
+                    <span>127.0.0.1:{running!.listen_port ?? 7890}</span>
+                    <Copy size={11} className="text-faint" />
+                  </button>
                   <span className="text-faint">·</span>
                   {/*
                     Real proxy delay, not `running.latency_ms`: that field is the
@@ -214,7 +243,11 @@ export function Dashboard() {
                   )}
                 </>
               ) : (
-                <span>选择一个配置后即可连接</span>
+                <span>
+                  {activeProfile
+                    ? `就绪 · 节点「${activeNodeName}」，点右上角「连接」即可开始`
+                    : '导入并启用配置后即可连接'}
+                </span>
               )}
             </div>
           </div>
@@ -232,6 +265,24 @@ export function Dashboard() {
         </div>
       </Card>
 
+      {connected && needsCoreRestart && (
+        <div className="mb-4 flex items-center justify-between gap-4 rounded-xl border border-accent/30 bg-accent-soft px-4 py-2.5 text-[13px]">
+          <span className="text-fg">配置或网络设置已更改，重启核心后生效</span>
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() => void applySettingsRestart()}
+            className="px-3 py-1.5 text-[12.5px]"
+          >
+            <RotateCw
+              size={13}
+              className={busyAction?.startsWith('switch:') ? 'animate-spin' : ''}
+            />
+            {busyAction?.startsWith('switch:') ? '重启中…' : '立即重启生效'}
+          </Button>
+        </div>
+      )}
+
       <div className="mb-4 grid grid-cols-3 gap-4">
         <Card>
           <SectionTitle title="当前配置" />
@@ -242,26 +293,71 @@ export function Dashboard() {
               <Row label="来源" value={activeProfile.source || '—'} />
             </div>
           ) : (
-            <p className="text-[13px] text-faint">还没有配置，去「配置」页导入订阅</p>
+            <p className="text-[13px] text-faint">
+              还没有配置，
+              <button
+                type="button"
+                onClick={() => setPage('profiles')}
+                className="text-accent hover:underline"
+              >
+                去「配置」页导入订阅
+              </button>
+            </p>
           )}
         </Card>
 
         <Card>
           <SectionTitle title="网络模式" />
-          <div className="space-y-1.5 text-[13px]">
-            <Row
-              label="系统代理"
-              value={proxy ? proxy.endpoint : "未启用"}
-            />
+          <div className="space-y-2 text-[13px]">
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-muted">
+                系统代理
+                {proxy && (
+                  <span className="ml-1.5 text-[11px] text-faint">{proxy.endpoint}</span>
+                )}
+              </span>
+              <span title={!connected ? '请先连接核心' : undefined}>
+                <Toggle
+                  checked={proxy !== null}
+                  disabled={!connected || busy}
+                  onChange={(enabled) => void setSystemProxy(enabled)}
+                />
+              </span>
+            </div>
             <Row
               label="TUN"
-              value={settings?.tun ? "已启用" : "未启用"}
-              hint={settings?.tun ? "需要管理员" : undefined}
+              value={settings?.tun ? '已启用' : '未启用'}
+              hint={settings?.tun ? '需要管理员' : undefined}
             />
-            <Row
-              label="分流规则"
-              value={settings?.rule_mode === 'split' ? '分流 (split)' : '全局 (global)'}
-            />
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-muted">分流规则</span>
+              <div className="flex items-center gap-0.5 rounded-md border border-line bg-panel-2 p-0.5 text-[11.5px]">
+                <button
+                  type="button"
+                  disabled={!settings}
+                  onClick={() => void updateSettings({ rule_mode: 'split' })}
+                  className={`rounded px-2 py-0.5 transition-colors ${
+                    settings?.rule_mode === 'split'
+                      ? 'bg-accent-soft text-accent'
+                      : 'text-muted hover:text-fg'
+                  }`}
+                >
+                  分流
+                </button>
+                <button
+                  type="button"
+                  disabled={!settings}
+                  onClick={() => void updateSettings({ rule_mode: 'global' })}
+                  className={`rounded px-2 py-0.5 transition-colors ${
+                    settings?.rule_mode !== 'split'
+                      ? 'bg-accent-soft text-accent'
+                      : 'text-muted hover:text-fg'
+                  }`}
+                >
+                  全局
+                </button>
+              </div>
+            </div>
           </div>
         </Card>
 
@@ -273,10 +369,7 @@ export function Dashboard() {
                 <span className="text-muted">↑ {formatRate(traffic.up)}</span>
                 <span className="text-muted">↓ {formatRate(traffic.down)}</span>
               </div>
-              <Sparkline
-                up={trafficHistory.map((sample) => sample.up)}
-                down={trafficHistory.map((sample) => sample.down)}
-              />
+              <Sparkline history={trafficHistory} />
               <div className="mt-1 text-[11px] text-faint">最近 3 分钟</div>
             </>
           ) : (
@@ -365,7 +458,7 @@ export function Dashboard() {
                     onClick={() => void installCore(core.kind)}
                     className="text-[12px] text-accent hover:underline disabled:opacity-40"
                   >
-                    {busy ? '下载中…' : '下载核心'}
+                    {busyAction === `install:${core.kind}` ? '下载中…' : '下载核心'}
                   </button>
                 )}
               </div>
@@ -385,7 +478,7 @@ export function Dashboard() {
                       onClick={() => void switchTo(core.kind)}
                       className="text-muted hover:text-accent disabled:opacity-40"
                     >
-                      切换
+                      {busyAction === `switch:${core.kind}` ? '切换中…' : '切换'}
                     </button>
                     {core.binary ? (
                       <button
@@ -393,7 +486,7 @@ export function Dashboard() {
                         onClick={() => void updateCore(core.kind)}
                         className="text-faint hover:text-accent disabled:opacity-40"
                       >
-                        更新
+                        {busyAction === `update:${core.kind}` ? '更新中…' : '更新'}
                       </button>
                     ) : null}
                   </>
@@ -414,25 +507,31 @@ export function Dashboard() {
  * scale: a quiet connection still shows its shape, where a fixed scale would
  * flatten everything except the one burst that set the maximum.
  */
-function Sparkline({ up, down }: { up: number[]; down: number[] }) {
-  if (up.length < 2) {
+function Sparkline({ history }: { history: { up: number; down: number }[] }) {
+  if (history.length < 2) {
     return <div className="h-12 rounded-md bg-panel-2" />
   }
 
-  const max = Math.max(...up, ...down, 1)
-  const points = (values: number[]) =>
-    values
-      .map((value, index) => {
-        const x = (index / (values.length - 1)) * 100
-        const y = 100 - (value / max) * 100
-        return `${x.toFixed(2)},${y.toFixed(2)}`
-      })
-      .join(' ')
+  let max = 1
+  for (const sample of history) {
+    if (sample.up > max) max = sample.up
+    if (sample.down > max) max = sample.down
+  }
+
+  const last = history.length - 1
+  const upPoints: string[] = []
+  const downPoints: string[] = []
+  for (let i = 0; i < history.length; i++) {
+    const x = ((i / last) * 100).toFixed(2)
+    const sample = history[i]
+    upPoints.push(`${x},${(100 - (sample.up / max) * 100).toFixed(2)}`)
+    downPoints.push(`${x},${(100 - (sample.down / max) * 100).toFixed(2)}`)
+  }
 
   return (
     <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-12 w-full">
       <polyline
-        points={points(down)}
+        points={downPoints.join(' ')}
         fill="none"
         stroke="currentColor"
         strokeWidth={1.5}
@@ -440,7 +539,7 @@ function Sparkline({ up, down }: { up: number[]; down: number[] }) {
         className="text-accent"
       />
       <polyline
-        points={points(up)}
+        points={upPoints.join(' ')}
         fill="none"
         stroke="currentColor"
         strokeWidth={1.5}

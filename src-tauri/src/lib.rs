@@ -23,12 +23,12 @@ pub mod deep_link;
 pub mod tray;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use tauri::Emitter;
 use triproxy_core::{
-    AppSettings, ControllerClient, CoreManager, Layout, ProfileStore, RefreshStatus,
+    AppSettings, AppliedProxy, ControllerClient, CoreManager, Layout, ProfileStore, RefreshStatus,
     SubscriptionClient, SubscriptionService, SystemProxyManager, TrafficSample,
 };
 
@@ -37,13 +37,59 @@ use triproxy_core::{
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub const PROFILES_CHANGED_EVENT: &str = "triproxy-profiles-changed";
+pub const TRAFFIC_EVENT: &str = "triproxy-traffic";
+pub const STATUS_CHANGED_EVENT: &str = "triproxy-status-changed";
+pub const LATENCY_SAMPLE_EVENT: &str = "triproxy-latency-sample";
 
 /// Shared state handed to every command.
 pub struct AppState {
     pub manager: Arc<CoreManager>,
     pub subscription_client: SubscriptionClient,
     pub controller: tokio::sync::RwLock<Option<(u16, Option<String>, ControllerClient)>>,
-    pub latest_traffic: Arc<tokio::sync::RwLock<Option<TrafficSample>>>,
+    pub latest_traffic: Arc<RwLock<Option<TrafficSample>>>,
+    pub settings: RwLock<AppSettings>,
+    pub system_proxy: RwLock<Option<AppliedProxy>>,
+    pub window_visible: tokio::sync::watch::Sender<bool>,
+    pub traffic_wake: Arc<tokio::sync::Notify>,
+}
+
+impl AppState {
+    pub fn cached_settings(&self) -> AppSettings {
+        self.settings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_cached_settings(&self, settings: AppSettings) {
+        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = settings;
+    }
+
+    pub fn cached_system_proxy(&self) -> Option<AppliedProxy> {
+        self.system_proxy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_cached_system_proxy(&self, proxy: Option<AppliedProxy>) {
+        *self.system_proxy.write().unwrap_or_else(|e| e.into_inner()) = proxy;
+    }
+
+    pub fn set_window_visible(&self, visible: bool) {
+        let _ = self.window_visible.send_if_modified(|current| {
+            if *current == visible {
+                false
+            } else {
+                *current = visible;
+                true
+            }
+        });
+    }
+
+    pub fn notify_traffic(&self) {
+        self.traffic_wake.notify_one();
+    }
 }
 
 pub fn run() {
@@ -53,7 +99,11 @@ pub fn run() {
     let manager = Arc::new(CoreManager::new(layout).expect("cannot initialise the core manager"));
     let subscription_client =
         SubscriptionClient::new().expect("cannot initialise the subscription client");
-    let latest_traffic = Arc::new(tokio::sync::RwLock::new(None));
+    let initial_settings = AppSettings::load(manager.layout());
+    let initial_proxy = SystemProxyManager::new(manager.layout()).status();
+    let latest_traffic = Arc::new(RwLock::new(None));
+    let (window_visible_tx, window_visible_rx) = tokio::sync::watch::channel(true);
+    let traffic_wake = Arc::new(tokio::sync::Notify::new());
 
     tauri::Builder::default()
         // Registered before anything else: it has to be the first thing that
@@ -84,6 +134,10 @@ pub fn run() {
             subscription_client,
             controller: tokio::sync::RwLock::new(None),
             latest_traffic: latest_traffic.clone(),
+            settings: RwLock::new(initial_settings),
+            system_proxy: RwLock::new(initial_proxy),
+            window_visible: window_visible_tx,
+            traffic_wake: traffic_wake.clone(),
         })
         .setup(move |app| {
             use tauri::Manager;
@@ -124,11 +178,20 @@ pub fn run() {
             // resolved here — before any command asks for a core.
             resolve_bundled_cores(app);
 
-            // Adopt a core left running by a previous session before the window
-            // draws, so the first status query reports the truth.
-            let manager = manager.clone();
-            tauri::async_runtime::block_on(async move {
-                match manager.recover().await {
+            // The tray must exist before the window can be closed, otherwise
+            // hiding it would leave the user with no way back. A failure is
+            // therefore non-fatal: the app simply behaves like a normal window.
+            if let Err(error) = tray::install(app) {
+                tracing::error!(%error, "could not create the tray icon");
+            }
+
+            // Adopt any leftover core, restore a stale system proxy snapshot,
+            // refresh tray/UI status, and honor `auto_connect` without blocking
+            // initial window creation.
+            let startup_handle = app.handle().clone();
+            let startup_manager = manager.clone();
+            tauri::async_runtime::spawn(async move {
+                match startup_manager.recover().await {
                     Ok(report) => {
                         if let Some(kind) = report.adopted {
                             tracing::info!(core = kind.as_str(), "adopted running core");
@@ -137,28 +200,34 @@ pub fn run() {
                     Err(error) => tracing::warn!(%error, "recovery failed"),
                 }
 
-                // A proxy snapshot with no running core means the previous
-                // session died before restoring it; undo that before drawing.
-                let proxy = SystemProxyManager::new(manager.layout());
-                if proxy.status().is_some() && !manager.has_running_core().await {
-                    if let Err(error) = proxy.recover() {
-                        tracing::warn!(%error, "could not restore the system proxy");
+                let has_running = startup_manager.has_running_core().await;
+                let layout = startup_manager.layout().clone();
+                let recovered_proxy = tokio::task::spawn_blocking(move || {
+                    let proxy = SystemProxyManager::new(&layout);
+                    if proxy.status().is_some() && !has_running {
+                        if let Err(error) = proxy.recover() {
+                            tracing::warn!(%error, "could not restore the system proxy");
+                        }
                     }
-                }
-            });
+                    proxy.status()
+                })
+                .await
+                .ok()
+                .flatten();
 
-            // The tray must exist before the window can be closed, otherwise
-            // hiding it would leave the user with no way back. A failure is
-            // therefore non-fatal: the app simply behaves like a normal window.
-            if let Err(error) = tray::install(app) {
-                tracing::error!(%error, "could not create the tray icon");
-            } else {
-                // The menu opens with "未运行"; fill in what recovery found.
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    commands::sync_tray(&handle).await;
-                });
-            }
+                {
+                    let state = startup_handle.state::<AppState>();
+                    state.set_cached_system_proxy(recovered_proxy);
+                    state.notify_traffic();
+                }
+
+                if tray::is_ready() {
+                    commands::sync_tray(&startup_handle).await;
+                }
+                let _ = startup_handle.emit(STATUS_CHANGED_EVENT, ());
+
+                maybe_auto_connect_async(&startup_handle).await;
+            });
 
             // Subscriptions used to refresh only when the user asked. A profile
             // that quietly ages out is worse than one that never updates, so the
@@ -171,34 +240,52 @@ pub fn run() {
             });
 
             // Keep one persistent /traffic stream open while a controller-capable
-            // core is running instead of opening a fresh HTTP stream every 2s.
+            // core is running and the main window is visible.
+            let traffic_handle = app.handle().clone();
             let traffic_manager = app.state::<AppState>().manager.clone();
             let traffic_slot = app.state::<AppState>().latest_traffic.clone();
+            let traffic_wake = app.state::<AppState>().traffic_wake.clone();
             tauri::async_runtime::spawn(async move {
-                stream_traffic_forever(traffic_manager, traffic_slot).await;
+                stream_traffic_forever(
+                    traffic_handle,
+                    traffic_manager,
+                    traffic_slot,
+                    window_visible_rx,
+                    traffic_wake,
+                )
+                .await;
             });
 
-            // Start the core without being asked, if the user wants that.
-            maybe_auto_connect(app.handle());
             Ok(())
         })
         // Closing the window hides it; the proxy is supposed to keep running.
         // Only an explicit quit (tray menu) or `close_to_tray = false` exits.
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                use tauri::Manager;
-                let app = window.app_handle();
-                let settings = AppSettings::load(app.state::<AppState>().manager.layout());
-                if settings.close_to_tray && tray::is_ready() {
-                    api.prevent_close();
-                    let _ = window.hide();
+            use tauri::Manager;
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let app = window.app_handle();
+                    let close_to_tray = app.state::<AppState>().cached_settings().close_to_tray;
+                    if close_to_tray && tray::is_ready() {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        app.state::<AppState>().set_window_visible(false);
+                    }
                 }
+                tauri::WindowEvent::Focused(true) => {
+                    window
+                        .app_handle()
+                        .state::<AppState>()
+                        .set_window_visible(true);
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
             commands::profiles,
             commands::active_nodes,
+            commands::library_snapshot,
             commands::import_profile,
             commands::set_active_profile,
             commands::delete_profile,
@@ -296,41 +383,82 @@ async fn refresh_subscriptions_forever(app: tauri::AppHandle, manager: Arc<CoreM
     }
 }
 
-/// Maintain a single `/traffic` stream while Mihomo or sing-box is active.
+/// Maintain a single `/traffic` stream while Mihomo or sing-box is active
+/// and the main window is visible.
 async fn stream_traffic_forever(
+    app: tauri::AppHandle,
     manager: Arc<CoreManager>,
-    slot: Arc<tokio::sync::RwLock<Option<TrafficSample>>>,
+    slot: Arc<RwLock<Option<TrafficSample>>>,
+    mut visible_rx: tokio::sync::watch::Receiver<bool>,
+    traffic_wake: Arc<tokio::sync::Notify>,
 ) {
-    let (tx, mut rx) = tokio::sync::watch::channel::<Option<TrafficSample>>(None);
-    let slot_writer = slot.clone();
-    tokio::spawn(async move {
-        while rx.changed().await.is_ok() {
-            let value = *rx.borrow_and_update();
-            *slot_writer.write().await = value;
+    let set_slot = |value: Option<TrafficSample>| {
+        if let Ok(mut guard) = slot.write() {
+            *guard = value;
         }
-    });
+    };
 
     loop {
+        if !*visible_rx.borrow_and_update() {
+            set_slot(None);
+            if visible_rx.wait_for(|&visible| visible).await.is_err() {
+                return;
+            }
+            continue;
+        }
+
         let active = manager.persisted_active().await;
         if !active.is_some_and(|kind| kind.has_controller()) {
-            let _ = tx.send(None);
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            set_slot(None);
+            tokio::select! {
+                _ = traffic_wake.notified() => {}
+                res = visible_rx.wait_for(|&visible| !visible) => {
+                    if res.is_err() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            }
             continue;
         }
 
         let Ok(client) = manager.controller_client() else {
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = traffic_wake.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
             continue;
         };
 
-        let _ = client
-            .stream_traffic(|sample| {
-                let _ = tx.send(Some(sample));
-            })
-            .await;
+        let stream_slot = slot.clone();
+        let stream_app = app.clone();
+        tokio::select! {
+            _ = client.stream_traffic(move |sample| {
+                if let Ok(mut guard) = stream_slot.write() {
+                    *guard = Some(sample);
+                }
+                let _ = stream_app.emit(TRAFFIC_EVENT, sample);
+            }) => {}
+            res = visible_rx.wait_for(|&visible| !visible) => {
+                if res.is_err() {
+                    return;
+                }
+            }
+            _ = traffic_wake.notified() => {}
+        }
 
-        let _ = tx.send(None);
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        set_slot(None);
+        if *visible_rx.borrow() {
+            tokio::select! {
+                _ = traffic_wake.notified() => {}
+                res = visible_rx.wait_for(|&visible| !visible) => {
+                    if res.is_err() {
+                        return;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
     }
 }
 
@@ -340,39 +468,42 @@ async fn stream_traffic_forever(
 /// check, profile compilation and system-proxy handoff all live there, and an
 /// auto-connect path that skipped them would start a core that behaves
 /// differently from one the user started by hand.
-fn maybe_auto_connect(app: &tauri::AppHandle) {
+async fn maybe_auto_connect_async(app: &tauri::AppHandle) {
     use tauri::Manager;
 
-    let settings = AppSettings::load(app.state::<AppState>().manager.layout());
-    if !settings.auto_connect {
+    let state = app.state::<AppState>();
+    if !state.cached_settings().auto_connect {
         return;
     }
 
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let manager = app.state::<AppState>().manager.clone();
+    let manager = state.manager.clone();
+    if manager.has_running_core().await {
+        return;
+    }
 
-        if manager.has_running_core().await {
-            return;
-        }
-        if ProfileStore::new(manager.layout())
-            .active()
+    let layout = manager.layout().clone();
+    let has_active = tokio::task::spawn_blocking(move || {
+        ProfileStore::new(&layout)
+            .active_id()
             .ok()
             .flatten()
-            .is_none()
-        {
-            tracing::info!("auto-connect skipped: no active profile");
-            return;
-        }
+            .is_some()
+    })
+    .await
+    .unwrap_or(false);
 
-        match commands::start_core(app.clone(), app.state::<AppState>(), None).await {
-            Ok(status) => tracing::info!(
-                core = status.active_core.map(|kind| kind.as_str()).unwrap_or("-"),
-                "auto-connected on launch"
-            ),
-            Err(error) => tracing::warn!(%error, "auto-connect failed"),
-        }
-    });
+    if !has_active {
+        tracing::info!("auto-connect skipped: no active profile");
+        return;
+    }
+
+    match commands::start_core(app.clone(), state, None).await {
+        Ok(status) => tracing::info!(
+            core = status.active_core.map(|kind| kind.as_str()).unwrap_or("-"),
+            "auto-connected on launch"
+        ),
+        Err(error) => tracing::warn!(%error, "auto-connect failed"),
+    }
 }
 
 /// Stop every core and restore the system proxy before the process goes away.

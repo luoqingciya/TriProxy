@@ -228,15 +228,26 @@ impl LogBuffer {
     pub fn push(&self, core: &str, stream: LogStream, text: impl Into<String>) {
         let text = text.into();
         let level = infer_level(stream, &text);
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.push_with_level(core, stream, level, text);
+    }
+
+    /// Push a log line whose severity level has already been inferred.
+    pub fn push_with_level(
+        &self,
+        core: &str,
+        stream: LogStream,
+        level: LogLevel,
+        text: impl Into<String>,
+    ) {
         let line = LogLine {
-            seq,
+            seq: self.seq.fetch_add(1, Ordering::Relaxed),
             ts_ms: now_ms(),
             core: core.to_string(),
             stream,
             level,
-            text,
+            text: text.into(),
         };
+        let broadcast_line = (self.tx.receiver_count() > 0).then(|| line.clone());
 
         {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -244,11 +255,13 @@ impl LogBuffer {
                 guard.lines.pop_front();
                 guard.dropped += 1;
             }
-            guard.lines.push_back(line.clone());
+            guard.lines.push_back(line);
         }
 
         // A send error only means no subscriber is attached right now.
-        let _ = self.tx.send(line);
+        if let Some(line) = broadcast_line {
+            let _ = self.tx.send(line);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<LogLine> {
@@ -257,21 +270,52 @@ impl LogBuffer {
 
     /// Last `n` lines, oldest first.
     pub fn tail(&self, n: usize) -> Vec<LogLine> {
+        if n == 0 {
+            return Vec::new();
+        }
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let skip = guard.lines.len().saturating_sub(n);
         guard.lines.iter().skip(skip).cloned().collect()
     }
 
+    /// Up to `n` lines strictly newer than `after_seq`, oldest first.
+    pub fn tail_after(&self, after_seq: Option<u64>, n: usize) -> Vec<LogLine> {
+        let Some(after) = after_seq else {
+            return self.tail(n);
+        };
+        if n == 0 {
+            return Vec::new();
+        }
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.lines.back().is_none_or(|line| line.seq <= after) {
+            return Vec::new();
+        }
+        let mut out: Vec<LogLine> = guard
+            .lines
+            .iter()
+            .rev()
+            .take_while(|line| line.seq > after)
+            .take(n)
+            .cloned()
+            .collect();
+        out.reverse();
+        out
+    }
+
     pub fn tail_for(&self, core: &str, n: usize) -> Vec<LogLine> {
+        if n == 0 {
+            return Vec::new();
+        }
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<LogLine> = guard
             .lines
             .iter()
+            .rev()
             .filter(|l| l.core == core)
+            .take(n)
             .cloned()
             .collect();
-        let skip = out.len().saturating_sub(n);
-        out.drain(..skip);
+        out.reverse();
         out
     }
 
@@ -407,5 +451,28 @@ mod tests {
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].text, "a");
         assert_eq!(tail[1].text, "c");
+    }
+
+    #[test]
+    fn tail_after_returns_only_new_lines_in_order() {
+        let buffer = LogBuffer::new(64);
+        buffer.push_with_level("mihomo", LogStream::Stdout, LogLevel::Warn, "first");
+        buffer.push("mihomo", LogStream::Stdout, "second");
+        buffer.push("mihomo", LogStream::Stdout, "third");
+
+        let all = buffer.tail_after(None, 10);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].level, LogLevel::Warn);
+
+        let after_first = buffer.tail_after(Some(all[0].seq), 10);
+        assert_eq!(after_first.len(), 2);
+        assert_eq!(after_first[0].text, "second");
+        assert_eq!(after_first[1].text, "third");
+
+        let capped = buffer.tail_after(Some(all[0].seq), 1);
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].text, "third");
+
+        assert!(buffer.tail_after(Some(all[2].seq), 10).is_empty());
     }
 }

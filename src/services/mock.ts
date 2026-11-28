@@ -175,6 +175,12 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return library as T
     case 'active_nodes':
       return (library.active ? nodes : []) as T
+    case 'library_snapshot':
+      return {
+        library,
+        nodes: library.active ? nodes : [],
+        selection: library.active ? selection() : null,
+      } as T
     case 'import_profile': {
       const name = String(args?.name ?? 'imported')
       const existing = library.profiles.find((entry) => entry.name === name)
@@ -286,8 +292,12 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
         error: null,
         measured_at_ms: now,
       })) as T
-    case 'recent_logs':
-      return logs.slice(-Number(args?.limit ?? 200)) as T
+    case 'recent_logs': {
+      const limit = Number(args?.limit ?? 200)
+      const afterSeq = typeof args?.afterSeq === 'number' ? args.afterSeq : null
+      const filtered = afterSeq === null ? logs : logs.filter((entry) => entry.seq > afterSeq)
+      return filtered.slice(-limit) as T
+    }
     case 'settings':
       return settings as T
     case 'save_settings':

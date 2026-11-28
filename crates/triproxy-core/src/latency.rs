@@ -25,20 +25,29 @@
 //! Results are not persisted. Latency is a property of the moment; storing it
 //! would invite the UI to show stale numbers as if they were current.
 
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::error::{Error, Result};
 use crate::logging::now_ms;
 use crate::profile::Node;
 
-/// How many probes run at once.
+/// How many TCP probes run at once.
 ///
-/// Enough to keep a hundred-node list from taking a minute, low enough that a
+/// Enough to keep a hundred-node list from taking long, low enough that a
 /// subscription's servers do not see a burst that looks like an attack.
-const DEFAULT_CONCURRENCY: usize = 8;
+const DEFAULT_CONCURRENCY: usize = 16;
+const PROXY_DELAY_CONCURRENCY: usize = 12;
+
+type DnsCache = Arc<
+    tokio::sync::Mutex<HashMap<String, Arc<OnceCell<std::result::Result<Vec<IpAddr>, String>>>>>,
+>;
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -74,27 +83,80 @@ impl LatencySample {
 /// Measure the TCP handshake time to one endpoint.
 pub async fn tcp_latency(server: &str, port: u16, timeout: Duration) -> Result<u64> {
     let deadline = Instant::now() + timeout;
+    let ips = if let Ok(ip) = server.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        resolve_host_ips(server, timeout)
+            .await
+            .map_err(Error::Other)?
+    };
+    connect_ips(&ips, port, deadline).await
+}
 
-    let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host((server, port)))
+async fn tcp_latency_with_cache(
+    server: &str,
+    port: u16,
+    timeout: Duration,
+    cache: &DnsCache,
+) -> Result<u64> {
+    let deadline = Instant::now() + timeout;
+    let ips = if let Ok(ip) = server.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        resolve_cached(cache, server, timeout).await?
+    };
+    connect_ips(&ips, port, deadline).await
+}
+
+async fn resolve_host_ips(
+    server: &str,
+    timeout: Duration,
+) -> std::result::Result<Vec<IpAddr>, String> {
+    let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host((server, 0)))
         .await
-        .map_err(|_| Error::Other("DNS lookup timed out".to_string()))?
-        .map_err(|error| Error::Other(format!("DNS lookup failed: {error}")))?;
+        .map_err(|_| "DNS lookup timed out".to_string())?
+        .map_err(|error| format!("DNS lookup failed: {error}"))?;
 
-    let mut addresses = lookup.collect::<Vec<_>>();
-    if addresses.is_empty() {
-        return Err(Error::Other("no address for the node".to_string()));
+    let mut ips = Vec::new();
+    for address in lookup {
+        if !ips.contains(&address.ip()) {
+            ips.push(address.ip());
+        }
+    }
+    if ips.is_empty() {
+        return Err("no address for the node".to_string());
     }
     // Prefer IPv4: dual-stack nodes are common and a broken IPv6 route would
     // otherwise report a healthy IPv4 endpoint as unreachable.
-    addresses.sort_by_key(|address| !address.is_ipv4());
+    ips.sort_by_key(|ip| !ip.is_ipv4());
+    Ok(ips)
+}
 
+async fn resolve_cached(cache: &DnsCache, server: &str, timeout: Duration) -> Result<Vec<IpAddr>> {
+    let key = server.to_ascii_lowercase();
+    let cell = {
+        let mut guard = cache.lock().await;
+        guard
+            .entry(key)
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
+    };
+    let server_owned = server.to_string();
+    let result = cell
+        .get_or_init(|| async move { resolve_host_ips(&server_owned, timeout).await })
+        .await;
+    result.clone().map_err(Error::Other)
+}
+
+async fn connect_ips(ips: &[IpAddr], port: u16, deadline: Instant) -> Result<u64> {
     let mut last_error = None;
-    for address in addresses {
+    for &ip in ips {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             last_error.get_or_insert_with(|| "connect timed out".to_string());
             break;
         }
+        let address = SocketAddr::new(ip, port);
         let connect_started = Instant::now();
         match tokio::time::timeout(remaining, tokio::net::TcpStream::connect(address)).await {
             Ok(Ok(_stream)) => return Ok(connect_started.elapsed().as_millis() as u64),
@@ -126,7 +188,14 @@ pub async fn measure_proxy_delay(
     probe_url: &str,
     timeout_ms: u64,
 ) -> Vec<LatencySample> {
-    measure_proxy_delay_with(client, nodes, probe_url, timeout_ms, DEFAULT_CONCURRENCY).await
+    measure_proxy_delay_with(
+        client,
+        nodes,
+        probe_url,
+        timeout_ms,
+        PROXY_DELAY_CONCURRENCY,
+    )
+    .await
 }
 
 pub async fn measure_proxy_delay_with(
@@ -136,19 +205,35 @@ pub async fn measure_proxy_delay_with(
     timeout_ms: u64,
     concurrency: usize,
 ) -> Vec<LatencySample> {
-    let permits = std::sync::Arc::new(Semaphore::new(concurrency.max(1)));
+    measure_proxy_delay_streaming(client, nodes, probe_url, timeout_ms, concurrency, |_| {}).await
+}
+
+pub async fn measure_proxy_delay_streaming<F>(
+    client: &crate::controller::ControllerClient,
+    nodes: &[Node],
+    probe_url: &str,
+    timeout_ms: u64,
+    concurrency: usize,
+    on_sample: F,
+) -> Vec<LatencySample>
+where
+    F: Fn(&LatencySample) + Send + Sync + 'static,
+{
+    let permits = Arc::new(Semaphore::new(concurrency.max(1)));
     let probe_url = probe_url.to_string();
-    let mut tasks = Vec::with_capacity(nodes.len());
+    let on_sample = Arc::new(on_sample);
+    let mut tasks = FuturesUnordered::new();
 
     for node in nodes {
         let node = node.clone();
         let client = client.clone();
         let probe_url = probe_url.clone();
         let permits = permits.clone();
+        let on_sample = on_sample.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permits.acquire().await.ok();
             let result = client.proxy_delay(&node.name, &probe_url, timeout_ms).await;
-            LatencySample {
+            let sample = LatencySample {
                 node_id: node.id.clone(),
                 name: node.name.clone(),
                 endpoint: node.endpoint(),
@@ -156,13 +241,15 @@ pub async fn measure_proxy_delay_with(
                 latency_ms: result.as_ref().ok().copied(),
                 error: result.err().map(|error| error.to_string()),
                 measured_at_ms: now_ms(),
-            }
+            };
+            on_sample(&sample);
+            sample
         }));
     }
 
-    let mut samples = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        if let Ok(sample) = task.await {
+    let mut samples = Vec::with_capacity(nodes.len());
+    while let Some(res) = tasks.next().await {
+        if let Ok(sample) = res {
             samples.push(sample);
         }
     }
@@ -180,16 +267,32 @@ pub async fn measure_nodes_with(
     timeout: Duration,
     concurrency: usize,
 ) -> Vec<LatencySample> {
-    let permits = std::sync::Arc::new(Semaphore::new(concurrency.max(1)));
-    let mut tasks = Vec::with_capacity(nodes.len());
+    measure_nodes_streaming(nodes, timeout, concurrency, |_| {}).await
+}
+
+pub async fn measure_nodes_streaming<F>(
+    nodes: &[Node],
+    timeout: Duration,
+    concurrency: usize,
+    on_sample: F,
+) -> Vec<LatencySample>
+where
+    F: Fn(&LatencySample) + Send + Sync + 'static,
+{
+    let permits = Arc::new(Semaphore::new(concurrency.max(1)));
+    let cache: DnsCache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let on_sample = Arc::new(on_sample);
+    let mut tasks = FuturesUnordered::new();
 
     for node in nodes {
         let node = node.clone();
         let permits = permits.clone();
+        let cache = cache.clone();
+        let on_sample = on_sample.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permits.acquire().await.ok();
-            let result = tcp_latency(&node.server, node.port, timeout).await;
-            LatencySample {
+            let result = tcp_latency_with_cache(&node.server, node.port, timeout, &cache).await;
+            let sample = LatencySample {
                 node_id: node.id.clone(),
                 name: node.name.clone(),
                 endpoint: node.endpoint(),
@@ -197,13 +300,15 @@ pub async fn measure_nodes_with(
                 latency_ms: result.as_ref().ok().copied(),
                 error: result.err().map(|error| error.to_string()),
                 measured_at_ms: now_ms(),
-            }
+            };
+            on_sample(&sample);
+            sample
         }));
     }
 
-    let mut samples = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        if let Ok(sample) = task.await {
+    let mut samples = Vec::with_capacity(nodes.len());
+    while let Some(res) = tasks.next().await {
+        if let Ok(sample) = res {
             samples.push(sample);
         }
     }
@@ -347,5 +452,23 @@ mod tests {
         assert!(measure_nodes(&[], Duration::from_millis(100))
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_measurement_emits_every_sample() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let nodes = vec![node("localhost", port), node("localhost", 1)];
+
+        let streamed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = streamed.clone();
+        let samples =
+            measure_nodes_streaming(&nodes, Duration::from_millis(500), 2, move |sample| {
+                sink.lock().unwrap().push(sample.node_id.clone());
+            })
+            .await;
+
+        assert_eq!(samples.len(), 2);
+        assert_eq!(streamed.lock().unwrap().len(), 2);
     }
 }

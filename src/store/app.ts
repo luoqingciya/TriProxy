@@ -15,7 +15,7 @@
 
 import { create } from 'zustand'
 
-import { api } from '../services/api'
+import { api, isTauri } from '../services/api'
 import { CORE_LABEL } from '../types'
 import type {
   ActiveDelay,
@@ -94,7 +94,10 @@ interface AppState {
   trafficHistory: { up: number; down: number }[]
   connections: ConnectionsSnapshot | null
   testing: boolean
+  testingProgress: { done: number; total: number } | null
   busy: boolean
+  busyAction: string | null
+  needsCoreRestart: boolean
   error: string | null
   /** Transient informational message (not an error). */
   notice: string | null
@@ -104,10 +107,13 @@ interface AppState {
   refreshLive: () => Promise<void>
   refreshLibrary: () => Promise<void>
   loadSettings: () => Promise<void>
+  pushTraffic: (sample: TrafficSample) => void
+  mergeLatencySamples: (samples: LatencySample[]) => void
 
   start: (core: CoreKind | null) => Promise<void>
   stop: () => Promise<void>
   switchTo: (target: string) => Promise<void>
+  applySettingsRestart: () => Promise<void>
   installCore: (core: CoreKind) => Promise<void>
   updateCore: (core: CoreKind) => Promise<void>
 
@@ -132,6 +138,21 @@ interface AppState {
 const emptyLibrary: ProfileLibrary = { active: null, profiles: [] }
 let liveInFlight = false
 
+const CORE_RESTART_FIELDS = new Set<keyof Settings>([
+  'core_preference',
+  'tun',
+  'rule_set',
+  'proxy_groups',
+  'allow_lan',
+  'dns_mode',
+  'rule_mode',
+  'log_level',
+  'listen_port',
+  'api_port',
+  'custom_rules',
+  'rule_sets',
+])
+
 export const useApp = create<AppState>((set, get) => ({
   page: initialPage(),
   status: null,
@@ -147,7 +168,10 @@ export const useApp = create<AppState>((set, get) => ({
   trafficHistory: [],
   connections: null,
   testing: false,
+  testingProgress: null,
   busy: false,
+  busyAction: null,
+  needsCoreRestart: false,
   error: null,
   notice: null,
 
@@ -163,26 +187,29 @@ export const useApp = create<AppState>((set, get) => ({
     if (liveInFlight) return
     liveInFlight = true
     const wantConnections = get().page === 'connections'
+    const needTrafficFetch =
+      !isTauri || (get().status?.active_core !== null && get().traffic === null)
     try {
-      const [status, proxy, traffic, connections] = await Promise.all([
+      const [status, traffic, connections] = await Promise.all([
         api.status(),
-        api.systemProxyStatus(),
-        api.traffic(),
+        needTrafficFetch ? api.traffic() : Promise.resolve(get().traffic),
         wantConnections ? api.connections() : Promise.resolve(get().connections),
       ])
-      set({
-        status,
-        proxy,
-        traffic,
-        trafficHistory:
-          status.active_core === null
+      set((state) => {
+        const stopped = status.active_core === null
+        const nextTraffic = stopped ? null : traffic
+        return {
+          status,
+          traffic: nextTraffic,
+          trafficHistory: stopped
             ? []
-            : traffic
-              ? [...get().trafficHistory, { up: traffic.up, down: traffic.down }].slice(
+            : !isTauri && nextTraffic
+              ? [...state.trafficHistory, { up: nextTraffic.up, down: nextTraffic.down }].slice(
                   -TRAFFIC_HISTORY_POINTS,
                 )
-              : get().trafficHistory,
-        ...(wantConnections ? { connections } : {}),
+              : state.trafficHistory,
+          ...(wantConnections ? { connections: stopped ? null : connections } : {}),
+        }
       })
     } catch (error) {
       set({ error: describe(error) })
@@ -193,12 +220,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   refreshLibrary: async () => {
     try {
-      const [library, nodes, selection] = await Promise.all([
-        api.profiles(),
-        api.activeNodes(),
-        api.previewSelection(),
-      ])
-      set({ library, nodes, selection })
+      const snapshot = await api.librarySnapshot()
+      set({
+        library: snapshot.library,
+        nodes: snapshot.nodes,
+        selection: snapshot.selection,
+      })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -210,51 +237,101 @@ export const useApp = create<AppState>((set, get) => ({
 
   loadSettings: async () => {
     try {
-      const [settings, autostart] = await Promise.all([
+      const [settings, autostart, proxy] = await Promise.all([
         api.settings(),
         api.autostartEnabled().catch(() => null),
+        api.systemProxyStatus().catch(() => null),
       ])
-      set({ settings, autostart })
+      set({ settings, autostart, proxy })
     } catch (error) {
       set({ error: describe(error) })
     }
   },
 
+  pushTraffic: (sample) =>
+    set((state) => ({
+      traffic: sample,
+      trafficHistory: [...state.trafficHistory, { up: sample.up, down: sample.down }].slice(
+        -TRAFFIC_HISTORY_POINTS,
+      ),
+    })),
+
+  mergeLatencySamples: (samples) => {
+    if (samples.length === 0) return
+    set((state) => {
+      const next = { ...state.latency }
+      for (const sample of samples) next[sample.node_id] = sample
+      const progress = state.testingProgress
+        ? {
+            total: state.testingProgress.total,
+            done: Math.min(
+              state.testingProgress.total,
+              state.testingProgress.done + samples.length,
+            ),
+          }
+        : null
+      return { latency: next, testingProgress: progress }
+    })
+  },
+
   start: async (core) => {
-    set({ busy: true })
+    set({ busy: true, busyAction: 'connect' })
     try {
       const status = await api.startCore(core)
-      set({ status, error: null })
-      await get().refresh()
+      const proxy = await api.systemProxyStatus().catch(() => get().proxy)
+      set({ status, proxy, needsCoreRestart: false, error: null })
+      if (get().page === 'connections') {
+        void get().refreshLive()
+      }
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
     }
   },
 
   stop: async () => {
-    set({ busy: true })
+    set({ busy: true, busyAction: 'disconnect' })
     try {
       await api.stopCore()
-      await get().refresh()
+      const status = await api.status()
+      set({
+        status,
+        proxy: null,
+        traffic: null,
+        trafficHistory: [],
+        connections: null,
+        delay: null,
+        needsCoreRestart: false,
+      })
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
     }
   },
 
   switchTo: async (target) => {
-    set({ busy: true })
+    set({ busy: true, busyAction: `switch:${target}` })
     try {
       const status = await api.switchCore(target)
-      set({ status, error: null })
-      await get().refresh()
+      const proxy = await api.systemProxyStatus().catch(() => get().proxy)
+      set({ status, proxy, needsCoreRestart: false, error: null })
+      if (get().page === 'connections') {
+        void get().refreshLive()
+      }
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
+    }
+  },
+
+  applySettingsRestart: async () => {
+    const target = get().settings?.core_preference ?? 'smart'
+    await get().switchTo(target)
+    if (!get().error) {
+      set({ notice: '核心已按最新配置重启生效' })
     }
   },
 
@@ -265,21 +342,20 @@ export const useApp = create<AppState>((set, get) => ({
    * tells the button to say "下载中" instead of looking dead.
    */
   installCore: async (core) => {
-    set({ busy: true, error: null })
+    set({ busy: true, busyAction: `install:${core}`, error: null })
     try {
       const status = await api.installCore(core)
       set({ status, notice: `${CORE_LABEL[core]} 已安装` })
-      await get().refresh()
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
     }
   },
 
   /** Check upstream for a newer build of one core, then install it. */
   updateCore: async (core) => {
-    set({ busy: true, error: null })
+    set({ busy: true, busyAction: `update:${core}`, error: null })
     try {
       const check = await api.checkCoreUpdate(core)
       if (check.status === 'up-to-date') {
@@ -294,32 +370,40 @@ export const useApp = create<AppState>((set, get) => ({
             ? `${CORE_LABEL[core]} 已更新到 ${check.latest}`
             : `${CORE_LABEL[core]} 已更新`,
       })
-      await get().refresh()
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
     }
   },
 
   importProfile: async (text, name) => {
-    set({ busy: true })
+    set({ busy: true, busyAction: 'import' })
     try {
       const stored = await api.importProfile(text, name)
-      await get().refresh()
+      await get().refreshLibrary()
+      set({
+        notice: `已导入配置「${stored.name}」（${stored.node_count} 个节点）`,
+        error: null,
+      })
       return stored
     } catch (error) {
       set({ error: describe(error) })
       return null
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
     }
   },
 
   useProfile: async (id) => {
     try {
       await api.setActiveProfile(id)
-      await get().refresh()
+      await get().refreshLibrary()
+      const running = get().status?.active_core !== null
+      set({
+        needsCoreRestart: running ? true : get().needsCoreRestart,
+        notice: running ? '已切换活动配置，重启核心后生效' : '已切换活动配置',
+      })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -328,7 +412,8 @@ export const useApp = create<AppState>((set, get) => ({
   removeProfile: async (id) => {
     try {
       await api.deleteProfile(id)
-      await get().refresh()
+      await get().refreshLibrary()
+      set({ notice: '已删除配置' })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -337,7 +422,11 @@ export const useApp = create<AppState>((set, get) => ({
   setSystemProxy: async (enabled) => {
     try {
       const proxy = await api.setSystemProxy(enabled)
-      set({ proxy })
+      set({
+        proxy,
+        notice: enabled ? '系统代理已开启' : '系统代理已关闭',
+        error: null,
+      })
       // Remember the choice so starting a core re-applies it.
       await get().updateSettings({ system_proxy: enabled })
     } catch (error) {
@@ -346,7 +435,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   testLatency: async () => {
-    set({ testing: true })
+    set({ testing: true, testingProgress: { done: 0, total: get().nodes.length } })
     try {
       const samples = await api.testLatency(3)
       const map: Record<string, LatencySample> = {}
@@ -355,17 +444,21 @@ export const useApp = create<AppState>((set, get) => ({
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ testing: false })
+      set({ testing: false, testingProgress: null })
     }
   },
 
   selectNode: async (nodeId) => {
     try {
       const result = await api.selectNode(nodeId)
-      await get().refresh()
+      await get().refreshLibrary()
       // Saved but not applied is the normal case on Xray and on a stopped core;
       // saying so beats leaving the user wondering why nothing changed.
-      if (!result.applied && result.reason) {
+      if (result.applied) {
+        set({
+          notice: nodeId === null ? '已切换到自动选择' : `已切换到「${result.node ?? '所选节点'}」`,
+        })
+      } else if (result.reason) {
         set({ notice: `已保存，下次启动生效（${result.reason}）` })
       }
     } catch (error) {
@@ -374,29 +467,58 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   toggleFavorite: async (nodeId) => {
-    const profile = get().library.profiles.find(
-      (entry) => entry.id === get().library.active,
-    )
+    const currentLibrary = get().library
+    const activeId = currentLibrary.active
+    const profile = currentLibrary.profiles.find((entry) => entry.id === activeId)
     const starred = profile?.favorites?.includes(nodeId) ?? false
+    const nextStarred = !starred
+    if (activeId) {
+      set({
+        library: {
+          ...currentLibrary,
+          profiles: currentLibrary.profiles.map((entry) => {
+            if (entry.id !== activeId) return entry
+            const prevFavs = entry.favorites ?? []
+            const nextFavs = nextStarred
+              ? prevFavs.includes(nodeId)
+                ? prevFavs
+                : [...prevFavs, nodeId]
+              : prevFavs.filter((id) => id !== nodeId)
+            return { ...entry, favorites: nextFavs }
+          }),
+        },
+      })
+    }
     try {
-      await api.setFavorite(nodeId, !starred)
-      await get().refresh()
+      await api.setFavorite(nodeId, nextStarred)
     } catch (error) {
-      set({ error: describe(error) })
+      set({ library: currentLibrary, error: describe(error) })
     }
   },
 
   closeConnection: async (id) => {
+    const prev = get().connections
+    if (prev) {
+      set({
+        connections: {
+          ...prev,
+          connections: id === null ? [] : prev.connections.filter((c) => c.id !== id),
+        },
+      })
+    }
     try {
       await api.closeConnection(id)
-      await get().refresh()
+      if (get().page === 'connections') {
+        const connections = await api.connections()
+        set({ connections })
+      }
     } catch (error) {
-      set({ error: describe(error) })
+      set({ connections: prev, error: describe(error) })
     }
   },
 
   testProxyDelay: async () => {
-    set({ testing: true })
+    set({ testing: true, testingProgress: { done: 0, total: get().nodes.length } })
     try {
       const samples = await api.testProxyDelay(3)
       const map: Record<string, LatencySample> = {}
@@ -405,7 +527,7 @@ export const useApp = create<AppState>((set, get) => ({
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ testing: false })
+      set({ testing: false, testingProgress: null })
     }
   },
 
@@ -426,14 +548,21 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   refreshProfile: async (id) => {
-    set({ busy: true })
+    set({ busy: true, busyAction: `refresh:${id}` })
     try {
-      await api.refreshProfile(id)
-      await get().refresh()
+      const outcome = await api.refreshProfile(id)
+      await get().refreshLibrary()
+      if (outcome.kind === 'updated') {
+        set({ notice: `订阅已更新（共 ${outcome.node_count ?? 0} 个节点）` })
+      } else if (outcome.kind === 'not_modified') {
+        set({ notice: '订阅已是最新，无变更' })
+      } else if (outcome.kind === 'failed') {
+        set({ error: outcome.error ?? '订阅刷新失败' })
+      }
     } catch (error) {
       set({ error: describe(error) })
     } finally {
-      set({ busy: false })
+      set({ busy: false, busyAction: null })
     }
   },
 
@@ -441,8 +570,15 @@ export const useApp = create<AppState>((set, get) => ({
     const current = get().settings
     if (!current) return
     const next = { ...current, ...patch }
+    const touchesCore = (Object.keys(patch) as (keyof Settings)[]).some(
+      (key) => CORE_RESTART_FIELDS.has(key) && patch[key] !== current[key],
+    )
+    const running = get().status?.active_core !== null
     // Optimistic: toggles should feel instant, and a failure rolls back below.
-    set({ settings: next })
+    set({
+      settings: next,
+      needsCoreRestart: touchesCore && running ? true : get().needsCoreRestart,
+    })
     try {
       await api.saveSettings(next)
       const selection = await api.previewSelection().catch(() => get().selection)

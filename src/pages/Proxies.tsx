@@ -13,13 +13,18 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Activity, Check, Search, Star, Zap } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { Activity, Check, Search, Star, X, Zap } from 'lucide-react'
+import { useDeferredValue, useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
+import { VirtualList } from '../components/VirtualList'
 import { Badge, Button, Card, Empty } from '../components/ui'
 import { useApp } from '../store/app'
 import type { LatencySample, Protocol } from '../types'
+
+const EMPTY_FAVORITES: string[] = []
+const NAME_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+type SortMode = 'name' | 'latency' | 'favorite'
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   shadowsocks: 'SS',
@@ -38,6 +43,8 @@ export function Proxies() {
   const library = useApp((state) => state.library)
   const latency = useApp((state) => state.latency)
   const testing = useApp((state) => state.testing)
+  const testingProgress = useApp((state) => state.testingProgress)
+  const setPage = useApp((state) => state.setPage)
   const testLatency = useApp((state) => state.testLatency)
   const testProxyDelay = useApp((state) => state.testProxyDelay)
   const selectNode = useApp((state) => state.selectNode)
@@ -45,10 +52,13 @@ export function Proxies() {
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
   const [onlyFavorites, setOnlyFavorites] = useState(false)
+  const [sortBy, setSortBy] = useState<SortMode>('name')
 
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
   const selectedNodeId = activeProfile?.selected_node ?? null
-  const favorites = activeProfile?.favorites ?? []
+  const favorites = activeProfile?.favorites ?? EMPTY_FAVORITES
+  const favoriteSet = useMemo(() => new Set(favorites), [favorites])
+  const deferredQuery = useDeferredValue(query)
   // No stored pick means the compiled config defaults to the automatic group.
   const autoSelected = selectedNodeId === null && nodes.length > 0
 
@@ -59,18 +69,42 @@ export function Proxies() {
   }, [nodes])
 
   const visible = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    return nodes
-      .filter((node) => (protocol === 'all' ? true : node.protocol === protocol))
-      .filter((node) => (onlyFavorites ? favorites.includes(node.id) : true))
-      .filter((node) =>
-        needle === ''
-          ? true
-          : node.name.toLowerCase().includes(needle) ||
-            node.server.toLowerCase().includes(needle),
-      )
-      .sort((a, b) => a.name.localeCompare(b.name))
-  }, [nodes, protocol, query, onlyFavorites, favorites])
+    const needle = deferredQuery.trim().toLowerCase()
+    const filtered = nodes.filter((node) => {
+      if (protocol !== 'all' && node.protocol !== protocol) return false
+      if (onlyFavorites && !favoriteSet.has(node.id)) return false
+      if (
+        needle !== '' &&
+        !node.name.toLowerCase().includes(needle) &&
+        !node.server.toLowerCase().includes(needle)
+      ) {
+        return false
+      }
+      return true
+    })
+
+    const latencyRank = (nodeId: string) => {
+      const sample = latency[nodeId]
+      if (!sample) return Number.MAX_SAFE_INTEGER - 1
+      if (sample.latency_ms === null) return Number.MAX_SAFE_INTEGER
+      return sample.latency_ms
+    }
+
+    filtered.sort((a, b) => {
+      if (sortBy === 'latency') {
+        const diff = latencyRank(a.id) - latencyRank(b.id)
+        if (diff !== 0) return diff
+      } else if (sortBy === 'favorite') {
+        const favDiff = Number(favoriteSet.has(b.id)) - Number(favoriteSet.has(a.id))
+        if (favDiff !== 0) return favDiff
+      }
+      return NAME_COLLATOR.compare(a.name, b.name)
+    })
+    return filtered
+  }, [nodes, protocol, deferredQuery, onlyFavorites, favoriteSet, sortBy, latency])
+
+  const filteredActive =
+    query.trim() !== '' || protocol !== 'all' || onlyFavorites
 
   return (
     <div>
@@ -78,7 +112,9 @@ export function Proxies() {
         title="节点"
         description={
           activeProfile
-            ? `来自配置「${activeProfile.name}」，共 ${nodes.length} 个节点`
+            ? filteredActive
+              ? `来自配置「${activeProfile.name}」，显示 ${visible.length} / ${nodes.length} 个节点`
+              : `来自配置「${activeProfile.name}」，共 ${nodes.length} 个节点`
             : '还没有活动配置'
         }
         actions={
@@ -98,14 +134,18 @@ export function Proxies() {
               title="由核心通过节点发起请求：能证明代理真的可用"
             >
               <Activity size={15} strokeWidth={2.2} />
-              {testing ? '测试中…' : '真实延迟'}
+              {testing
+                ? testingProgress && testingProgress.total > 0
+                  ? `测试中 ${testingProgress.done}/${testingProgress.total}…`
+                  : '测试中…'
+                : '真实延迟'}
             </Button>
           </>
         }
       />
 
-      <div className="mb-4 flex items-center gap-2">
-        <div className="relative flex-1">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[200px] flex-1">
           <Search
             size={15}
             className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-faint"
@@ -113,9 +153,22 @@ export function Proxies() {
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && query) setQuery('')
+            }}
             placeholder="搜索节点名称或地址"
-            className="w-full rounded-lg border border-line bg-panel py-2 pr-3 pl-9 text-[13px] text-fg outline-none placeholder:text-faint focus:border-line-strong"
+            className="w-full rounded-lg border border-line bg-panel py-2 pr-8 pl-9 text-[13px] text-fg outline-none placeholder:text-faint focus:border-line-strong"
           />
+          {query && (
+            <button
+              type="button"
+              onClick={() => setQuery('')}
+              aria-label="清空搜索"
+              className="absolute top-1/2 right-2.5 -translate-y-1/2 text-faint hover:text-fg"
+            >
+              <X size={13} />
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-1 rounded-lg border border-line bg-panel p-1">
           <FilterChip
@@ -132,6 +185,23 @@ export function Proxies() {
             />
           ))}
         </div>
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-panel p-1">
+          <FilterChip
+            active={sortBy === 'name'}
+            onClick={() => setSortBy('name')}
+            label="按名称"
+          />
+          <FilterChip
+            active={sortBy === 'latency'}
+            onClick={() => setSortBy('latency')}
+            label="按延迟"
+          />
+          <FilterChip
+            active={sortBy === 'favorite'}
+            onClick={() => setSortBy('favorite')}
+            label="收藏优先"
+          />
+        </div>
         {/* Starring is only useful if you can then look at just those. */}
         <FilterChip
           active={onlyFavorites}
@@ -143,11 +213,31 @@ export function Proxies() {
       <Card className="p-0">
         {visible.length === 0 ? (
           <Empty>
-            {nodes.length > 0
-              ? '没有匹配的节点'
-              : library.profiles.length > 0
-                ? '已有配置，但没有启用任何一份。到「配置」页点「设为活动」后，节点会显示在这里'
-                : '还没有配置。到「配置」页导入订阅或分享链接'}
+            {nodes.length > 0 ? (
+              '没有匹配的节点'
+            ) : library.profiles.length > 0 ? (
+              <>
+                已有配置，但没有启用任何一份。
+                <button
+                  type="button"
+                  onClick={() => setPage('profiles')}
+                  className="ml-1 text-accent hover:underline"
+                >
+                  前往「配置」页启用
+                </button>
+              </>
+            ) : (
+              <>
+                还没有配置。
+                <button
+                  type="button"
+                  onClick={() => setPage('profiles')}
+                  className="ml-1 text-accent hover:underline"
+                >
+                  前往「配置」页导入订阅
+                </button>
+              </>
+            )}
           </Empty>
         ) : (
           <div>
@@ -164,7 +254,9 @@ export function Proxies() {
               "whichever node happens to be first".
             */}
             <button
-              onClick={() => void selectNode(null)}
+              onClick={() => {
+                if (!autoSelected) void selectNode(null)
+              }}
               title="按延迟自动挑选，每 5 分钟重新测速"
               className={
                 autoSelected
@@ -186,56 +278,64 @@ export function Proxies() {
               <div className="text-muted">—</div>
               <div className="text-right text-muted tabular">—</div>
             </button>
-            {visible.map((node) => {
-              const isSelected = node.id === selectedNodeId
-              const starred = favorites.includes(node.id)
-              return (
-              <div
-                key={node.id}
-                onClick={() => selectNode(node.id)}
-                title="点击切换到此节点"
-                className={
-                  isSelected
-                    ? 'grid cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line bg-accent-soft px-5 py-3 text-[13px]'
-                    : 'grid cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line px-5 py-3 text-[13px] last:border-b-0 hover:bg-panel-hover'
-                }
-              >
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className={isSelected ? 'text-accent' : 'text-transparent'}>
-                    <Check size={14} strokeWidth={2.6} />
-                  </span>
-                  <button
-                    onClick={(event) => {
-                      // Starring must not also switch the node — the click is
-                      // inside the row that does exactly that.
-                      event.stopPropagation()
-                      void toggleFavorite(node.id)
+            <VirtualList
+              items={visible}
+              rowHeight={46}
+              maxHeightClass="max-h-[calc(100vh-300px)]"
+              renderRow={(node) => {
+                const isSelected = node.id === selectedNodeId
+                const starred = favoriteSet.has(node.id)
+                return (
+                  <div
+                    key={node.id}
+                    onClick={() => {
+                      if (window.getSelection()?.toString()) return
+                      if (!isSelected) void selectNode(node.id)
                     }}
-                    title={starred ? '取消收藏' : '收藏'}
-                    className={starred ? 'shrink-0 text-accent' : 'shrink-0 text-faint hover:text-accent'}
+                    title={isSelected ? '当前已选中此节点' : '点击切换到此节点'}
+                    className={
+                      isSelected
+                        ? 'grid h-[46px] cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line bg-accent-soft px-5 text-[13px]'
+                        : 'grid h-[46px] cursor-pointer grid-cols-[1fr_88px_1fr_92px_76px] items-center gap-4 border-b border-line px-5 text-[13px] last:border-b-0 hover:bg-panel-hover'
+                    }
                   >
-                    <Star size={14} strokeWidth={2.2} fill={starred ? 'currentColor' : 'none'} />
-                  </button>
-                  <span className="truncate text-fg">{node.name}</span>
-                </div>
-                <div>
-                  <Badge>{PROTOCOL_LABEL[node.protocol]}</Badge>
-                </div>
-                <div className="truncate text-muted tabular">
-                  {node.server}:{node.port}
-                </div>
-                <div className="text-muted">
-                  {node.transport}
-                  {node.security !== '-' && (
-                    <span className="ml-1 text-faint">/{node.security}</span>
-                  )}
-                </div>
-                <div className="text-right tabular">
-                  <LatencyCell sample={latency[node.id]} />
-                </div>
-              </div>
-              )
-            })}
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className={isSelected ? 'text-accent' : 'text-transparent'}>
+                        <Check size={14} strokeWidth={2.6} />
+                      </span>
+                      <button
+                        onClick={(event) => {
+                          // Starring must not also switch the node — the click is
+                          // inside the row that does exactly that.
+                          event.stopPropagation()
+                          void toggleFavorite(node.id)
+                        }}
+                        title={starred ? '取消收藏' : '收藏'}
+                        className={starred ? 'shrink-0 text-accent' : 'shrink-0 text-faint hover:text-accent'}
+                      >
+                        <Star size={14} strokeWidth={2.2} fill={starred ? 'currentColor' : 'none'} />
+                      </button>
+                      <span className="truncate text-fg">{node.name}</span>
+                    </div>
+                    <div>
+                      <Badge>{PROTOCOL_LABEL[node.protocol]}</Badge>
+                    </div>
+                    <div className="truncate select-text text-muted tabular">
+                      {node.server}:{node.port}
+                    </div>
+                    <div className="text-muted">
+                      {node.transport}
+                      {node.security !== '-' && (
+                        <span className="ml-1 text-faint">/{node.security}</span>
+                      )}
+                    </div>
+                    <div className="text-right tabular">
+                      <LatencyCell sample={latency[node.id]} />
+                    </div>
+                  </div>
+                )
+              }}
+            />
           </div>
         )}
       </Card>

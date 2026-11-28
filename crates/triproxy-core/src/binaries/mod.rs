@@ -45,6 +45,8 @@ const USER_AGENT: &str = concat!(
 /// will start failing with 403 halfway through. `GITHUB_TOKEN` is picked up
 /// automatically so the workflow does not need extra wiring.
 pub const TOKEN_ENV_VARS: [&str; 2] = ["TRIPROXY_GITHUB_TOKEN", "GITHUB_TOKEN"];
+/// How long a resolved [`BinaryStatus`] stays valid before re-checking disk and `$PATH`.
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(30);
 /// Abort a download when the transfer makes no progress for this long.
 const STALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// Minimum average throughput once the grace period is over.
@@ -181,6 +183,8 @@ pub struct BinaryManager {
     /// Applied to `api.github.com` only — never to asset downloads, which may be
     /// routed through a third-party mirror.
     token: Option<String>,
+    status_cache:
+        std::sync::RwLock<std::collections::HashMap<CoreKind, (std::time::Instant, BinaryStatus)>>,
 }
 
 impl BinaryManager {
@@ -205,6 +209,7 @@ impl BinaryManager {
             client,
             mirror,
             token,
+            status_cache: std::sync::RwLock::new(std::collections::HashMap::new()),
         })
     }
 
@@ -256,16 +261,37 @@ impl BinaryManager {
         serde_json::from_str(&text).ok()
     }
 
+    pub fn invalidate_cache(&self, kind: Option<CoreKind>) {
+        let mut cache = self.status_cache.write().unwrap_or_else(|e| e.into_inner());
+        match kind {
+            Some(kind) => {
+                cache.remove(&kind);
+            }
+            None => cache.clear(),
+        }
+    }
+
     pub fn status(&self, kind: CoreKind) -> BinaryStatus {
+        {
+            let cache = self.status_cache.read().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, status)) = cache.get(&kind) {
+                if at.elapsed() < STATUS_CACHE_TTL {
+                    return status.clone();
+                }
+            }
+        }
         let resolved = self.resolve(kind);
         let record = self.read_record(kind);
-        BinaryStatus {
+        let status = BinaryStatus {
             core: kind,
             path: resolved.as_ref().map(|(path, _)| path.clone()),
             source: resolved.map(|(_, source)| source),
             version: record.as_ref().map(|r| r.version.clone()),
             tag: record.map(|r| r.tag),
-        }
+        };
+        let mut cache = self.status_cache.write().unwrap_or_else(|e| e.into_inner());
+        cache.insert(kind, (std::time::Instant::now(), status.clone()));
+        status
     }
 
     /// Download, verify and install a core binary.
@@ -454,6 +480,7 @@ impl BinaryManager {
         let record_path = self.layout.install_record(kind.exe_stem());
         let text = serde_json::to_string_pretty(&record)?;
         crate::paths::write_atomic(&record_path, text)?;
+        self.invalidate_cache(Some(kind));
 
         Ok(InstalledBinary {
             core: kind,
@@ -894,5 +921,48 @@ SHA512 = 0123456789abcdef
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn status_cache_is_reused_and_invalidated() {
+        let root = std::env::temp_dir().join(format!("triproxy-bin-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layout = Layout::new(root.clone());
+        layout.ensure().unwrap();
+        let manager = BinaryManager::new(layout.clone()).unwrap();
+
+        let record_path = layout.install_record(CoreKind::Mihomo.exe_stem());
+        let write_ver = |version: &str| {
+            let record = InstallRecord {
+                core: "mihomo".to_string(),
+                tag: format!("v{version}"),
+                version: version.to_string(),
+                asset: "mihomo.gz".to_string(),
+                sha256: "00".to_string(),
+                bytes: 1,
+                installed_at_ms: 0,
+            };
+            std::fs::write(&record_path, serde_json::to_string(&record).unwrap()).unwrap();
+        };
+
+        write_ver("1.0.0");
+        assert_eq!(
+            manager.status(CoreKind::Mihomo).version.as_deref(),
+            Some("1.0.0")
+        );
+
+        // Overwrite record on disk: cached value should remain until invalidated.
+        write_ver("1.1.0");
+        assert_eq!(
+            manager.status(CoreKind::Mihomo).version.as_deref(),
+            Some("1.0.0")
+        );
+
+        manager.invalidate_cache(Some(CoreKind::Mihomo));
+        assert_eq!(
+            manager.status(CoreKind::Mihomo).version.as_deref(),
+            Some("1.1.0")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -13,6 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
+import { Copy, RotateCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
@@ -36,7 +37,12 @@ const THEMES = [
 
 export function Settings() {
   const settings = useApp((state) => state.settings)
-  const status = useApp((state) => state.status)
+  const dataDir = useApp((state) => state.status?.data_dir ?? null)
+  const connected = useApp((state) => state.status?.active_core !== null)
+  const needsCoreRestart = useApp((state) => state.needsCoreRestart)
+  const applySettingsRestart = useApp((state) => state.applySettingsRestart)
+  const busy = useApp((state) => state.busy)
+  const busyAction = useApp((state) => state.busyAction)
   const proxy = useApp((state) => state.proxy)
   const setSystemProxy = useApp((state) => state.setSystemProxy)
   const autostart = useApp((state) => state.autostart)
@@ -78,6 +84,9 @@ export function Settings() {
     if (Number.isInteger(port) && port >= 1 && port <= 65535) {
       if (port !== settings.listen_port) {
         await update({ listen_port: port })
+        useApp.setState({
+          notice: connected ? '监听端口已保存，重启核心后生效' : '监听端口已保存',
+        })
       }
     } else {
       setListenPortDraft(String(settings.listen_port))
@@ -90,6 +99,9 @@ export function Settings() {
     if (Number.isInteger(port) && port >= 1 && port <= 65535) {
       if (port !== settings.api_port) {
         await update({ api_port: port })
+        useApp.setState({
+          notice: connected ? '控制器端口已保存，重启核心后生效' : '控制器端口已保存',
+        })
       }
     } else {
       setApiPortDraft(String(settings.api_port))
@@ -101,29 +113,50 @@ export function Settings() {
     const next = proxyBypassDraft.trim() === '' ? null : proxyBypassDraft
     if (next !== settings.proxy_bypass) {
       await update({ proxy_bypass: next })
+      useApp.setState({ notice: '代理绕过列表已保存' })
     }
   }
 
   async function commitRules() {
     setRulesError(null)
+    const normalized = rulesText.trim() === '' ? null : rulesText
+    if (normalized === (settings?.custom_rules ?? null)) return
     try {
       await api.validateRules(rulesText)
     } catch (error) {
       setRulesError(String(error))
       return
     }
-    await update({ custom_rules: rulesText.trim() === '' ? null : rulesText })
+    await update({ custom_rules: normalized })
+    useApp.setState({
+      notice: connected ? '自定义规则已保存，重启核心后生效' : '自定义规则已保存',
+    })
   }
 
   async function commitRuleSets() {
     setRuleSetsError(null)
+    const normalized = ruleSetsText.trim() === '' ? null : ruleSetsText
+    if (normalized === (settings?.rule_sets ?? null)) return
     try {
       await api.validateRuleSets(ruleSetsText)
     } catch (error) {
       setRuleSetsError(String(error))
       return
     }
-    await update({ rule_sets: ruleSetsText.trim() === '' ? null : ruleSetsText })
+    await update({ rule_sets: normalized })
+    useApp.setState({
+      notice: connected ? '规则集订阅已保存，重启核心后生效' : '规则集订阅已保存',
+    })
+  }
+
+  async function copyDataDir() {
+    if (!dataDir) return
+    try {
+      await navigator.clipboard.writeText(dataDir)
+      useApp.setState({ notice: '已复制数据目录路径' })
+    } catch {
+      useApp.setState({ error: '无法访问剪贴板' })
+    }
   }
 
   async function exportBackup() {
@@ -160,7 +193,28 @@ export function Settings() {
 
   return (
     <div className="max-w-[720px]">
-      <PageHeader title="设置" description="所有设置立即生效并保存在本地" />
+      <PageHeader
+        title="设置"
+        description="设置自动保存在本地；网络与规则改动在重启核心后生效"
+      />
+
+      {connected && needsCoreRestart && (
+        <div className="mb-4 flex items-center justify-between gap-4 rounded-xl border border-accent/30 bg-accent-soft px-4 py-2.5 text-[13px]">
+          <span className="text-fg">当前有未生效的核心配置更改</span>
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() => void applySettingsRestart()}
+            className="px-3 py-1.5 text-[12.5px]"
+          >
+            <RotateCw
+              size={13}
+              className={busyAction?.startsWith('switch:') ? 'animate-spin' : ''}
+            />
+            {busyAction?.startsWith('switch:') ? '重启中…' : '立即重启核心'}
+          </Button>
+        </div>
+      )}
 
       <Card className="mb-4">
         <SectionTitle title="通用" />
@@ -414,18 +468,23 @@ export function Settings() {
           </Select>
         </SettingRow>
         <SettingRow title="数据目录" hint="配置、核心二进制与日志都存放在这里">
-          <span className="max-w-[380px] truncate text-[12.5px] text-muted tabular">
-            {status?.data_dir ?? '—'}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="max-w-[340px] truncate select-text text-[12.5px] text-muted tabular">
+              {dataDir ?? '—'}
+            </span>
+            {dataDir && (
+              <button
+                type="button"
+                onClick={() => void copyDataDir()}
+                title="复制数据目录路径"
+                className="text-faint hover:text-fg"
+              >
+                <Copy size={13} />
+              </button>
+            )}
+          </div>
         </SettingRow>
-        <SettingRow
-          title="应用内存"
-          hint="Rust 侧进程的常驻内存；WebView 的渲染进程另算，任务管理器里能看到"
-        >
-          <span className="text-[12.5px] text-muted tabular">
-            {formatMemory(status?.process_memory_bytes)}
-          </span>
-        </SettingRow>
+        <ProcessMemoryRow />
         <SettingRow
           title="配置备份"
           hint="导出设置与全部配置到一个 JSON；导入时合并，不会删掉已有的配置"
@@ -439,6 +498,18 @@ export function Settings() {
 
       <AppUpdate />
     </div>
+  )
+}
+
+function ProcessMemoryRow() {
+  const bytes = useApp((state) => state.status?.process_memory_bytes)
+  return (
+    <SettingRow
+      title="应用内存"
+      hint="Rust 侧进程的常驻内存；WebView 的渲染进程另算，任务管理器里能看到"
+    >
+      <span className="text-[12.5px] text-muted tabular">{formatMemory(bytes)}</span>
+    </SettingRow>
   )
 }
 

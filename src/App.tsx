@@ -15,7 +15,7 @@
 
 import { listen } from '@tauri-apps/api/event'
 import { X } from 'lucide-react'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 
 import { Sidebar } from './components/Sidebar'
 import { Connections } from './pages/Connections'
@@ -25,19 +25,33 @@ import { Profiles } from './pages/Profiles'
 import { Proxies } from './pages/Proxies'
 import { Settings } from './pages/Settings'
 import { isTauri } from './services/api'
-import { useApp } from './store/app'
+import { useApp, type Page } from './store/app'
+import type { LatencySample, TrafficSample } from './types'
+
+const SHORTCUT_PAGES: Page[] = [
+  'dashboard',
+  'proxies',
+  'connections',
+  'profiles',
+  'logs',
+  'settings',
+]
 
 export function App() {
   const page = useApp((state) => state.page)
+  const setPage = useApp((state) => state.setPage)
   const settings = useApp((state) => state.settings)
   const error = useApp((state) => state.error)
   const clearError = useApp((state) => state.clearError)
   const notice = useApp((state) => state.notice)
   const clearNotice = useApp((state) => state.clearNotice)
+  const [noticePaused, setNoticePaused] = useState(false)
   const refresh = useApp((state) => state.refresh)
   const refreshLive = useApp((state) => state.refreshLive)
   const refreshLibrary = useApp((state) => state.refreshLibrary)
   const loadSettings = useApp((state) => state.loadSettings)
+  const pushTraffic = useApp((state) => state.pushTraffic)
+  const mergeLatencySamples = useApp((state) => state.mergeLatencySamples)
 
   // Theme: an explicit class on <html> so both Tailwind and the CSS variables
   // switch together, with "system" tracked live rather than resolved once.
@@ -87,7 +101,7 @@ export function App() {
     }
   }, [loadSettings, refresh, refreshLive])
 
-  // Tray actions and background subscriptions report via Tauri events.
+  // Tray actions, traffic stream, and background jobs report via Tauri events.
   useEffect(() => {
     if (!isTauri) return undefined
     const pendingNotice = listen<string>('triproxy-notice', (event) => {
@@ -96,11 +110,67 @@ export function App() {
     const pendingProfiles = listen('triproxy-profiles-changed', () => {
       void refreshLibrary()
     })
+    const pendingStatus = listen('triproxy-status-changed', () => {
+      void refreshLive()
+    })
+    const pendingTraffic = listen<TrafficSample>('triproxy-traffic', (event) => {
+      pushTraffic(event.payload)
+    })
+
+    let sampleQueue: LatencySample[] = []
+    let flushTimer: number | undefined
+    const flushSamples = () => {
+      flushTimer = undefined
+      if (sampleQueue.length === 0) return
+      const batch = sampleQueue
+      sampleQueue = []
+      mergeLatencySamples(batch)
+    }
+    const pendingLatency = listen<LatencySample>('triproxy-latency-sample', (event) => {
+      sampleQueue.push(event.payload)
+      if (flushTimer === undefined) {
+        flushTimer = window.setTimeout(flushSamples, 80)
+      }
+    })
+
     return () => {
+      if (flushTimer !== undefined) {
+        window.clearTimeout(flushTimer)
+      }
       void pendingNotice.then((off) => off())
       void pendingProfiles.then((off) => off())
+      void pendingStatus.then((off) => off())
+      void pendingTraffic.then((off) => off())
+      void pendingLatency.then((off) => off())
     }
-  }, [refreshLibrary])
+  }, [refreshLibrary, refreshLive, pushTraffic, mergeLatencySamples])
+
+  useEffect(() => {
+    if (!notice || noticePaused) return undefined
+    const timer = window.setTimeout(() => clearNotice(), 3500)
+    return () => window.clearTimeout(timer)
+  }, [notice, noticePaused, clearNotice])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey) {
+        const index = Number(event.key) - 1
+        if (Number.isInteger(index) && index >= 0 && index < SHORTCUT_PAGES.length) {
+          event.preventDefault()
+          setPage(SHORTCUT_PAGES[index])
+          return
+        }
+      }
+      if (event.key === 'Escape') {
+        const active = document.activeElement
+        if (active && active.matches('input, textarea, select')) return
+        if (notice) clearNotice()
+        if (error) clearError()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [setPage, notice, error, clearNotice, clearError])
 
   /**
    * Suppress the WebView's page context menu.
@@ -155,7 +225,11 @@ export function App() {
       {(notice || error) && (
         <div className="fixed right-5 bottom-5 z-50 flex flex-col items-end gap-2">
           {notice && (
-            <div className="flex max-w-[420px] items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 shadow-lg">
+            <div
+              onMouseEnter={() => setNoticePaused(true)}
+              onMouseLeave={() => setNoticePaused(false)}
+              className="flex max-w-[420px] items-start gap-3 rounded-xl border border-line bg-panel px-4 py-3 shadow-lg"
+            >
               <p className="text-[12.5px] leading-relaxed text-muted">{notice}</p>
               <button
                 onClick={clearNotice}
