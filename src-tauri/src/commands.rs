@@ -79,8 +79,8 @@ fn check_tun(settings: &AppSettings) -> CmdResult<()> {
 ///
 /// One line, because a tray menu is read at a glance: which core, and whether it
 /// is following the automatic group or a node the user picked.
-fn tray_status_node(state: &AppState) -> String {
-    let store = ProfileStore::new(state.manager.layout());
+fn tray_status_node(layout: &triproxy_core::Layout) -> String {
+    let store = ProfileStore::new(layout);
     match store.active() {
         Ok(Some((record, profile))) => match record.selected_node {
             Some(id) => profile
@@ -100,7 +100,10 @@ pub(crate) async fn sync_tray(app: &tauri::AppHandle) {
     use tauri::Manager;
 
     let state = app.state::<AppState>();
-    let node = tray_status_node(&state);
+    let layout = state.manager.layout().clone();
+    let node = blocking(move || Ok(tray_status_node(&layout)))
+        .await
+        .unwrap_or_else(|_| "无配置".to_string());
     let label = match state.manager.persisted_active().await {
         Some(kind) => format!("{} · {node}", kind.display_name()),
         None => "未运行".to_string(),
@@ -223,6 +226,40 @@ fn summarise(node: &Node) -> NodeSummary {
         security,
         udp: node.udp,
     }
+}
+
+#[derive(Serialize)]
+pub struct LibrarySnapshot {
+    library: ProfileLibrary,
+    nodes: Vec<NodeSummary>,
+    selection: Option<Selection>,
+}
+
+#[tauri::command]
+pub async fn library_snapshot(state: State<'_, AppState>) -> CmdResult<LibrarySnapshot> {
+    let layout = state.manager.layout().clone();
+    let settings = state.cached_settings();
+    blocking(move || {
+        let store = ProfileStore::new(&layout);
+        let active = store.active_id().map_err(err)?;
+        let profiles = store.list().map_err(err)?;
+        let active_profile = store.active().map_err(err)?;
+        let (nodes, selection) = match active_profile {
+            Some((_, profile)) => {
+                let nodes = profile.nodes.iter().map(summarise).collect();
+                let selector = Selector::with_preference(settings.preference());
+                let selection = selector.select(&profile, settings.network()).ok();
+                (nodes, selection)
+            }
+            None => (Vec::new(), None),
+        };
+        Ok(LibrarySnapshot {
+            library: ProfileLibrary { active, profiles },
+            nodes,
+            selection,
+        })
+    })
+    .await
 }
 
 #[tauri::command]
@@ -364,13 +401,13 @@ pub async fn delete_profile(state: State<'_, AppState>, id: String) -> CmdResult
 
 #[tauri::command]
 pub async fn settings(state: State<'_, AppState>) -> CmdResult<AppSettings> {
-    let layout = state.manager.layout().clone();
-    blocking(move || Ok(AppSettings::load(&layout))).await
+    Ok(state.cached_settings())
 }
 
 #[tauri::command]
 pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> CmdResult<()> {
     let layout = state.manager.layout().clone();
+    let saved = settings.clone();
     blocking(move || {
         // Validate before writing: the compiler silently drops unparsable rules so
         // that one typo cannot take the connection down, which means a bad line would
@@ -383,7 +420,9 @@ pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) ->
         }
         settings.save(&layout).map_err(err)
     })
-    .await
+    .await?;
+    state.set_cached_settings(saved);
+    Ok(())
 }
 
 /// Check rule text without saving it, so the editor can complain in place.
@@ -461,45 +500,51 @@ pub async fn import_backup(
     let path = path.into_path().map_err(err)?;
 
     let layout = state.manager.layout().clone();
-    blocking(move || {
+    let (count, loaded_settings) = blocking(move || {
         let text = std::fs::read_to_string(&path).map_err(err)?;
         let backup = crate::backup::Backup::parse(&text)?;
         let store = ProfileStore::new(&layout);
         let count = backup.restore(&store, &layout)?;
-        Ok(Some(count))
+        Ok((count, AppSettings::load(&layout)))
     })
-    .await
+    .await?;
+    state.set_cached_settings(loaded_settings);
+    Ok(Some(count))
 }
 
 /// What the selector currently thinks about the active profile.
 #[tauri::command]
 pub async fn preview_selection(state: State<'_, AppState>) -> CmdResult<Option<Selection>> {
     let layout = state.manager.layout().clone();
+    let settings = state.cached_settings();
     blocking(move || {
         let store = ProfileStore::new(&layout);
         let Some((_, profile)) = store.active().map_err(err)? else {
             return Ok(None);
         };
-        let settings = AppSettings::load(&layout);
         let selector = Selector::with_preference(settings.preference());
         Ok(selector.select(&profile, settings.network()).ok())
     })
     .await
 }
 
-/// Compile the active profile for one core, honouring the saved settings.
-fn compile_active(
-    state: &AppState,
+enum StartPlan {
+    Compiled(CoreKind, CompiledConfig),
+    Bootstrap,
+}
+
+fn compile_with_settings(
+    layout: &triproxy_core::Layout,
+    settings: &AppSettings,
     target: Option<CoreKind>,
+    api_secret: &str,
 ) -> Result<(CoreKind, CompiledConfig), String> {
-    let layout = state.manager.layout();
     let store = ProfileStore::new(layout);
     let (stored, profile) = store
         .active()
         .map_err(err)?
         .ok_or_else(|| "还没有活动配置，请先在「配置」页导入并设为活动".to_string())?;
 
-    let settings = AppSettings::load(layout);
     let selector = Selector::with_preference(match target {
         Some(core) => CorePreference::Fixed(core),
         None => settings.preference(),
@@ -507,7 +552,7 @@ fn compile_active(
 
     let selection = selector.select(&profile, settings.network()).map_err(err)?;
     let mut options = settings.compile_options(settings.listen_port, settings.api_port);
-    options.api_secret = Some(state.manager.ensure_api_secret());
+    options.api_secret = Some(api_secret.to_string());
     options.rule_set_mirror = std::env::var(triproxy_core::binaries::MIRROR_ENV).ok();
     // The node the user picked has to survive a restart, and the only way it does
     // is by going into the config: the runtime switch through the controller is
@@ -517,62 +562,87 @@ fn compile_active(
     Ok((selection.selected, compiled))
 }
 
+fn prepare_start_plan(
+    layout: &triproxy_core::Layout,
+    settings: &AppSettings,
+    target: Option<CoreKind>,
+    api_secret: &str,
+) -> Result<StartPlan, String> {
+    let store = ProfileStore::new(layout);
+    let Some((stored, profile)) = store.active().map_err(err)? else {
+        return Ok(StartPlan::Bootstrap);
+    };
+
+    let selector = Selector::with_preference(match target {
+        Some(core) => CorePreference::Fixed(core),
+        None => settings.preference(),
+    });
+
+    let selection = selector.select(&profile, settings.network()).map_err(err)?;
+    let mut options = settings.compile_options(settings.listen_port, settings.api_port);
+    options.api_secret = Some(api_secret.to_string());
+    options.rule_set_mirror = std::env::var(triproxy_core::binaries::MIRROR_ENV).ok();
+    options.selected_node = stored.selected_node.clone();
+    let compiled = compile(selection.selected, &profile, &options).map_err(err)?;
+    Ok(StartPlan::Compiled(selection.selected, compiled))
+}
+
 #[tauri::command]
 pub async fn start_core(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     core: Option<CoreKind>,
 ) -> CmdResult<ManagerStatus> {
-    // Without an active profile there is nothing to compile, so fall back to the
-    // bootstrap config — the same precedence the CLI uses.
-    let has_profile = ProfileStore::new(state.manager.layout())
-        .active()
-        .map_err(err)?
-        .is_some();
+    let settings = state.cached_settings();
+    let check_settings = settings.clone();
+    blocking(move || check_tun(&check_settings)).await?;
 
-    let settings = AppSettings::load(state.manager.layout());
-    check_tun(&settings)?;
+    let layout = state.manager.layout().clone();
+    let api_secret = state.manager.ensure_api_secret();
+    let plan_settings = settings.clone();
+    let plan =
+        blocking(move || prepare_start_plan(&layout, &plan_settings, core, &api_secret)).await?;
 
-    if has_profile {
-        let (kind, compiled) = compile_active(&state, core)?;
-        state
-            .manager
-            .start_with_config(kind, &compiled.text, compiled.file_name)
-            .await
-            .map_err(err)?;
-    } else {
-        let kind = match core {
-            Some(kind) => kind,
-            None => state
+    match plan {
+        StartPlan::Compiled(kind, compiled) => {
+            state
                 .manager
-                .persisted_active()
+                .start_with_config(kind, &compiled.text, compiled.file_name)
                 .await
-                .ok_or_else(|| "还没有活动配置，请先导入配置".to_string())?,
-        };
-        state.manager.start(kind).await.map_err(err)?;
-    }
-
-    let settings = AppSettings::load(state.manager.layout());
-    if !settings.tun && settings.system_proxy {
-        // A failure here must not undo a successful start; surface it instead.
-        if let Err(error) = enable_system_proxy(&state) {
-            tracing::warn!(%error, "could not enable the system proxy");
+                .map_err(err)?;
+        }
+        StartPlan::Bootstrap => {
+            let kind = match core {
+                Some(kind) => kind,
+                None => state
+                    .manager
+                    .persisted_active()
+                    .await
+                    .ok_or_else(|| "还没有活动配置，请先导入配置".to_string())?,
+            };
+            state.manager.start(kind).await.map_err(err)?;
         }
     }
 
+    if !settings.tun && settings.system_proxy {
+        if let Some(port) = state.manager.persisted_http_proxy_port() {
+            let layout = state.manager.layout().clone();
+            match blocking(move || {
+                SystemProxyManager::new(&layout)
+                    .enable(&format!("127.0.0.1:{port}"))
+                    .map_err(err)
+            })
+            .await
+            {
+                Ok(applied) => state.set_cached_system_proxy(Some(applied)),
+                Err(error) => tracing::warn!(%error, "could not enable the system proxy"),
+            }
+        }
+    }
+
+    state.notify_traffic();
     sync_tray(&app).await;
     Ok(state.manager.status().await)
-}
-
-fn enable_system_proxy(state: &AppState) -> Result<(), String> {
-    let port = state
-        .manager
-        .persisted_http_proxy_port()
-        .ok_or_else(|| "no core is running".to_string())?;
-    SystemProxyManager::new(state.manager.layout())
-        .enable(&format!("127.0.0.1:{port}"))
-        .map(|_| ())
-        .map_err(err)
 }
 
 #[tauri::command]
@@ -587,6 +657,11 @@ pub async fn stop_core(app: tauri::AppHandle, state: State<'_, AppState>) -> Cmd
             .map_err(err)
     })
     .await?;
+    state.set_cached_system_proxy(None);
+    if let Ok(mut guard) = state.latest_traffic.write() {
+        *guard = None;
+    }
+    state.notify_traffic();
     sync_tray(&app).await;
     Ok(())
 }
@@ -603,25 +678,50 @@ pub async fn switch_core(
         Some(target.parse::<CoreKind>().map_err(err)?)
     };
 
-    let settings = AppSettings::load(state.manager.layout());
-    check_tun(&settings)?;
+    let settings = state.cached_settings();
+    let check_settings = settings.clone();
+    blocking(move || check_tun(&check_settings)).await?;
 
-    let (kind, compiled) = compile_active(&state, requested)?;
+    let layout = state.manager.layout().clone();
+    let api_secret = state.manager.ensure_api_secret();
+    let compile_settings = settings.clone();
+    let (kind, compiled) =
+        blocking(move || compile_with_settings(&layout, &compile_settings, requested, &api_secret))
+            .await?;
+
     state
         .manager
         .switch_with_config(kind, &compiled.text, compiled.file_name)
         .await
         .map_err(err)?;
 
-    let settings = AppSettings::load(state.manager.layout());
     if settings.tun {
-        let _ = SystemProxyManager::new(state.manager.layout()).disable();
+        let layout = state.manager.layout().clone();
+        if blocking(move || SystemProxyManager::new(&layout).disable().map_err(err))
+            .await
+            .is_ok()
+        {
+            state.set_cached_system_proxy(None);
+        }
     } else if settings.system_proxy {
-        if let Err(error) = enable_system_proxy(&state) {
-            tracing::warn!(%error, "could not enable the system proxy after switch");
+        if let Some(port) = state.manager.persisted_http_proxy_port() {
+            let layout = state.manager.layout().clone();
+            match blocking(move || {
+                SystemProxyManager::new(&layout)
+                    .enable(&format!("127.0.0.1:{port}"))
+                    .map_err(err)
+            })
+            .await
+            {
+                Ok(applied) => state.set_cached_system_proxy(Some(applied)),
+                Err(error) => {
+                    tracing::warn!(%error, "could not enable the system proxy after switch")
+                }
+            }
         }
     }
 
+    state.notify_traffic();
     sync_tray(&app).await;
     Ok(state.manager.status().await)
 }
@@ -697,11 +797,16 @@ pub async fn select_node(
 
 #[tauri::command]
 pub async fn test_proxy_delay(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     timeout_secs: u64,
 ) -> CmdResult<Vec<triproxy_core::LatencySample>> {
-    let store = ProfileStore::new(state.manager.layout());
-    let Some((_, profile)) = store.active().map_err(err)? else {
+    use tauri::Emitter;
+
+    let layout = state.manager.layout().clone();
+    let Some((_, profile)) =
+        blocking(move || ProfileStore::new(&layout).active().map_err(err)).await?
+    else {
         return Ok(Vec::new());
     };
 
@@ -710,11 +815,15 @@ pub async fn test_proxy_delay(
         format!("真实延迟需要运行中的 Mihomo 或 sing-box（Xray 没有控制器 API）：{error}")
     })?;
 
-    Ok(triproxy_core::measure_proxy_delay(
+    Ok(triproxy_core::measure_proxy_delay_streaming(
         &client,
         &profile.nodes,
         triproxy_core::DEFAULT_PROBE_URL,
         timeout_secs.max(1) * 1000,
+        12,
+        move |sample| {
+            let _ = app.emit(crate::LATENCY_SAMPLE_EVENT, sample);
+        },
     )
     .await)
 }
@@ -757,8 +866,10 @@ pub async fn active_delay(state: State<'_, AppState>) -> CmdResult<triproxy_core
 pub async fn traffic(
     state: State<'_, AppState>,
 ) -> CmdResult<Option<triproxy_core::TrafficSample>> {
-    if let Some(sample) = *state.latest_traffic.read().await {
-        return Ok(Some(sample));
+    if let Ok(guard) = state.latest_traffic.read() {
+        if let Some(sample) = *guard {
+            return Ok(Some(sample));
+        }
     }
     if !state
         .manager
@@ -791,24 +902,41 @@ pub async fn close_connection(state: State<'_, AppState>, id: Option<String>) ->
 
 #[tauri::command]
 pub async fn test_latency(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     timeout_secs: u64,
 ) -> CmdResult<Vec<triproxy_core::LatencySample>> {
-    let store = ProfileStore::new(state.manager.layout());
-    let Some((_, profile)) = store.active().map_err(err)? else {
+    use tauri::Emitter;
+
+    let layout = state.manager.layout().clone();
+    let Some((_, profile)) =
+        blocking(move || ProfileStore::new(&layout).active().map_err(err)).await?
+    else {
         return Ok(Vec::new());
     };
-    Ok(triproxy_core::measure_nodes(
+    Ok(triproxy_core::measure_nodes_streaming(
         &profile.nodes,
         std::time::Duration::from_secs(timeout_secs.max(1)),
+        16,
+        move |sample| {
+            let _ = app.emit(crate::LATENCY_SAMPLE_EVENT, sample);
+        },
     )
     .await)
 }
 
 #[tauri::command]
-pub async fn recent_logs(state: State<'_, AppState>, limit: usize) -> CmdResult<Vec<LogEntryView>> {
+pub async fn recent_logs(
+    state: State<'_, AppState>,
+    limit: usize,
+    after_seq: Option<u64>,
+) -> CmdResult<Vec<LogEntryView>> {
     let logs = state.manager.logs();
-    Ok(logs.tail(limit).into_iter().map(to_view).collect())
+    Ok(logs
+        .tail_after(after_seq, limit)
+        .into_iter()
+        .map(to_view)
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -830,8 +958,7 @@ pub async fn tun_status() -> CmdResult<TunStatus> {
 
 #[tauri::command]
 pub async fn system_proxy_status(state: State<'_, AppState>) -> CmdResult<Option<AppliedProxy>> {
-    let layout = state.manager.layout().clone();
-    blocking(move || Ok(SystemProxyManager::new(&layout).status())).await
+    Ok(state.cached_system_proxy())
 }
 
 #[tauri::command]
@@ -841,7 +968,7 @@ pub async fn set_system_proxy(
 ) -> CmdResult<Option<AppliedProxy>> {
     let layout = state.manager.layout().clone();
     let http_port = state.manager.persisted_http_proxy_port();
-    blocking(move || {
+    let applied = blocking(move || {
         let proxy = SystemProxyManager::new(&layout);
         if !enabled {
             proxy.disable().map_err(err)?;
@@ -852,5 +979,7 @@ pub async fn set_system_proxy(
         let applied = proxy.enable(&format!("127.0.0.1:{port}")).map_err(err)?;
         Ok(Some(applied))
     })
-    .await
+    .await?;
+    state.set_cached_system_proxy(applied.clone());
+    Ok(applied)
 }

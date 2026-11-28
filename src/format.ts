@@ -28,3 +28,40 @@ export function formatMemory(bytes: number | null | undefined): string {
   if (mb >= 100) return `${Math.round(mb)} MB`
   return `${mb.toFixed(1)} MB`
 }
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(1)} ${units[unit]}`
+}
+
+export function formatRate(bytesPerSecond: number): string {
+  return `${formatBytes(bytesPerSecond)}/s`
+}
+
+export function formatUptime(seconds: number | null | undefined): string {
+  if (!seconds) return '—'
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (h > 0) return `${h} 小时 ${m} 分`
+  if (m > 0) return `${m} 分钟`
+  return `${seconds} 秒`
+}
+
+export function formatRelativeTime(tsMs: number): string {
+  if (!tsMs) return '尚未更新'
+  const diffSecs = Math.max(0, Math.floor((Date.now() - tsMs) / 1000))
+  if (diffSecs < 60) return '刚刚'
+  const mins = Math.floor(diffSecs / 60)
+  if (mins < 60) return `${mins} 分钟前`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours} 小时前`
+  const days = Math.floor(hours / 24)
+  return `${days} 天前`
+}

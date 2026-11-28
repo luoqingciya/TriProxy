@@ -136,6 +136,7 @@ pub fn show_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        app.state::<AppState>().set_window_visible(true);
     }
 }
 
@@ -149,10 +150,12 @@ fn toggle_window(app: &AppHandle) {
     let in_front = window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false);
     if in_front {
         let _ = window.hide();
+        app.state::<AppState>().set_window_visible(false);
     } else {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        app.state::<AppState>().set_window_visible(true);
     }
 }
 

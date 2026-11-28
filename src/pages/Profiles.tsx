@@ -14,15 +14,17 @@
  */
 
 import { Check, Plus, RefreshCw, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
 import { Badge, Button, Card, Empty } from '../components/ui'
+import { formatRelativeTime } from '../format'
 import { useApp } from '../store/app'
 
 export function Profiles() {
   const library = useApp((state) => state.library)
   const busy = useApp((state) => state.busy)
+  const busyAction = useApp((state) => state.busyAction)
   const importProfile = useApp((state) => state.importProfile)
   const useProfile = useApp((state) => state.useProfile)
   const removeProfile = useApp((state) => state.removeProfile)
@@ -31,6 +33,20 @@ export function Profiles() {
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
   const [text, setText] = useState('')
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const nameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (adding) {
+      nameInputRef.current?.focus()
+    }
+  }, [adding])
+
+  useEffect(() => {
+    if (!confirmDeleteId) return undefined
+    const timer = window.setTimeout(() => setConfirmDeleteId(null), 3000)
+    return () => window.clearTimeout(timer)
+  }, [confirmDeleteId])
 
   const submit = async () => {
     const trimmed = text.trim()
@@ -58,13 +74,21 @@ export function Profiles() {
 
       {adding && (
         <Card className="mb-4">
-          <div className="space-y-3">
+          <div
+            className="space-y-3"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                setAdding(false)
+              }
+            }}
+          >
             <div>
               <label className="mb-1.5 block text-[12px] text-muted">名称</label>
               <input
+                ref={nameInputRef}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                placeholder="例如 jp-sub"
+                placeholder="例如 jp-sub（URL 订阅留空则自动用域名）"
                 className="w-full rounded-lg border border-line bg-panel-2 px-3 py-2 text-[13px] text-fg outline-none placeholder:text-faint focus:border-line-strong"
               />
             </div>
@@ -75,13 +99,19 @@ export function Profiles() {
               <textarea
                 value={text}
                 onChange={(event) => setText(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                    event.preventDefault()
+                    if (!busy && text.trim().length > 0) void submit()
+                  }
+                }}
                 rows={6}
                 spellCheck={false}
                 placeholder={'https://example.com/sub\n或 vless://...\ntrojan://...\nss://...'}
                 className="w-full resize-y rounded-lg border border-line bg-panel-2 px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none placeholder:text-faint focus:border-line-strong"
               />
               <p className="mt-1.5 text-[12px] text-faint">
-                支持订阅 URL、Shadowsocks / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS5 / HTTP。单行解析失败不会影响其余节点。
+                支持订阅 URL、Shadowsocks / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS5 / HTTP。单行解析失败不会影响其余节点；按 Ctrl/⌘+Enter 快速保存。
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -90,7 +120,7 @@ export function Profiles() {
                 disabled={busy || text.trim().length === 0}
                 onClick={submit}
               >
-                保存
+                {busyAction === 'import' ? '导入中…' : '保存'}
               </Button>
               <Button onClick={() => setAdding(false)}>取消</Button>
             </div>
@@ -100,12 +130,22 @@ export function Profiles() {
 
       {library.profiles.length === 0 ? (
         <Card>
-          <Empty>还没有配置。点「导入配置」粘贴订阅内容即可。</Empty>
+          <Empty>
+            还没有配置。
+            <button
+              type="button"
+              onClick={() => setAdding(true)}
+              className="ml-1 text-accent hover:underline"
+            >
+              点此导入订阅或分享链接
+            </button>
+          </Empty>
         </Card>
       ) : (
         <div className="grid grid-cols-2 gap-4">
           {library.profiles.map((profile) => {
             const active = profile.id === library.active
+            const refreshing = busyAction === `refresh:${profile.id}`
             return (
               <Card key={profile.id} className={active ? 'ring-1 ring-accent/40' : ''}>
                 <div className="flex items-start justify-between gap-3">
@@ -124,10 +164,21 @@ export function Profiles() {
                         : profile.format === 'clash_yaml'
                           ? 'Clash YAML'
                           : '链接列表'}
+                      {profile.subscription && (
+                        <> · 更新于 {formatRelativeTime(profile.subscription.last_fetch_ms)}</>
+                      )}
                     </div>
                     <div className="mt-1 truncate text-[12px] text-faint">
                       {profile.source || '—'}
                     </div>
+                    {profile.subscription?.last_error && (
+                      <div
+                        className="mt-1 truncate text-[11.5px] text-danger"
+                        title={profile.subscription.last_error}
+                      >
+                        上次刷新失败：{profile.subscription.last_error}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -147,16 +198,38 @@ export function Profiles() {
                       onClick={() => refreshProfile(profile.id)}
                       title="立即刷新订阅"
                     >
-                      <RefreshCw size={14} />
+                      <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
                     </Button>
                   )}
-                  <Button
-                    variant="danger"
-                    className="ml-auto px-2.5"
-                    onClick={() => removeProfile(profile.id)}
-                  >
-                    <Trash2 size={14} />
-                  </Button>
+                  {confirmDeleteId === profile.id ? (
+                    <div className="ml-auto flex items-center gap-1.5">
+                      <Button
+                        variant="danger"
+                        className="px-2.5 text-[12px]"
+                        onClick={() => {
+                          setConfirmDeleteId(null)
+                          void removeProfile(profile.id)
+                        }}
+                      >
+                        确认删除
+                      </Button>
+                      <Button
+                        className="px-2.5 text-[12px]"
+                        onClick={() => setConfirmDeleteId(null)}
+                      >
+                        取消
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      variant="danger"
+                      className="ml-auto px-2.5"
+                      onClick={() => setConfirmDeleteId(profile.id)}
+                      title="删除配置"
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  )}
                 </div>
               </Card>
             )

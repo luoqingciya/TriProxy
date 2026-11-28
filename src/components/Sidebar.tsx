@@ -25,7 +25,7 @@ import {
 
 import appIcon from '../../src-tauri/icons/128x128.png'
 import { useApp, type Page } from '../store/app'
-import { CORE_LABEL, type CoreKind } from '../types'
+import { CORE_LABEL } from '../types'
 import { StateDot } from './ui'
 
 const NAV: { page: Page; label: string; icon: typeof Gauge }[] = [
@@ -40,10 +40,30 @@ const NAV: { page: Page; label: string; icon: typeof Gauge }[] = [
 export function Sidebar() {
   const page = useApp((state) => state.page)
   const setPage = useApp((state) => state.setPage)
-  const status = useApp((state) => state.status)
+  const activeCore = useApp((state) => state.status?.active_core ?? null)
+  const runningPort = useApp((state) => {
+    const running = state.status?.cores.find((core) => core.state === 'running')
+    return running ? (running.listen_port ?? 7890) : null
+  })
+  const busy = useApp((state) => state.busy)
+  const hasActiveProfile = useApp((state) => state.library.active !== null)
+  const nodeCount = useApp((state) => state.nodes.length)
+  const profileCount = useApp((state) => state.library.profiles.length)
+  const start = useApp((state) => state.start)
+  const stop = useApp((state) => state.stop)
+  const running = activeCore !== null && runningPort !== null
 
-  const running = status?.cores.find((core) => core.state === 'running')
-  const activeCore = status?.active_core as CoreKind | null | undefined
+  const quickToggle = () => {
+    if (busy) return
+    if (running) {
+      void stop()
+    } else if (hasActiveProfile) {
+      void start(null)
+    } else {
+      setPage('profiles')
+      useApp.setState({ notice: '请先导入并启用一份配置' })
+    }
+  }
 
   return (
     <aside className="flex w-[212px] shrink-0 flex-col border-r border-line bg-panel/60">
@@ -68,12 +88,14 @@ export function Sidebar() {
       </div>
 
       <nav className="flex flex-col gap-0.5 px-2">
-        {NAV.map(({ page: target, label, icon: Icon }) => {
+        {NAV.map(({ page: target, label, icon: Icon }, index) => {
           const active = page === target
+          const count = target === 'proxies' ? nodeCount : target === 'profiles' ? profileCount : 0
           return (
             <button
               key={target}
               onClick={() => setPage(target)}
+              title={`${label} (Ctrl/⌘+${index + 1})`}
               className={`flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13.5px] transition-colors ${
                 active
                   ? 'bg-panel-hover font-medium text-fg'
@@ -81,24 +103,45 @@ export function Sidebar() {
               }`}
             >
               <Icon size={16} strokeWidth={1.9} className={active ? 'text-accent' : ''} />
-              {label}
+              <span className="flex-1 text-left">{label}</span>
+              {count > 0 && (
+                <span className="text-[11px] text-faint tabular">{count}</span>
+              )}
             </button>
           )
         })}
       </nav>
 
       <div className="mt-auto border-t border-line p-3">
-        <div className="flex items-center gap-2 rounded-lg px-1.5 py-1.5">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={quickToggle}
+          title={
+            running
+              ? '点击断开代理'
+              : hasActiveProfile
+                ? '点击快速连接'
+                : '前往配置页导入订阅'
+          }
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-panel-hover disabled:opacity-50"
+        >
           <StateDot state={running ? 'running' : 'stopped'} />
           <div className="min-w-0 leading-tight">
             <div className="truncate text-[12.5px] text-fg">
-              {running ? CORE_LABEL[running.kind] : '未连接'}
+              {running ? CORE_LABEL[activeCore] : '未连接'}
             </div>
-            <div className="text-[11px] text-faint">
-              {running && activeCore ? `127.0.0.1:${running.listen_port ?? 7890}` : '点击开始连接'}
+            <div className="truncate text-[11px] text-faint">
+              {busy
+                ? '处理中…'
+                : running
+                  ? `127.0.0.1:${runningPort} · 点击断开`
+                  : hasActiveProfile
+                    ? '点击快速连接'
+                    : '导入配置后连接'}
             </div>
           </div>
-        </div>
+        </button>
       </div>
     </aside>
   )

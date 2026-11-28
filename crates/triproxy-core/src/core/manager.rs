@@ -157,7 +157,7 @@ pub struct CoreManager {
     logs: Arc<LogBuffer>,
     /// Serializes lifecycle operations, mirroring "Lock CoreManager" in ch.14.
     op_lock: Mutex<()>,
-    persisted: Mutex<PersistedState>,
+    persisted: RwLock<PersistedState>,
     api_port: AtomicU16,
     api_secret: RwLock<Option<String>>,
     log_level: String,
@@ -189,7 +189,7 @@ impl CoreManager {
             cores: RwLock::new(cores),
             logs,
             op_lock: Mutex::new(()),
-            persisted: Mutex::new(PersistedState::default()),
+            persisted: RwLock::new(PersistedState::default()),
             api_port: AtomicU16::new(settings.api_port),
             api_secret: RwLock::new(None),
             log_level: DEFAULT_LOG_LEVEL.to_string(),
@@ -284,7 +284,7 @@ impl CoreManager {
                             *self.api_secret.write().unwrap_or_else(|e| e.into_inner()) =
                                 state.api_secret.clone();
                         }
-                        *self.persisted.lock().await = state;
+                        *self.persisted.write().unwrap_or_else(|e| e.into_inner()) = state;
                         report.adopted = Some(kind);
                         tracing::info!(core = kind.as_str(), pid, "adopted running core");
                     } else {
@@ -320,34 +320,41 @@ impl CoreManager {
     }
 
     pub async fn status(&self) -> ManagerStatus {
-        let mut collected = Vec::with_capacity(CoreKind::ALL.len());
-        let mut active = None;
-        let mut pids = vec![std::process::id()];
-
-        for kind in CoreKind::ALL {
+        let checks = CoreKind::ALL.into_iter().map(|kind| {
             let binary = self.binaries.status(kind);
             // Take the Arc out before awaiting: holding the read guard across
             // `health_check().await` would block `install()`'s write lock.
             let core = self.cores_read().get(&kind).cloned();
-            let health = match core {
-                Some(core) => core
-                    .health_check()
-                    .await
-                    .unwrap_or_else(|_| CoreHealth::stopped()),
-                None => CoreHealth::stopped(),
-            };
+            async move {
+                let health = match core {
+                    Some(core) => core
+                        .health_check()
+                        .await
+                        .unwrap_or_else(|_| CoreHealth::stopped()),
+                    None => CoreHealth::stopped(),
+                };
+                (kind, binary, health)
+            }
+        });
 
+        let collected = futures_util::future::join_all(checks).await;
+        let mut active = None;
+        let mut pids = Vec::with_capacity(1 + collected.len());
+        pids.push(std::process::id());
+
+        for (kind, _, health) in &collected {
             if health.state.is_running() {
-                active = Some(kind);
+                active = Some(*kind);
             }
             if let Some(pid) = health.pid {
                 pids.push(pid);
             }
-
-            collected.push((kind, binary, health));
         }
 
-        let memory_map = crate::memory::resident_bytes_batch(&pids);
+        let memory_map =
+            tokio::task::spawn_blocking(move || crate::memory::resident_bytes_batch(&pids))
+                .await
+                .unwrap_or_default();
         let process_memory_bytes = memory_map.get(&std::process::id()).copied();
 
         let cores = collected
@@ -598,6 +605,52 @@ impl CoreManager {
             });
         }
 
+        let settings = crate::settings::AppSettings::load(&self.layout);
+        let target_dir = self.layout.core_config_dir(target.as_str());
+        let file_name = match &source {
+            ConfigSource::Bootstrap => bootstrap::config_file_name(target),
+            ConfigSource::Rendered { file_name, .. } => file_name,
+        };
+        let live_config = target_dir.join(file_name);
+
+        // Validate candidate configuration before stopping the active core so a
+        // broken config keeps the current session online and shrinks downtime.
+        let same_core = previous == Some(target);
+        if same_core {
+            let staging = target_dir.join(format!(".check-{file_name}"));
+            match &source {
+                ConfigSource::Bootstrap => {
+                    let secret = self.ensure_api_secret();
+                    let text =
+                        core.bootstrap_config(settings.api_port, Some(&secret), &self.log_level);
+                    write_atomic(&staging, &text)?;
+                }
+                ConfigSource::Rendered { text, .. } => write_atomic(&staging, text)?,
+            }
+            let checked = core.check_config(&staging).await;
+            let _ = std::fs::remove_file(&staging);
+            checked?;
+        } else {
+            core.set_listen_port(settings.listen_port);
+            match &source {
+                ConfigSource::Bootstrap => {
+                    self.prepare_config_with_api(target, &core, settings.api_port)?;
+                }
+                ConfigSource::Rendered { text, file_name } => {
+                    self.write_config(target, file_name, text)?;
+                }
+            }
+            core.check_config(&live_config).await?;
+        }
+        steps.push(SwitchStep::ok(
+            "generate config",
+            live_config.display().to_string(),
+        ));
+        steps.push(SwitchStep::ok(
+            "validate config",
+            format!("{target} accepted the config"),
+        ));
+
         match previous {
             Some(previous) => {
                 let previous_core = self.core(previous)?;
@@ -622,26 +675,19 @@ impl CoreManager {
             None => steps.push(SwitchStep::ok("stop current core", "no core was running")),
         }
 
-        let settings = crate::settings::AppSettings::load(&self.layout);
         core.set_listen_port(settings.listen_port);
         self.api_port.store(settings.api_port, Ordering::Relaxed);
 
-        let config = match source {
-            ConfigSource::Bootstrap => self.prepare_config(target, &core)?,
-            ConfigSource::Rendered { text, file_name } => {
-                self.write_config(target, file_name, text)?
+        let config = if same_core {
+            match source {
+                ConfigSource::Bootstrap => self.prepare_config(target, &core)?,
+                ConfigSource::Rendered { text, file_name } => {
+                    self.write_config(target, file_name, text)?
+                }
             }
+        } else {
+            live_config
         };
-        steps.push(SwitchStep::ok(
-            "generate config",
-            config.display().to_string(),
-        ));
-
-        core.check_config(&config).await?;
-        steps.push(SwitchStep::ok(
-            "validate config",
-            format!("{target} accepted the config"),
-        ));
 
         if target.has_controller() {
             if let Some(conflict) =
@@ -706,7 +752,10 @@ impl CoreManager {
 
     /// Core recorded as active in the persisted state (may not be running).
     pub async fn persisted_active(&self) -> Option<CoreKind> {
-        self.persisted.lock().await.active_core
+        self.persisted
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .active_core
     }
 
     /// Listen port recorded when the core was last started.
@@ -714,6 +763,14 @@ impl CoreManager {
     /// Synchronous on purpose: the system-proxy helper needs it before deciding
     /// whether to touch the machine, and that decision is not worth an await.
     pub fn persisted_listen_port(&self) -> Option<u16> {
+        if let Some(port) = self
+            .persisted
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .listen_port
+        {
+            return Some(port);
+        }
         let text = std::fs::read_to_string(self.layout.state_file()).ok()?;
         let state: PersistedState = serde_json::from_str(&text).ok()?;
         state.listen_port
@@ -722,6 +779,15 @@ impl CoreManager {
     /// HTTP proxy port recorded for the active core (differs from `listen_port`
     /// on Xray, where SOCKS and HTTP listen on adjacent ports).
     pub fn persisted_http_proxy_port(&self) -> Option<u16> {
+        {
+            let guard = self.persisted.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(port) = guard.listen_port {
+                return Some(match guard.active_core {
+                    Some(kind) => kind.http_proxy_port(port),
+                    None => port,
+                });
+            }
+        }
         let text = std::fs::read_to_string(self.layout.state_file()).ok()?;
         let state: PersistedState = serde_json::from_str(&text).ok()?;
         let port = state.listen_port?;
@@ -732,8 +798,17 @@ impl CoreManager {
     }
 
     fn prepare_config(&self, kind: CoreKind, core: &Arc<dyn ProxyCore>) -> Result<PathBuf> {
+        self.prepare_config_with_api(kind, core, self.api_port())
+    }
+
+    fn prepare_config_with_api(
+        &self,
+        kind: CoreKind,
+        core: &Arc<dyn ProxyCore>,
+        api_port: u16,
+    ) -> Result<PathBuf> {
         let secret = self.ensure_api_secret();
-        let text = core.bootstrap_config(self.api_port(), Some(&secret), &self.log_level);
+        let text = core.bootstrap_config(api_port, Some(&secret), &self.log_level);
         self.write_config(kind, bootstrap::config_file_name(kind), &text)
     }
 
@@ -763,6 +838,7 @@ impl CoreManager {
                 source = source.as_str(),
                 "core binary appeared after startup"
             );
+            self.binaries.invalidate_cache(Some(kind));
             let core = build_core(kind, path, self.logs.clone(), &self.layout);
             self.cores_write().insert(kind, core.clone());
             return Ok(core);
@@ -852,7 +928,7 @@ impl CoreManager {
         let path = self.layout.state_file();
         let text = serde_json::to_string_pretty(&state)?;
         write_atomic(&path, text)?;
-        *self.persisted.lock().await = state;
+        *self.persisted.write().unwrap_or_else(|e| e.into_inner()) = state;
         Ok(())
     }
 

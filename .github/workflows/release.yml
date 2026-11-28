@@ -431,7 +431,12 @@ jobs:
         run: |
           set -euo pipefail
           ls -l artifacts
+          extra=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            extra+=(--prerelease)
+          fi
           gh release create "${GITHUB_REF_NAME}" artifacts/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "TriProxy ${GITHUB_REF_NAME}" \
-            --notes-file docs/RELEASE_NOTES_TEMPLATE.md
+            --notes-file docs/RELEASE_NOTES_TEMPLATE.md \
+            "${extra[@]}"

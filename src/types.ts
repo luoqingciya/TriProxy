@@ -99,6 +99,12 @@ export interface ProfileLibrary {
   profiles: StoredProfile[]
 }
 
+export interface LibrarySnapshot {
+  library: ProfileLibrary
+  nodes: NodeSummary[]
+  selection: Selection | null
+}
+
 export interface NodeSummary {
   id: string
   name: string

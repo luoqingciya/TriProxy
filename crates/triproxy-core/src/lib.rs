@@ -72,8 +72,9 @@ pub use core::{
 pub use error::{Error, Result};
 pub use health::CoreHealth;
 pub use latency::{
-    active_delay, measure_nodes, measure_proxy_delay, tcp_latency, ActiveDelay, LatencyKind,
-    LatencySample, DEFAULT_PROBE_URL,
+    active_delay, measure_nodes, measure_nodes_streaming, measure_proxy_delay,
+    measure_proxy_delay_streaming, tcp_latency, ActiveDelay, LatencyKind, LatencySample,
+    DEFAULT_PROBE_URL,
 };
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{

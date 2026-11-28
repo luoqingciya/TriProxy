@@ -368,6 +368,7 @@ impl Supervisor {
 
         // Readiness loop.
         let deadline = Instant::now() + ready_timeout;
+        let mut attempt = 0u32;
         loop {
             let exited = match guard.child.as_mut() {
                 Some(child) => child.try_wait().ok().flatten(),
@@ -411,7 +412,8 @@ impl Supervisor {
                 });
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(poll_step(attempt)).await;
+            attempt = attempt.saturating_add(1);
         }
     }
 
@@ -488,7 +490,10 @@ impl Supervisor {
     /// Reconcile bookkeeping with reality: detect a core that died on its own.
     pub async fn refresh(&self) -> CoreState {
         let mut guard = self.inner.lock().await;
+        self.refresh_locked(&mut guard)
+    }
 
+    fn refresh_locked(&self, guard: &mut Inner) -> CoreState {
         // Adopted processes have no child handle, so liveness is a PID probe.
         if guard.child.is_none() {
             if let Some(pid) = guard.pid {
@@ -525,37 +530,32 @@ impl Supervisor {
     }
 
     pub async fn health(&self) -> CoreHealth {
-        self.refresh().await;
-
-        let (state, pid, uptime_secs, port, last_error) = {
-            let guard = self.inner.lock().await;
+        let (state, pid, uptime_secs, port, last_error, cached_probe) = {
+            let mut guard = self.inner.lock().await;
+            self.refresh_locked(&mut guard);
+            let cached = guard
+                .probe
+                .filter(|(at, _)| at.elapsed() < PROBE_TTL)
+                .map(|(_, value)| value);
             (
                 guard.state,
                 guard.pid,
                 guard.started_at.map(|t| t.elapsed().as_secs()),
                 guard.listen_port,
                 guard.last_error.clone(),
+                cached,
             )
         };
 
         let latency = match (state.is_running(), port) {
-            (true, Some(port)) => {
-                let cached = self
-                    .inner
-                    .lock()
-                    .await
-                    .probe
-                    .filter(|(at, _)| at.elapsed() < PROBE_TTL)
-                    .map(|(_, value)| value);
-                match cached {
-                    Some(value) => value,
-                    None => {
-                        let value = probe_tcp(port).await;
-                        self.inner.lock().await.probe = Some((Instant::now(), value));
-                        value
-                    }
+            (true, Some(port)) => match cached_probe {
+                Some(value) => value,
+                None => {
+                    let value = probe_tcp(port).await;
+                    self.inner.lock().await.probe = Some((Instant::now(), value));
+                    value
                 }
-            }
+            },
             _ => None,
         };
 
@@ -602,17 +602,21 @@ fn write_log_entry(
     path: &Path,
     writer: &mut std::io::BufWriter<std::fs::File>,
     written: &mut u64,
+    buf: &mut String,
     entry: LogWriteEntry,
 ) {
-    use std::io::Write;
+    use std::fmt::Write as _;
+    use std::io::Write as _;
 
-    let formatted = format!(
-        "{}\t{}\t{}\n",
+    buf.clear();
+    let _ = writeln!(
+        buf,
+        "{}\t{}\t{}",
         entry.ts_ms,
         entry.level.as_char(),
         entry.line
     );
-    if written.saturating_add(formatted.len() as u64) > MAX_LOG_FILE_BYTES {
+    if written.saturating_add(buf.len() as u64) > MAX_LOG_FILE_BYTES {
         let _ = writer.flush();
         let _ = std::fs::rename(path, path.with_extension("log.1"));
         if let Some((next_writer, next_len)) = open_log_writer(path) {
@@ -620,8 +624,8 @@ fn write_log_entry(
             *written = next_len;
         }
     }
-    if writer.write_all(formatted.as_bytes()).is_ok() {
-        *written = written.saturating_add(formatted.len() as u64);
+    if writer.write_all(buf.as_bytes()).is_ok() {
+        *written = written.saturating_add(buf.len() as u64);
     }
 }
 
@@ -633,11 +637,12 @@ fn spawn_log_file_writer(path: PathBuf) -> mpsc::Sender<LogWriteEntry> {
         let Some((mut writer, mut written)) = open_log_writer(&path) else {
             return;
         };
+        let mut buf = String::with_capacity(256);
 
         while let Some(entry) = rx.blocking_recv() {
-            write_log_entry(&path, &mut writer, &mut written, entry);
+            write_log_entry(&path, &mut writer, &mut written, &mut buf, entry);
             while let Ok(more) = rx.try_recv() {
-                write_log_entry(&path, &mut writer, &mut written, more);
+                write_log_entry(&path, &mut writer, &mut written, &mut buf, more);
             }
             let _ = writer.flush();
         }
@@ -676,7 +681,7 @@ fn spawn_line_reader<R>(
                             line: line.clone(),
                         });
                     }
-                    logs.push(kind.as_str(), stream, line);
+                    logs.push_with_level(kind.as_str(), stream, level, line);
                 }
                 Ok(None) => break,
                 Err(_) => break,
@@ -692,24 +697,37 @@ fn render_args(args: &[OsString]) -> String {
         .join(" ")
 }
 
+fn poll_step(attempt: u32) -> Duration {
+    match attempt {
+        0..=1 => Duration::from_millis(15),
+        2..=4 => Duration::from_millis(30),
+        5..=9 => Duration::from_millis(50),
+        _ => Duration::from_millis(100),
+    }
+}
+
 pub(crate) async fn wait_ports_free(ports: &[u16], timeout: Duration) -> Option<u16> {
     let deadline = Instant::now() + timeout;
+    let mut attempt = 0u32;
     loop {
         let port = ports.iter().copied().find(|&port| !port_is_free(port))?;
         if Instant::now() >= deadline {
             return Some(port);
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(poll_step(attempt)).await;
+        attempt = attempt.saturating_add(1);
     }
 }
 
 async fn wait_pid_gone(pid: u32, timeout: Duration) {
     let deadline = Instant::now() + timeout;
+    let mut attempt = 0u32;
     while Instant::now() < deadline {
         if !pid_alive(pid) {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(poll_step(attempt)).await;
+        attempt = attempt.saturating_add(1);
     }
 }
 

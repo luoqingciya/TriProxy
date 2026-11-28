@@ -29,6 +29,7 @@
 //!   so a subscription can be refreshed without losing its place in the UI or
 //!   its "active" flag.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -75,6 +76,8 @@ pub struct StoredProfile {
 struct Index {
     #[serde(default)]
     active: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    entries: BTreeMap<String, StoredProfile>,
 }
 
 /// On-disk wrapper around a profile.
@@ -142,6 +145,7 @@ impl ProfileStore {
             Err(error) => return Err(Error::io(&self.root, error)),
         };
 
+        let mut on_disk: Vec<(String, PathBuf)> = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| Error::io(&self.root, e))?;
             let path = entry.path();
@@ -151,7 +155,22 @@ impl ProfileStore {
             if path.file_name().and_then(|name| name.to_str()) == Some(INDEX_FILE) {
                 continue;
             }
-            // A corrupt file must not hide the rest of the library.
+            if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+                on_disk.push((stem.to_string(), path));
+            }
+        }
+
+        let mut index = self.read_index()?;
+        let mut dirty = false;
+        let mut disk_ids = std::collections::HashSet::with_capacity(on_disk.len());
+
+        for (stem, path) in on_disk {
+            disk_ids.insert(stem.clone());
+            if let Some(cached) = index.entries.get(&stem) {
+                out.push(cached.clone());
+                continue;
+            }
+            // Cache miss or legacy store without index entries: read once and backfill.
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
@@ -159,7 +178,19 @@ impl ProfileStore {
                 tracing::warn!(path = %path.display(), "skipping unreadable profile file");
                 continue;
             };
-            out.push(summarise(&record));
+            let summary = summarise(&record);
+            index.entries.insert(stem, summary.clone());
+            dirty = true;
+            out.push(summary);
+        }
+
+        let prev_len = index.entries.len();
+        index.entries.retain(|id, _| disk_ids.contains(id));
+        if index.entries.len() != prev_len {
+            dirty = true;
+        }
+        if dirty {
+            let _ = self.write_index(&index);
         }
 
         out.sort_by(|a, b| {
@@ -284,7 +315,12 @@ impl ProfileStore {
         let text = serde_json::to_string_pretty(&record)?;
         write_atomic(&self.record_path(&id), &text)?;
 
-        Ok(summarise(&record))
+        let summary = summarise(&record);
+        let mut index = self.read_index().unwrap_or_default();
+        index.entries.insert(id, summary.clone());
+        self.write_index(&index)?;
+
+        Ok(summary)
     }
 
     /// Full record, including refresh state.
@@ -361,7 +397,11 @@ impl ProfileStore {
         };
         let text = serde_json::to_string_pretty(&stored)?;
         write_atomic(&self.record_path(&record.id), &text)?;
-        Ok(summarise(&stored))
+        let summary = summarise(&stored);
+        let mut index = self.read_index().unwrap_or_default();
+        index.entries.insert(record.id.clone(), summary.clone());
+        self.write_index(&index)?;
+        Ok(summary)
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
@@ -375,8 +415,14 @@ impl ProfileStore {
             }
         })?;
 
-        if self.active_id()?.as_deref() == Some(id) {
-            self.set_active(None)?;
+        let mut index = self.read_index()?;
+        let removed_entry = index.entries.remove(id).is_some();
+        let cleared_active = index.active.as_deref() == Some(id);
+        if cleared_active {
+            index.active = None;
+        }
+        if removed_entry || cleared_active {
+            self.write_index(&index)?;
         }
         Ok(())
     }
@@ -388,18 +434,17 @@ impl ProfileStore {
     /// Mark a profile active, or clear the flag with `None`.
     pub fn set_active(&self, id: Option<&str>) -> Result<()> {
         self.ensure()?;
+        let mut index = self.read_index()?;
         if let Some(id) = id {
             validate_id(id)?;
-            if self.find(id)?.is_none() {
+            let exists = self.record_path(id).is_file()
+                && (index.entries.contains_key(id) || self.find(id)?.is_some());
+            if !exists {
                 return Err(Error::Other(format!("no profile with id `{id}`")));
             }
         }
-        let index = Index {
-            active: id.map(str::to_string),
-        };
-        let text = serde_json::to_string_pretty(&index)?;
-        write_atomic(&self.index_path(), &text)?;
-        Ok(())
+        index.active = id.map(str::to_string);
+        self.write_index(&index)
     }
 
     /// Star or unstar a node.
@@ -498,13 +543,18 @@ impl ProfileStore {
     /// are overwritten with the backup's version.
     pub fn restore_records(&self, documents: &[serde_json::Value]) -> Result<usize> {
         self.ensure()?;
+        let mut index = self.read_index().unwrap_or_default();
         let mut restored = 0;
         for document in documents {
             let record: Record = serde_json::from_value(document.clone())?;
             validate_id(&record.id)?;
             let text = serde_json::to_string_pretty(&record)?;
             write_atomic(&self.record_path(&record.id), &text)?;
+            index.entries.insert(record.id.clone(), summarise(&record));
             restored += 1;
+        }
+        if restored > 0 {
+            self.write_index(&index)?;
         }
         Ok(restored)
     }
@@ -516,6 +566,11 @@ impl ProfileStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Index::default()),
             Err(error) => Err(Error::io(&path, error)),
         }
+    }
+
+    fn write_index(&self, index: &Index) -> Result<()> {
+        let text = serde_json::to_string_pretty(index)?;
+        write_atomic(&self.index_path(), &text)
     }
 }
 
@@ -844,5 +899,29 @@ mod tests {
             .save(&profile("dup", &["b.example.com"]), None)
             .unwrap();
         assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn list_rebuilds_and_prunes_metadata_index() {
+        let layout = layout("index-cache");
+        let store = ProfileStore::new(&layout);
+        let first = store
+            .save(&profile("one", &["a.example.com"]), None)
+            .unwrap();
+        let second = store
+            .save(&profile("two", &["b.example.com"]), None)
+            .unwrap();
+
+        // Deleting index.json should transparently backfill it on the next list().
+        std::fs::remove_file(store.root().join(INDEX_FILE)).unwrap();
+        let rebuilt = store.list().unwrap();
+        assert_eq!(rebuilt.len(), 2);
+        assert!(store.root().join(INDEX_FILE).is_file());
+
+        // Removing a record on disk behind the store's back prunes it from index.
+        std::fs::remove_file(store.root().join(format!("{}.json", first.id))).unwrap();
+        let pruned = store.list().unwrap();
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].id, second.id);
     }
 }

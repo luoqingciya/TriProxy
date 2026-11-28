@@ -22,6 +22,7 @@ import type {
   CoreUpdate,
   ConnectionsSnapshot,
   LatencySample,
+  LibrarySnapshot,
   TrafficSample,
   LogEntry,
   ManagerStatus,
@@ -56,6 +57,8 @@ export const api = {
 
   activeNodes: () => call<NodeSummary[]>('active_nodes'),
 
+  librarySnapshot: () => call<LibrarySnapshot>('library_snapshot'),
+
   importProfile: (text: string, name: string) =>
     call<StoredProfile>('import_profile', { text, name }),
 
@@ -84,7 +87,8 @@ export const api = {
 
   switchCore: (target: string) => call<ManagerStatus>('switch_core', { target }),
 
-  recentLogs: (limit: number) => call<LogEntry[]>('recent_logs', { limit }),
+  recentLogs: (limit: number, afterSeq?: number | null) =>
+    call<LogEntry[]>('recent_logs', { limit, afterSeq: afterSeq ?? null }),
 
   traffic: () => call<TrafficSample | null>('traffic'),
 
