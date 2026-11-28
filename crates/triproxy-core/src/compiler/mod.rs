@@ -32,6 +32,7 @@
 //! - The output is validated by the core itself (`mihomo -t`, `sing-box check`,
 //!   `xray -test`) before it is ever used — see `CoreManager::start_with_config`.
 
+pub mod builtin_rules;
 pub mod mihomo;
 pub mod rules;
 pub mod singbox;
@@ -115,8 +116,10 @@ pub enum RuleMode {
     /// Everything through the proxy — what the compiler did before rules existed.
     #[default]
     Global,
-    /// Local networks and Chinese sites go direct, everything else is proxied.
+    /// Rule-based split routing (subscription rules when present, else built-in rules).
     Split,
+    /// Everything goes direct without hitting the proxy.
+    Direct,
 }
 
 impl RuleMode {
@@ -124,6 +127,16 @@ impl RuleMode {
         match self {
             RuleMode::Global => "global",
             RuleMode::Split => "split",
+            RuleMode::Direct => "direct",
+        }
+    }
+
+    /// Name expected by Clash/Mihomo and sing-box `clash_api` `PATCH /configs`.
+    pub fn clash_mode(self) -> &'static str {
+        match self {
+            RuleMode::Global => "global",
+            RuleMode::Split => "rule",
+            RuleMode::Direct => "direct",
         }
     }
 }

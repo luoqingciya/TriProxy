@@ -27,9 +27,11 @@ import type {
   ManagerStatus,
   NodeSummary,
   ProfileLibrary,
+  RuleMode,
   Selection,
   Settings,
   StoredProfile,
+  TunStatus,
 } from '../types'
 
 /** 90 samples at the 2s poll interval: three minutes of history. */
@@ -74,7 +76,9 @@ interface AppState {
   /** Whether the OS will launch the app at login; `null` until read. */
   autostart: boolean | null
   proxy: AppliedProxy | null
+  tunStatus: TunStatus | null
   latency: Record<string, LatencySample>
+  testingNodeIds: Record<string, boolean>
   traffic: TrafficSample | null
   /**
    * Delay of the node the PROXY group is using, measured through the core.
@@ -123,8 +127,12 @@ interface AppState {
   refreshProfile: (id: string) => Promise<void>
 
   setSystemProxy: (enabled: boolean) => Promise<void>
+  setTun: (enabled: boolean) => Promise<void>
+  authorizeTun: () => Promise<void>
+  setRuleMode: (mode: RuleMode) => Promise<void>
   testLatency: () => Promise<void>
   testProxyDelay: () => Promise<void>
+  testNodeDelay: (nodeId: string) => Promise<void>
   measureDelay: () => Promise<void>
   closeConnection: (id: string | null) => Promise<void>
   selectNode: (nodeId: string | null) => Promise<void>
@@ -145,13 +153,18 @@ const CORE_RESTART_FIELDS = new Set<keyof Settings>([
   'proxy_groups',
   'allow_lan',
   'dns_mode',
-  'rule_mode',
   'log_level',
   'listen_port',
   'api_port',
   'custom_rules',
   'rule_sets',
 ])
+
+const RULE_MODE_LABEL: Record<RuleMode, string> = {
+  split: '规则分流',
+  global: '全局代理',
+  direct: '全局直连',
+}
 
 export const useApp = create<AppState>((set, get) => ({
   page: initialPage(),
@@ -162,7 +175,9 @@ export const useApp = create<AppState>((set, get) => ({
   settings: null,
   autostart: null,
   proxy: null,
+  tunStatus: null,
   latency: {},
+  testingNodeIds: {},
   traffic: null,
   delay: null,
   trafficHistory: [],
@@ -237,12 +252,13 @@ export const useApp = create<AppState>((set, get) => ({
 
   loadSettings: async () => {
     try {
-      const [settings, autostart, proxy] = await Promise.all([
+      const [settings, autostart, proxy, tunStatus] = await Promise.all([
         api.settings(),
         api.autostartEnabled().catch(() => null),
         api.systemProxyStatus().catch(() => null),
+        api.tunStatus().catch(() => null),
       ])
-      set({ settings, autostart, proxy })
+      set({ settings, autostart, proxy, tunStatus })
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -400,10 +416,14 @@ export const useApp = create<AppState>((set, get) => ({
       await api.setActiveProfile(id)
       await get().refreshLibrary()
       const running = get().status?.active_core !== null
-      set({
-        needsCoreRestart: running ? true : get().needsCoreRestart,
-        notice: running ? '已切换活动配置，重启核心后生效' : '已切换活动配置',
-      })
+      if (running) {
+        await get().switchTo(get().settings?.core_preference ?? 'smart')
+        if (!get().error) {
+          set({ notice: '已切换配置并立即应用' })
+        }
+      } else {
+        set({ notice: '已切换活动配置' })
+      }
     } catch (error) {
       set({ error: describe(error) })
     }
@@ -431,6 +451,66 @@ export const useApp = create<AppState>((set, get) => ({
       await get().updateSettings({ system_proxy: enabled })
     } catch (error) {
       set({ error: describe(error) })
+    }
+  },
+
+  setTun: async (enabled) => {
+    const prevSettings = get().settings
+    set({ busy: true, busyAction: 'tun', error: null })
+    try {
+      const status = await api.setTun(enabled)
+      const [settings, tunStatus, proxy, selection] = await Promise.all([
+        api.settings().catch(() => (prevSettings ? { ...prevSettings, tun: enabled } : null)),
+        api.tunStatus().catch(() => get().tunStatus),
+        api.systemProxyStatus().catch(() => (enabled ? null : get().proxy)),
+        api.previewSelection().catch(() => get().selection),
+      ])
+      set({
+        status,
+        settings,
+        tunStatus,
+        proxy,
+        selection,
+        needsCoreRestart: false,
+        notice: enabled
+          ? `TUN 模式已开启（网卡 ${tunStatus?.interface_name ?? 'triproxy'}）`
+          : 'TUN 模式已关闭',
+        error: null,
+      })
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false, busyAction: null })
+    }
+  },
+
+  authorizeTun: async () => {
+    set({ busy: true, busyAction: 'authorize-tun', error: null })
+    try {
+      const tunStatus = await api.authorizeTun()
+      set({ tunStatus, notice: 'TUN 权限已授权，可直接开启 TUN 模式', error: null })
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ busy: false, busyAction: null })
+    }
+  },
+
+  setRuleMode: async (mode) => {
+    const prevSettings = get().settings
+    if (prevSettings) {
+      set({ settings: { ...prevSettings, rule_mode: mode }, error: null })
+    }
+    try {
+      const appliedLive = await api.setRuleMode(mode)
+      set({
+        notice: appliedLive
+          ? `已切换为${RULE_MODE_LABEL[mode]}（已即时生效）`
+          : `已切换为${RULE_MODE_LABEL[mode]}`,
+        error: null,
+      })
+    } catch (error) {
+      set({ settings: prevSettings, error: describe(error) })
     }
   },
 
@@ -528,6 +608,27 @@ export const useApp = create<AppState>((set, get) => ({
       set({ error: describe(error) })
     } finally {
       set({ testing: false, testingProgress: null })
+    }
+  },
+
+  testNodeDelay: async (nodeId) => {
+    set((state) => ({
+      testingNodeIds: { ...state.testingNodeIds, [nodeId]: true },
+    }))
+    try {
+      const sample = await api.testNodeDelay(nodeId, 3)
+      set((state) => ({
+        latency: { ...state.latency, [nodeId]: sample },
+        error: null,
+      }))
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set((state) => {
+        const next = { ...state.testingNodeIds }
+        delete next[nodeId]
+        return { testingNodeIds: next }
+      })
     }
   },
 

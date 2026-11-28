@@ -43,8 +43,16 @@ pub enum RuleKind {
     DomainSuffix,
     /// Anywhere in the host.
     DomainKeyword,
-    /// Destination address range.
+    /// Destination address range (IPv4 or IPv6 CIDR).
     IpCidr,
+    /// Geosite category tag (for example `cn` or `geolocation-!cn`).
+    GeoSite,
+    /// GeoIP country/region code (for example `CN` or `LAN`).
+    GeoIp,
+    /// Executable/process name.
+    ProcessName,
+    /// Destination TCP/UDP port.
+    DstPort,
 }
 
 /// Where a matching request goes.
@@ -53,6 +61,7 @@ pub enum RuleKind {
 pub enum RuleTarget {
     Proxy,
     Direct,
+    Reject,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,7 +106,7 @@ pub fn parse_rules(text: &str) -> Result<Vec<CustomRule>, RuleError> {
         if fields.len() < 3 {
             return Err(RuleError {
                 line,
-                message: "需要三个字段：类型,值,PROXY 或 DIRECT".to_string(),
+                message: "需要三个字段：类型,值,PROXY / DIRECT / REJECT".to_string(),
             });
         }
 
@@ -106,11 +115,15 @@ pub fn parse_rules(text: &str) -> Result<Vec<CustomRule>, RuleError> {
             "DOMAIN-SUFFIX" => RuleKind::DomainSuffix,
             "DOMAIN-KEYWORD" => RuleKind::DomainKeyword,
             "IP-CIDR" | "IP-CIDR6" => RuleKind::IpCidr,
+            "GEOSITE" => RuleKind::GeoSite,
+            "GEOIP" => RuleKind::GeoIp,
+            "PROCESS-NAME" => RuleKind::ProcessName,
+            "DST-PORT" => RuleKind::DstPort,
             other => {
                 return Err(RuleError {
                     line,
                     message: format!(
-                        "不支持的类型 `{other}`；可用 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR"
+                        "不支持的类型 `{other}`；可用 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR / GEOSITE / GEOIP / PROCESS-NAME / DST-PORT"
                     ),
                 })
             }
@@ -119,10 +132,11 @@ pub fn parse_rules(text: &str) -> Result<Vec<CustomRule>, RuleError> {
         let target = match fields[2].to_ascii_uppercase().as_str() {
             "PROXY" => RuleTarget::Proxy,
             "DIRECT" => RuleTarget::Direct,
+            "REJECT" | "REJECT-DROP" => RuleTarget::Reject,
             other => {
                 return Err(RuleError {
                     line,
-                    message: format!("目标只能是 PROXY 或 DIRECT，收到 `{other}`"),
+                    message: format!("目标只能是 PROXY、DIRECT 或 REJECT，收到 `{other}`"),
                 })
             }
         };
@@ -142,6 +156,13 @@ pub fn parse_rules(text: &str) -> Result<Vec<CustomRule>, RuleError> {
             });
         }
 
+        if kind == RuleKind::DstPort && !valid_port_spec(value) {
+            return Err(RuleError {
+                line,
+                message: format!("`{value}` 不是合法的端口或端口范围"),
+            });
+        }
+
         rules.push(CustomRule {
             kind,
             value: value.to_string(),
@@ -152,10 +173,23 @@ pub fn parse_rules(text: &str) -> Result<Vec<CustomRule>, RuleError> {
     Ok(rules)
 }
 
+pub(crate) fn valid_port_spec(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.parse::<u16>().is_ok_and(|p| p > 0) {
+        return true;
+    }
+    if let Some((start, end)) = trimmed.split_once('-') {
+        if let (Ok(s), Ok(e)) = (start.trim().parse::<u16>(), end.trim().parse::<u16>()) {
+            return s > 0 && s <= e;
+        }
+    }
+    false
+}
+
 /// A bare address or `address/prefix`. A bad prefix length is caught here rather
 /// than by the core at start time, where the error names a config file the user
 /// never wrote.
-fn valid_cidr(value: &str) -> bool {
+pub(crate) fn valid_cidr(value: &str) -> bool {
     let (address, prefix) = match value.split_once('/') {
         Some((address, prefix)) => (address, Some(prefix)),
         None => (value, None),
@@ -255,10 +289,11 @@ pub fn parse_rule_sets(text: &str) -> Result<Vec<RuleSet>, RuleError> {
         let target = match fields[0].to_ascii_uppercase().as_str() {
             "PROXY" => RuleTarget::Proxy,
             "DIRECT" => RuleTarget::Direct,
+            "REJECT" | "REJECT-DROP" => RuleTarget::Reject,
             other => {
                 return Err(RuleError {
                     line,
-                    message: format!("目标只能是 PROXY 或 DIRECT，收到 `{other}`"),
+                    message: format!("目标只能是 PROXY、DIRECT 或 REJECT，收到 `{other}`"),
                 })
             }
         };
@@ -426,9 +461,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_target_that_is_not_proxy_or_direct() {
-        let error = parse_rules("DOMAIN,x.com,REJECT").unwrap_err();
-        assert!(error.message.contains("PROXY 或 DIRECT"));
+    fn supports_reject_and_extended_rule_kinds() {
+        let rules = parse_rules(
+            "DOMAIN,ads.example.com,REJECT\nGEOSITE,cn,DIRECT\nGEOIP,CN,DIRECT\nPROCESS-NAME,curl,DIRECT\nDST-PORT,443,PROXY",
+        )
+        .unwrap();
+        assert_eq!(rules.len(), 5);
+        assert_eq!(rules[0].target, RuleTarget::Reject);
+        assert_eq!(rules[1].kind, RuleKind::GeoSite);
+        assert_eq!(rules[2].kind, RuleKind::GeoIp);
+        assert_eq!(rules[3].kind, RuleKind::ProcessName);
+        assert_eq!(rules[4].kind, RuleKind::DstPort);
+    }
+
+    #[test]
+    fn rejects_an_unknown_target() {
+        let error = parse_rules("DOMAIN,x.com,UNKNOWN").unwrap_err();
+        assert!(error.message.contains("PROXY"));
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub struct AppState {
     pub system_proxy: RwLock<Option<AppliedProxy>>,
     pub window_visible: tokio::sync::watch::Sender<bool>,
     pub traffic_wake: Arc<tokio::sync::Notify>,
+    pub compiled_with_rules: AtomicBool,
 }
 
 impl AppState {
@@ -138,6 +139,7 @@ pub fn run() {
             system_proxy: RwLock::new(initial_proxy),
             window_visible: window_visible_tx,
             traffic_wake: traffic_wake.clone(),
+            compiled_with_rules: AtomicBool::new(false),
         })
         .setup(move |app| {
             use tauri::Manager;
@@ -314,6 +316,10 @@ pub fn run() {
             commands::test_latency,
             commands::recent_logs,
             commands::tun_status,
+            commands::authorize_tun,
+            commands::set_tun,
+            commands::set_rule_mode,
+            commands::test_node_delay,
             commands::system_proxy_status,
             commands::set_system_proxy,
         ])

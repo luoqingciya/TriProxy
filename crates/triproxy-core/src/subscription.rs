@@ -33,7 +33,7 @@ use crate::error::{Error, Result};
 /// bigger than a few megabytes is a misconfigured URL, not a node list.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-const USER_AGENT: &str = concat!("TriProxy/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("clash.meta/1.19 TriProxy/", env!("CARGO_PKG_VERSION"));
 
 /// Everything needed to refresh a subscription later.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

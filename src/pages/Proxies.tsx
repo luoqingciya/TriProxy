@@ -13,7 +13,7 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { Activity, Check, Search, Star, X, Zap } from 'lucide-react'
+import { Activity, Check, LayoutGrid, List, Search, Star, X, Zap } from 'lucide-react'
 import { useDeferredValue, useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
@@ -24,7 +24,17 @@ import type { LatencySample, Protocol } from '../types'
 
 const EMPTY_FAVORITES: string[] = []
 const NAME_COLLATOR = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
+const VIEW_STORAGE_KEY = 'triproxy.proxies.view'
 type SortMode = 'name' | 'latency' | 'favorite'
+type ViewMode = 'grid' | 'list'
+
+function initialViewMode(): ViewMode {
+  try {
+    return window.localStorage.getItem(VIEW_STORAGE_KEY) === 'list' ? 'list' : 'grid'
+  } catch {
+    return 'grid'
+  }
+}
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   shadowsocks: 'SS',
@@ -44,15 +54,27 @@ export function Proxies() {
   const latency = useApp((state) => state.latency)
   const testing = useApp((state) => state.testing)
   const testingProgress = useApp((state) => state.testingProgress)
+  const testingNodeIds = useApp((state) => state.testingNodeIds)
   const setPage = useApp((state) => state.setPage)
   const testLatency = useApp((state) => state.testLatency)
   const testProxyDelay = useApp((state) => state.testProxyDelay)
+  const testNodeDelay = useApp((state) => state.testNodeDelay)
   const selectNode = useApp((state) => state.selectNode)
   const toggleFavorite = useApp((state) => state.toggleFavorite)
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
   const [onlyFavorites, setOnlyFavorites] = useState(false)
   const [sortBy, setSortBy] = useState<SortMode>('name')
+  const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode)
+
+  const changeViewMode = (next: ViewMode) => {
+    setViewMode(next)
+    try {
+      window.localStorage.setItem(VIEW_STORAGE_KEY, next)
+    } catch {
+      // Ignore storage failures.
+    }
+  }
 
   const activeProfile = library.profiles.find((entry) => entry.id === library.active)
   const selectedNodeId = activeProfile?.selected_node ?? null
@@ -112,9 +134,15 @@ export function Proxies() {
         title="节点"
         description={
           activeProfile
-            ? filteredActive
-              ? `来自配置「${activeProfile.name}」，显示 ${visible.length} / ${nodes.length} 个节点`
-              : `来自配置「${activeProfile.name}」，共 ${nodes.length} 个节点`
+            ? `${
+                filteredActive
+                  ? `来自配置「${activeProfile.name}」，显示 ${visible.length} / ${nodes.length} 个节点`
+                  : `来自配置「${activeProfile.name}」，共 ${nodes.length} 个节点`
+              } · ${
+                (activeProfile.rule_count ?? 0) > 0
+                  ? `订阅规则 ${activeProfile.rule_count} 条`
+                  : '内置分流规则'
+              }`
             : '还没有活动配置'
         }
         actions={
@@ -208,10 +236,32 @@ export function Proxies() {
           onClick={() => setOnlyFavorites((value) => !value)}
           label={`收藏 ${favorites.length}`}
         />
+        <div className="flex items-center gap-1 rounded-lg border border-line bg-panel p-1">
+          <button
+            type="button"
+            onClick={() => changeViewMode('grid')}
+            title="卡片网格视图"
+            className={`rounded-md p-1 transition-colors ${
+              viewMode === 'grid' ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg'
+            }`}
+          >
+            <LayoutGrid size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => changeViewMode('list')}
+            title="紧凑列表视图"
+            className={`rounded-md p-1 transition-colors ${
+              viewMode === 'list' ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg'
+            }`}
+          >
+            <List size={14} />
+          </button>
+        </div>
       </div>
 
-      <Card className="p-0">
-        {visible.length === 0 ? (
+      {visible.length === 0 ? (
+        <Card className="p-0">
           <Empty>
             {nodes.length > 0 ? (
               '没有匹配的节点'
@@ -239,7 +289,100 @@ export function Proxies() {
               </>
             )}
           </Empty>
-        ) : (
+        </Card>
+      ) : viewMode === 'grid' ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (!autoSelected) void selectNode(null)
+            }}
+            title="按延迟自动挑选，每 5 分钟重新测速"
+            className={`flex flex-col justify-between rounded-xl border p-3.5 text-left transition-colors ${
+              autoSelected
+                ? 'border-accent/50 bg-accent-soft'
+                : 'border-line bg-panel hover:bg-panel-hover'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <Zap size={14} strokeWidth={2.2} className="shrink-0 text-accent" />
+                <span className="truncate text-[13.5px] font-medium text-fg">自动选择</span>
+              </div>
+              {autoSelected && <Check size={14} strokeWidth={2.6} className="shrink-0 text-accent" />}
+            </div>
+            <div className="mt-2.5 flex items-center justify-between text-[11.5px] text-muted">
+              <span>AUTO · url-test</span>
+              <span className="text-faint">延迟最低优先</span>
+            </div>
+          </button>
+
+          {visible.map((node) => {
+            const isSelected = node.id === selectedNodeId
+            const starred = favoriteSet.has(node.id)
+            const probing = Boolean(testingNodeIds[node.id])
+            return (
+              <div
+                key={node.id}
+                onClick={() => {
+                  if (window.getSelection()?.toString()) return
+                  if (!isSelected) void selectNode(node.id)
+                }}
+                title={isSelected ? '当前已选中此节点' : '点击切换到此节点'}
+                className={`flex cursor-pointer flex-col justify-between rounded-xl border p-3.5 transition-colors ${
+                  isSelected
+                    ? 'border-accent/50 bg-accent-soft'
+                    : 'border-line bg-panel hover:bg-panel-hover'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void toggleFavorite(node.id)
+                      }}
+                      title={starred ? '取消收藏' : '收藏'}
+                      className={starred ? 'shrink-0 text-accent' : 'shrink-0 text-faint hover:text-accent'}
+                    >
+                      <Star size={13} strokeWidth={2.2} fill={starred ? 'currentColor' : 'none'} />
+                    </button>
+                    <span className="truncate text-[13.5px] font-medium text-fg">{node.name}</span>
+                  </div>
+                  {isSelected && <Check size={14} strokeWidth={2.6} className="shrink-0 text-accent" />}
+                </div>
+                <div className="mt-2.5 flex items-center justify-between gap-2 text-[11.5px]">
+                  <span className="truncate text-muted">
+                    {PROTOCOL_LABEL[node.protocol]}
+                    {node.transport !== 'tcp' && ` · ${node.transport}`}
+                    {node.security !== '-' && ` · ${node.security}`}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={probing}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void testNodeDelay(node.id)
+                    }}
+                    title="点击单独测速"
+                    className="shrink-0 rounded-md border border-line/70 bg-panel-2 px-1.5 py-0.5 text-[11px] tabular hover:border-line-strong"
+                  >
+                    {probing ? (
+                      <span className="text-muted">测速中…</span>
+                    ) : latency[node.id] ? (
+                      <LatencyCell sample={latency[node.id]} />
+                    ) : (
+                      <span className="text-faint">测速</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <Card className="p-0">
           <div>
             <div className="grid grid-cols-[1fr_88px_1fr_92px_76px] gap-4 border-b border-line px-5 py-2.5 text-[11px] font-semibold tracking-wide text-faint uppercase">
               <div>名称</div>
@@ -248,11 +391,6 @@ export function Proxies() {
               <div>传输</div>
               <div className="text-right">延迟</div>
             </div>
-            {/*
-              The automatic group sits with the nodes because that is what it is:
-              one more thing to pick. "Nothing selected" now means this row, not
-              "whichever node happens to be first".
-            */}
             <button
               onClick={() => {
                 if (!autoSelected) void selectNode(null)
@@ -285,6 +423,7 @@ export function Proxies() {
               renderRow={(node) => {
                 const isSelected = node.id === selectedNodeId
                 const starred = favoriteSet.has(node.id)
+                const probing = Boolean(testingNodeIds[node.id])
                 return (
                   <div
                     key={node.id}
@@ -305,8 +444,6 @@ export function Proxies() {
                       </span>
                       <button
                         onClick={(event) => {
-                          // Starring must not also switch the node — the click is
-                          // inside the row that does exactly that.
                           event.stopPropagation()
                           void toggleFavorite(node.id)
                         }}
@@ -330,15 +467,30 @@ export function Proxies() {
                       )}
                     </div>
                     <div className="text-right tabular">
-                      <LatencyCell sample={latency[node.id]} />
+                      <button
+                        type="button"
+                        disabled={probing}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void testNodeDelay(node.id)
+                        }}
+                        title="点击单独测速"
+                        className="hover:underline"
+                      >
+                        {probing ? (
+                          <span className="text-muted">…</span>
+                        ) : (
+                          <LatencyCell sample={latency[node.id]} />
+                        )}
+                      </button>
                     </div>
                   </div>
                 )
               }}
             />
           </div>
-        )}
-      </Card>
+        </Card>
+      )}
 
       <p className="mt-3 text-[12px] text-faint">
         TCP 延迟只说明端点可达（凭据错误也会握手成功）；真实延迟由核心通过节点发起请求，

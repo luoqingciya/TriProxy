@@ -115,19 +115,26 @@ impl ConfigCompiler for SingBoxCompiler {
             // The interface is named so a leftover adapter can be identified
             // after a crash; the address is inside a range RFC 1918 reserves for
             // this kind of point-to-point link.
-            inbounds.push(json!({
+            #[allow(unused_mut)]
+            let mut tun_inbound = json!({
                 "type": "tun",
                 "tag": "tun-in",
-                "interface_name": crate::network::tun::INTERFACE_NAME,
                 "address": ["172.19.0.1/30"],
                 "mtu": 9000,
                 "auto_route": true,
                 "strict_route": true,
                 "stack": "mixed",
-            }));
+            });
+            #[cfg(not(target_os = "macos"))]
+            {
+                tun_inbound["interface_name"] = json!(crate::network::tun::INTERFACE_NAME);
+            }
+            inbounds.push(tun_inbound);
         }
 
         let dns_mode = options.dns.effective(options.tun);
+        let mirror = resolve_mirror(options.rule_set_mirror.as_deref());
+        let mut required_geo_sets: Vec<(String, String)> = Vec::new();
 
         // Without a hijack rule the core would forward DNS packets as plain UDP
         // to the original resolver: slow, and the query itself still leaves the
@@ -136,65 +143,116 @@ impl ConfigCompiler for SingBoxCompiler {
         if dns_mode != DnsMode::Off {
             rules.push(json!({ "protocol": "dns", "action": "hijack-dns" }));
         }
+
         // Custom rules first: they are the user's explicit intent and must be
-        // able to override the presets below.
-        for rule in &options.custom_rules {
-            rules.push(custom_rule(rule));
+        // able to override mode switches, subscription rules, and built-in presets.
+        push_batched_rules(
+            &mut rules,
+            &options.custom_rules,
+            mirror.as_deref(),
+            &mut required_geo_sets,
+        );
+
+        if options.rules == RuleMode::Split {
+            rules.push(json!({ "clash_mode": "direct", "action": "route", "outbound": "direct" }));
+            rules.push(
+                json!({ "clash_mode": "global", "action": "route", "outbound": PROXY_GROUP }),
+            );
         }
 
-        // Remote rule-sets. Only `.srs`: sing-box cannot read a Clash provider,
-        // and a bad entry here fails the whole config at load time.
+        // Remote rule-sets (`.srs` binary only for sing-box).
+        let mut seen_tags = std::collections::HashSet::new();
+        let mut declared: Vec<Value> = Vec::new();
+
         let srs_sets: Vec<&RuleSet> = options
             .rule_sets
             .iter()
             .filter(|set| set.format == RuleSetFormat::SingBox)
             .collect();
         for set in &srs_sets {
-            let outbound = match set.target {
-                RuleTarget::Proxy => PROXY_GROUP,
-                RuleTarget::Direct => "direct",
-            };
-            rules.push(json!({
-                "rule_set": set.name,
-                "action": "route",
-                "outbound": outbound,
-            }));
-        }
-
-        if options.rules == RuleMode::Split {
-            // sing-box 1.12 dropped the built-in geoip/geosite databases, so the
-            // split lists come from remote rule-sets instead. They are fetched
-            // directly: routing them through the proxy would deadlock, since the
-            // rule-set is needed to decide what goes through the proxy.
-            rules.push(json!({ "ip_is_private": true, "action": "route", "outbound": "direct" }));
-            rules
-                .push(json!({ "rule_set": "geosite-cn", "action": "route", "outbound": "direct" }));
-            rules.push(json!({ "rule_set": "geoip-cn", "action": "route", "outbound": "direct" }));
-        }
-
-        let mut route = json!({ "final": PROXY_GROUP });
-        if !rules.is_empty() {
-            route["rules"] = json!(rules);
-        }
-
-        // Both the split preset and the user's rule-sets declare entries here;
-        // they are merged rather than overwriting each other.
-        let mut declared: Vec<Value> = Vec::new();
-        if options.rules == RuleMode::Split {
-            if let Some(existing) = split_rule_sets(options.rule_set_mirror.as_deref()).as_array() {
-                declared.extend(existing.iter().cloned());
+            if seen_tags.insert(set.name.clone()) {
+                rules.push(rule_set_match(&set.name, set.target));
+                declared.push(remote_srs_declaration(&set.name, &set.url));
             }
         }
-        for set in &srs_sets {
-            declared.push(json!({
-                "tag": set.name,
-                "type": "remote",
-                "format": "binary",
-                "url": set.url,
-                // Fetched directly: routing the download through the proxy would
-                // deadlock, since the rule-set decides what goes through it.
-                "download_detour": "direct",
-            }));
+
+        let use_subscription_rules =
+            options.rules == RuleMode::Split && profile.has_subscription_rules();
+
+        let mut terminal_reject = false;
+        let final_outbound = match options.rules {
+            RuleMode::Global => PROXY_GROUP,
+            RuleMode::Direct => "direct",
+            RuleMode::Split => {
+                if use_subscription_rules {
+                    for set in &profile.rule_sets {
+                        if set.format == RuleSetFormat::SingBox
+                            && seen_tags.insert(set.name.clone())
+                        {
+                            rules.push(rule_set_match(&set.name, set.target));
+                            declared.push(remote_srs_declaration(&set.name, &set.url));
+                        }
+                    }
+                    push_batched_rules(
+                        &mut rules,
+                        &profile.rules,
+                        mirror.as_deref(),
+                        &mut required_geo_sets,
+                    );
+                    match profile.default_target.unwrap_or(RuleTarget::Proxy) {
+                        RuleTarget::Proxy => PROXY_GROUP,
+                        RuleTarget::Direct => "direct",
+                        RuleTarget::Reject => {
+                            terminal_reject = true;
+                            PROXY_GROUP
+                        }
+                    }
+                } else {
+                    // Built-in split rules work immediately offline, backed up
+                    // by remote SagerNet `.srs` rule-sets for full geo coverage.
+                    let builtin = super::builtin_rules::builtin_split_rules();
+                    push_batched_rules(
+                        &mut rules,
+                        &builtin,
+                        mirror.as_deref(),
+                        &mut required_geo_sets,
+                    );
+                    if seen_tags.insert("geosite-cn".to_string()) {
+                        let url = apply_mirror(
+                            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+                            mirror.as_deref(),
+                        );
+                        declared.push(remote_srs_declaration("geosite-cn", &url));
+                    }
+                    if seen_tags.insert("geoip-cn".to_string()) {
+                        let url = apply_mirror(
+                            "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+                            mirror.as_deref(),
+                        );
+                        declared.push(remote_srs_declaration("geoip-cn", &url));
+                    }
+                    rules.push(json!({ "rule_set": "geosite-cn", "action": "route", "outbound": "direct" }));
+                    rules.push(
+                        json!({ "rule_set": "geoip-cn", "action": "route", "outbound": "direct" }),
+                    );
+                    PROXY_GROUP
+                }
+            }
+        };
+
+        for (tag, url) in required_geo_sets {
+            if seen_tags.insert(tag.clone()) {
+                declared.push(remote_srs_declaration(&tag, &url));
+            }
+        }
+
+        if terminal_reject {
+            rules.push(json!({ "action": "reject" }));
+        }
+
+        let mut route = json!({ "final": final_outbound });
+        if !rules.is_empty() {
+            route["rules"] = json!(rules);
         }
         if !declared.is_empty() {
             route["rule_set"] = json!(declared);
@@ -206,8 +264,10 @@ impl ConfigCompiler for SingBoxCompiler {
             route["default_domain_resolver"] = json!("local-dns");
         }
 
+        let has_geosite_cn = seen_tags.contains("geosite-cn");
         let mut clash_api = json!({
             "external_controller": format!("127.0.0.1:{}", options.api_port),
+            "default_mode": options.rules.clash_mode(),
         });
         if let Some(secret) = options
             .api_secret
@@ -231,7 +291,7 @@ impl ConfigCompiler for SingBoxCompiler {
         });
 
         if dns_mode != DnsMode::Off {
-            document["dns"] = dns_object(dns_mode, options.rules);
+            document["dns"] = dns_object(dns_mode, options.rules, has_geosite_cn);
         }
 
         let mut text =
@@ -251,65 +311,214 @@ impl ConfigCompiler for SingBoxCompiler {
     }
 }
 
-/// DNS section.
-///
-/// The proxy-dns server carries `detour: PROXY`, so lookups for tunnelled
-/// domains are resolved inside the tunnel rather than beside it.
-/// One custom rule as a sing-box route rule.
-///
-/// sing-box keys the match field by type (`domain_suffix`, `ip_cidr`, ...) rather
-/// than taking a `TYPE,value` string, so the neutral model is expanded here.
-fn custom_rule(rule: &CustomRule) -> Value {
-    let outbound = match rule.target {
-        RuleTarget::Proxy => PROXY_GROUP,
-        RuleTarget::Direct => "direct",
-    };
-    let (key, values) = match rule.kind {
-        RuleKind::Domain => ("domain", json!([rule.value])),
-        RuleKind::DomainSuffix => ("domain_suffix", json!([rule.value])),
-        RuleKind::DomainKeyword => ("domain_keyword", json!([rule.value])),
-        RuleKind::IpCidr => ("ip_cidr", json!([rule.value])),
-    };
-
-    let mut object = serde_json::Map::new();
-    object.insert(key.to_string(), values);
-    object.insert("action".to_string(), json!("route"));
-    object.insert("outbound".to_string(), json!(outbound));
-    Value::Object(object)
+fn rule_action_and_outbound(target: RuleTarget) -> (&'static str, Option<&'static str>) {
+    match target {
+        RuleTarget::Proxy => ("route", Some(PROXY_GROUP)),
+        RuleTarget::Direct => ("route", Some("direct")),
+        RuleTarget::Reject => ("reject", None),
+    }
 }
 
-/// Remote rule-sets for the split mode.
-fn split_rule_sets(mirror: Option<&str>) -> Value {
-    let mirror = mirror
+fn rule_set_match(name: &str, target: RuleTarget) -> Value {
+    let (action, outbound) = rule_action_and_outbound(target);
+    let mut obj = Map::new();
+    obj.insert("rule_set".to_string(), json!(name));
+    obj.insert("action".to_string(), json!(action));
+    if let Some(out) = outbound {
+        obj.insert("outbound".to_string(), json!(out));
+    }
+    Value::Object(obj)
+}
+
+fn remote_srs_declaration(tag: &str, url: &str) -> Value {
+    json!({
+        "tag": tag,
+        "type": "remote",
+        "format": "binary",
+        "url": url,
+        // Fetched directly: routing the download through the proxy would
+        // deadlock, since the rule-set decides what goes through it.
+        "download_detour": "direct",
+    })
+}
+
+fn resolve_mirror(mirror: Option<&str>) -> Option<String> {
+    mirror
         .and_then(crate::binaries::normalize_mirror)
         .or_else(|| {
             std::env::var(crate::binaries::MIRROR_ENV)
                 .ok()
                 .and_then(|value| crate::binaries::normalize_mirror(&value))
-        });
-    let with_mirror = |url: &str| match &mirror {
-        Some(prefix) => format!("{prefix}{url}"),
-        None => url.to_string(),
-    };
-    json!([
-        {
-            "tag": "geosite-cn",
-            "type": "remote",
-            "format": "binary",
-            "url": with_mirror("https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"),
-            "download_detour": "direct",
-        },
-        {
-            "tag": "geoip-cn",
-            "type": "remote",
-            "format": "binary",
-            "url": with_mirror("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"),
-            "download_detour": "direct",
-        },
-    ])
+        })
 }
 
-fn dns_object(mode: DnsMode, rules_mode: RuleMode) -> Value {
+fn apply_mirror(url: &str, mirror: Option<&str>) -> String {
+    match mirror {
+        Some(prefix) => format!("{prefix}{url}"),
+        None => url.to_string(),
+    }
+}
+
+/// Supported SagerNet `.srs` rule-set mapping for Clash `GEOSITE` / `GEOIP` rules.
+fn sagernet_geo_rule_set(
+    kind: RuleKind,
+    raw_tag: &str,
+    mirror: Option<&str>,
+) -> Option<(String, String)> {
+    let normalized = raw_tag.trim().to_ascii_lowercase();
+    match kind {
+        RuleKind::GeoSite => {
+            let known = matches!(
+                normalized.as_str(),
+                "cn" | "geolocation-!cn"
+                    | "category-ads-all"
+                    | "apple"
+                    | "google"
+                    | "github"
+                    | "openai"
+                    | "telegram"
+                    | "youtube"
+                    | "microsoft"
+                    | "netflix"
+                    | "private"
+            );
+            if !known {
+                return None;
+            }
+            let tag = format!("geosite-{normalized}");
+            let url = apply_mirror(
+                &format!(
+                    "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/{tag}.srs"
+                ),
+                mirror,
+            );
+            Some((tag, url))
+        }
+        RuleKind::GeoIp => {
+            if normalized != "cn" {
+                return None;
+            }
+            let tag = "geoip-cn".to_string();
+            let url = apply_mirror(
+                "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+                mirror,
+            );
+            Some((tag, url))
+        }
+        _ => None,
+    }
+}
+
+/// Convert neutral rules to compact sing-box route rules, merging consecutive
+/// rules of the same `(kind, target)` into one JSON array rule.
+fn push_batched_rules(
+    out: &mut Vec<Value>,
+    rules: &[CustomRule],
+    mirror: Option<&str>,
+    geo_sets: &mut Vec<(String, String)>,
+) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum BatchKey {
+        Domain,
+        DomainSuffix,
+        DomainKeyword,
+        IpCidr,
+        ProcessName,
+        Port,
+        PortRange,
+    }
+
+    let mut current: Option<(BatchKey, RuleTarget, Vec<Value>)> = None;
+    let flush = |out: &mut Vec<Value>, current: &mut Option<(BatchKey, RuleTarget, Vec<Value>)>| {
+        let Some((key, target, values)) = current.take() else {
+            return;
+        };
+        if values.is_empty() {
+            return;
+        }
+        let field = match key {
+            BatchKey::Domain => "domain",
+            BatchKey::DomainSuffix => "domain_suffix",
+            BatchKey::DomainKeyword => "domain_keyword",
+            BatchKey::IpCidr => "ip_cidr",
+            BatchKey::ProcessName => "process_name",
+            BatchKey::Port => "port",
+            BatchKey::PortRange => "port_range",
+        };
+        let (action, outbound) = rule_action_and_outbound(target);
+        let mut object = Map::new();
+        object.insert(field.to_string(), Value::Array(values));
+        object.insert("action".to_string(), json!(action));
+        if let Some(outbound) = outbound {
+            object.insert("outbound".to_string(), json!(outbound));
+        }
+        out.push(Value::Object(object));
+    };
+
+    for rule in rules {
+        match rule.kind {
+            RuleKind::GeoIp
+                if matches!(
+                    rule.value.trim().to_ascii_lowercase().as_str(),
+                    "lan" | "private"
+                ) =>
+            {
+                flush(out, &mut current);
+                let (action, outbound) = rule_action_and_outbound(rule.target);
+                let mut object = Map::new();
+                object.insert("ip_is_private".to_string(), json!(true));
+                object.insert("action".to_string(), json!(action));
+                if let Some(outbound) = outbound {
+                    object.insert("outbound".to_string(), json!(outbound));
+                }
+                out.push(Value::Object(object));
+            }
+            RuleKind::GeoSite | RuleKind::GeoIp => {
+                flush(out, &mut current);
+                if let Some((tag, url)) = sagernet_geo_rule_set(rule.kind, &rule.value, mirror) {
+                    if !geo_sets.iter().any(|(t, _)| t == &tag) {
+                        geo_sets.push((tag.clone(), url));
+                    }
+                    out.push(rule_set_match(&tag, rule.target));
+                }
+            }
+            _ => {
+                let (key, val) = match rule.kind {
+                    RuleKind::Domain => (BatchKey::Domain, json!(rule.value)),
+                    RuleKind::DomainSuffix => (BatchKey::DomainSuffix, json!(rule.value)),
+                    RuleKind::DomainKeyword => (BatchKey::DomainKeyword, json!(rule.value)),
+                    RuleKind::IpCidr => (BatchKey::IpCidr, json!(rule.value)),
+                    RuleKind::ProcessName => (BatchKey::ProcessName, json!(rule.value)),
+                    RuleKind::DstPort => {
+                        if let Ok(port) = rule.value.trim().parse::<u16>() {
+                            (BatchKey::Port, json!(port))
+                        } else if let Some((s, e)) = rule.value.trim().split_once('-') {
+                            (
+                                BatchKey::PortRange,
+                                json!(format!("{}:{}", s.trim(), e.trim())),
+                            )
+                        } else {
+                            continue;
+                        }
+                    }
+                    RuleKind::GeoSite | RuleKind::GeoIp => unreachable!(),
+                };
+                match &mut current {
+                    Some((k, t, values)) if *k == key && *t == rule.target => {
+                        values.push(val);
+                    }
+                    _ => {
+                        flush(out, &mut current);
+                        current = Some((key, rule.target, vec![val]));
+                    }
+                }
+            }
+        }
+    }
+    flush(out, &mut current);
+}
+
+fn dns_object(mode: DnsMode, rules_mode: RuleMode, has_geosite_cn: bool) -> Value {
     let mut servers = vec![
         json!({
             "tag": "proxy-dns",
@@ -325,16 +534,24 @@ fn dns_object(mode: DnsMode, rules_mode: RuleMode) -> Value {
     ];
 
     let mut dns = serde_json::Map::new();
-    dns.insert("final".to_string(), json!("proxy-dns"));
+    dns.insert(
+        "final".to_string(),
+        json!(if rules_mode == RuleMode::Direct {
+            "local-dns"
+        } else {
+            "proxy-dns"
+        }),
+    );
 
     let mut dns_rules = Vec::new();
     match rules_mode {
-        RuleMode::Split => {
+        RuleMode::Split if has_geosite_cn => {
             dns_rules.push(json!({ "rule_set": "geosite-cn", "server": "local-dns" }))
         }
-        RuleMode::Global => {
+        RuleMode::Split | RuleMode::Global => {
             dns_rules.push(json!({ "domain_suffix": ["cn"], "server": "local-dns" }))
         }
+        RuleMode::Direct => {}
     }
 
     if mode == DnsMode::FakeIp {
@@ -688,6 +905,7 @@ mod tests {
         let document: Value = serde_json::from_str(&compiled.text).unwrap();
         let tun = &document["inbounds"][1];
         assert_eq!(tun["type"], "tun");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(tun["interface_name"], crate::network::tun::INTERFACE_NAME);
         assert_eq!(tun["auto_route"], true);
         // The mixed inbound stays: explicit clients still need a port.
@@ -718,7 +936,7 @@ mod tests {
 
         let rules = document["route"]["rules"].as_array().unwrap();
         assert!(rules.iter().any(|r| r["rule_set"] == "geosite-cn"));
-        assert!(rules.iter().any(|r| r["ip_is_private"] == true));
+        assert!(rules.iter().any(|r| r["ip_cidr"].is_array()));
     }
 
     #[test]
@@ -864,5 +1082,50 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("https://ghfast.top/https://raw.githubusercontent.com/"));
+    }
+
+    #[test]
+    fn reject_rule_uses_modern_reject_action_and_subscription_rules_take_precedence() {
+        let node = node_with(
+            Credentials::Trojan {
+                password: "pw".to_string(),
+            },
+            Some(TlsConfig::default()),
+        );
+        let mut profile = Profile::new("p", vec![node]);
+        profile.rules = vec![
+            CustomRule {
+                kind: RuleKind::Domain,
+                value: "ads.example.com".to_string(),
+                target: RuleTarget::Reject,
+            },
+            CustomRule {
+                kind: RuleKind::DomainSuffix,
+                value: "sub.example.com".to_string(),
+                target: RuleTarget::Direct,
+            },
+        ];
+        let options = CompileOptions {
+            rules: RuleMode::Split,
+            ..Default::default()
+        };
+        let compiled = SingBoxCompiler.compile(&profile, &options).unwrap();
+        let document: Value = serde_json::from_str(&compiled.text).unwrap();
+        let rules = document["route"]["rules"].as_array().unwrap();
+        let reject_rule = rules
+            .iter()
+            .find(|r| r["domain"] == json!(["ads.example.com"]))
+            .unwrap();
+        assert_eq!(reject_rule["action"], "reject");
+        assert!(reject_rule.get("outbound").is_none());
+        assert!(
+            rules
+                .iter()
+                .any(|r| r["domain_suffix"] == json!(["sub.example.com"])
+                    && r["outbound"] == "direct")
+        );
+        assert!(!rules
+            .iter()
+            .any(|r| r["domain_suffix"] == json!(["qq.com"])));
     }
 }

@@ -406,6 +406,37 @@ impl ControllerClient {
         Ok(group.now)
     }
 
+    /// Switch the core's routing mode live (`"rule"`, `"global"`, or `"direct"`).
+    ///
+    /// Both Mihomo (`PATCH /configs`) and sing-box (`clash_api` `PATCH /configs`)
+    /// apply this immediately without restarting connections or recreating TUN.
+    pub async fn set_mode(&self, mode: &str) -> Result<()> {
+        let response = self
+            .auth(self.http.patch(format!("{}/configs", self.base)))
+            .json(&serde_json::json!({ "mode": mode }))
+            .send()
+            .await
+            .map_err(|error| Error::Other(format!("cannot switch mode: {error}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Other(format!(
+                "switching mode to `{mode}` failed (HTTP {status}): {body}"
+            )));
+        }
+
+        if mode.eq_ignore_ascii_case("global") {
+            // In Mihomo's global mode, traffic uses the built-in `GLOBAL`
+            // selector group rather than `PROXY`; point `GLOBAL` at `PROXY`
+            // so the user's selected node / AUTO choice still applies.
+            let _ = self
+                .select_proxy("GLOBAL", crate::compiler::PROXY_GROUP)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Real proxy latency: the core makes an HTTP request through the node.
     ///
     /// Unlike the TCP probe, this fails when the credentials or protocol are

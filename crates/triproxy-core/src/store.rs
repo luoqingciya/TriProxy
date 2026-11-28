@@ -54,6 +54,9 @@ pub struct StoredProfile {
     pub source: String,
     pub format: InputFormat,
     pub node_count: usize,
+    /// Number of subscription-provided rules / rule-sets imported with the profile.
+    #[serde(default)]
+    pub rule_count: usize,
     /// Content fingerprint of the stored profile (see [`Profile::id`]).
     pub content_id: String,
     pub updated_at_ms: u64,
@@ -581,6 +584,7 @@ fn summarise(record: &Record) -> StoredProfile {
         source: record.profile.metadata.source.clone(),
         format: record.profile.metadata.format,
         node_count: record.profile.nodes.len(),
+        rule_count: record.profile.rules.len() + record.profile.rule_sets.len(),
         content_id: record.profile.id.clone(),
         updated_at_ms: record.stored_at_ms,
         subscription: record.subscription.clone(),

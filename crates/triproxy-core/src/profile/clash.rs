@@ -13,16 +13,19 @@
 
 //! Clash / Clash.Meta configuration import.
 //!
-//! Scope: the `proxies:` list. Groups and rules are ignored, because this
-//! program generates its own single `PROXY` group and its own routing — importing
-//! a Clash `rules:` block would mean reimplementing Clash's rule engine, which is
-//! a different product.
-//!
-//! Unsupported proxy types are reported as warnings and skipped, never silently
-//! dropped: a user importing a 60-node config needs to know that 12 of them
-//! did not make it and why.
+//! Parses `proxies`, `proxy-groups`, `rule-providers`, and `rules` so that
+//! subscriptions with provider-defined routing rules carry them cleanly into
+//! TriProxy's unified `Profile` model. Unsupported proxy types are reported as
+//! warnings rather than dropping the rest of the config.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
+
+use crate::compiler::{
+    rules::{valid_cidr, valid_port_spec},
+    CustomRule, RuleKind, RuleSet, RuleSetBehavior, RuleSetFormat, RuleTarget,
+};
 
 use super::node::{
     Credentials, GrpcOptions, Http2Options, Node, RealityConfig, TlsConfig, Transport, VlessFlow,
@@ -34,6 +37,41 @@ use super::validate::{Diagnostic, Severity};
 struct ClashConfig {
     #[serde(default)]
     proxies: Vec<ClashProxy>,
+    #[serde(rename = "proxy-groups", default)]
+    proxy_groups: Vec<ClashGroup>,
+    #[serde(rename = "rule-providers", default)]
+    rule_providers: BTreeMap<String, ClashRuleProvider>,
+    #[serde(default)]
+    rules: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ClashGroup {
+    name: String,
+    #[serde(default)]
+    proxies: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ClashRuleProvider {
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+    #[serde(default)]
+    behavior: Option<String>,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// Complete output of parsing a Clash / Mihomo YAML configuration.
+#[derive(Debug, Clone)]
+pub struct ClashParsed {
+    pub nodes: Vec<Node>,
+    pub rules: Vec<CustomRule>,
+    pub rule_sets: Vec<RuleSet>,
+    pub default_target: Option<RuleTarget>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,8 +189,8 @@ struct PluginOpts {
     tls: Option<bool>,
 }
 
-/// Parse a Clash configuration into nodes plus diagnostics.
-pub fn parse(text: &str) -> (Vec<Node>, Vec<Diagnostic>) {
+/// Parse a Clash configuration into nodes, routing rules, rule providers, and diagnostics.
+pub fn parse_full(text: &str) -> ClashParsed {
     let mut diagnostics = Vec::new();
 
     let config: ClashConfig = match serde_norway::from_str(text) {
@@ -163,7 +201,13 @@ pub fn parse(text: &str) -> (Vec<Node>, Vec<Diagnostic>) {
                 "clash.invalid_yaml",
                 format!("cannot parse the configuration: {error}"),
             ));
-            return (Vec::new(), diagnostics);
+            return ClashParsed {
+                nodes: Vec::new(),
+                rules: Vec::new(),
+                rule_sets: Vec::new(),
+                default_target: None,
+                diagnostics,
+            };
         }
     };
 
@@ -173,7 +217,13 @@ pub fn parse(text: &str) -> (Vec<Node>, Vec<Diagnostic>) {
             "clash.no_proxies",
             "the configuration has no proxies",
         ));
-        return (Vec::new(), diagnostics);
+        return ClashParsed {
+            nodes: Vec::new(),
+            rules: Vec::new(),
+            rule_sets: Vec::new(),
+            default_target: None,
+            diagnostics,
+        };
     }
 
     let mut nodes = Vec::with_capacity(config.proxies.len());
@@ -188,7 +238,236 @@ pub fn parse(text: &str) -> (Vec<Node>, Vec<Diagnostic>) {
         }
     }
 
-    (nodes, diagnostics)
+    let group_map: HashMap<String, Vec<String>> = config
+        .proxy_groups
+        .into_iter()
+        .map(|group| (group.name.trim().to_string(), group.proxies))
+        .collect();
+
+    let (rules, rule_sets, default_target) =
+        parse_clash_rules(&config.rules, &config.rule_providers, &group_map);
+
+    ClashParsed {
+        nodes,
+        rules,
+        rule_sets,
+        default_target,
+        diagnostics,
+    }
+}
+
+/// Parse a Clash configuration into nodes plus diagnostics.
+pub fn parse(text: &str) -> (Vec<Node>, Vec<Diagnostic>) {
+    let parsed = parse_full(text);
+    (parsed.nodes, parsed.diagnostics)
+}
+
+fn resolve_target(name: &str, groups: &HashMap<String, Vec<String>>, depth: u8) -> RuleTarget {
+    let trimmed = name.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    match upper.as_str() {
+        "DIRECT" => return RuleTarget::Direct,
+        "REJECT" | "REJECT-DROP" => return RuleTarget::Reject,
+        "PROXY" => return RuleTarget::Proxy,
+        _ => {}
+    }
+
+    if depth >= 4 {
+        return RuleTarget::Proxy;
+    }
+
+    if let Some(members) = groups.get(trimmed) {
+        if let Some(first) = members.first() {
+            let first_trim = first.trim();
+            let first_upper = first_trim.to_ascii_uppercase();
+            if first_upper == "DIRECT" {
+                return RuleTarget::Direct;
+            }
+            if matches!(first_upper.as_str(), "REJECT" | "REJECT-DROP") {
+                return RuleTarget::Reject;
+            }
+            if groups.contains_key(first_trim) {
+                return resolve_target(first_trim, groups, depth + 1);
+            }
+            return RuleTarget::Proxy;
+        }
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("direct") || trimmed.contains("直连") {
+        RuleTarget::Direct
+    } else if lower.contains("reject")
+        || lower.contains("adblock")
+        || trimmed.contains("拦截")
+        || trimmed.contains("净化")
+        || trimmed.contains("广告")
+    {
+        RuleTarget::Reject
+    } else {
+        RuleTarget::Proxy
+    }
+}
+
+fn parse_clash_rules(
+    raw_rules: &[String],
+    providers: &BTreeMap<String, ClashRuleProvider>,
+    groups: &HashMap<String, Vec<String>>,
+) -> (Vec<CustomRule>, Vec<RuleSet>, Option<RuleTarget>) {
+    let mut rules = Vec::new();
+    let mut rule_sets = Vec::new();
+    let mut seen_provider_names: HashSet<String> = HashSet::new();
+    let mut default_target = None;
+
+    for raw in raw_rules {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+
+        let fields: Vec<&str> = trimmed.split(',').map(str::trim).collect();
+        if fields.len() < 2 {
+            continue;
+        }
+
+        let kind_upper = fields[0].to_ascii_uppercase();
+        if matches!(kind_upper.as_str(), "MATCH" | "FINAL") {
+            default_target = Some(resolve_target(fields[1], groups, 0));
+            continue;
+        }
+
+        if fields.len() < 3 {
+            continue;
+        }
+
+        let target = resolve_target(fields[2], groups, 0);
+        let value = fields[1];
+        if value.is_empty() {
+            continue;
+        }
+
+        if kind_upper == "RULE-SET" {
+            if let Some(provider) = providers.get(value) {
+                if let Some(set) =
+                    build_clash_rule_set(value, provider, target, &mut seen_provider_names)
+                {
+                    rule_sets.push(set);
+                }
+            }
+            continue;
+        }
+
+        let kind = match kind_upper.as_str() {
+            "DOMAIN" => RuleKind::Domain,
+            "DOMAIN-SUFFIX" => RuleKind::DomainSuffix,
+            "DOMAIN-KEYWORD" => RuleKind::DomainKeyword,
+            "IP-CIDR" | "IP-CIDR6" => {
+                if !valid_cidr(value) {
+                    continue;
+                }
+                RuleKind::IpCidr
+            }
+            "GEOSITE" => RuleKind::GeoSite,
+            "GEOIP" => RuleKind::GeoIp,
+            "PROCESS-NAME" => RuleKind::ProcessName,
+            "DST-PORT" => {
+                if !valid_port_spec(value) {
+                    continue;
+                }
+                RuleKind::DstPort
+            }
+            _ => continue,
+        };
+
+        rules.push(CustomRule {
+            kind,
+            value: value.to_string(),
+            target,
+        });
+    }
+
+    (rules, rule_sets, default_target)
+}
+
+fn build_clash_rule_set(
+    provider_key: &str,
+    provider: &ClashRuleProvider,
+    target: RuleTarget,
+    seen_names: &mut HashSet<String>,
+) -> Option<RuleSet> {
+    if provider
+        .kind
+        .as_deref()
+        .is_some_and(|kind| !kind.eq_ignore_ascii_case("http"))
+    {
+        return None;
+    }
+
+    let url = provider.url.as_deref()?.trim();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return None;
+    }
+
+    let behavior = match provider
+        .behavior
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("domain") => RuleSetBehavior::Domain,
+        Some("ipcidr") => RuleSetBehavior::IpCidr,
+        _ => RuleSetBehavior::Classical,
+    };
+
+    let url_path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
+    let format = match provider
+        .format
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("mrs") | Some("yaml") | Some("yml") => RuleSetFormat::Clash,
+        Some("srs") => RuleSetFormat::SingBox,
+        _ if url_path.ends_with(".srs") => RuleSetFormat::SingBox,
+        _ => RuleSetFormat::Clash,
+    };
+
+    let base: String = provider_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = if base.is_empty() {
+        "sub-rules".to_string()
+    } else {
+        base
+    };
+    let mut name = base.clone();
+    if !seen_names.insert(name.clone()) {
+        for suffix in 2.. {
+            let candidate = format!("{base}-{suffix}");
+            if seen_names.insert(candidate.clone()) {
+                name = candidate;
+                break;
+            }
+        }
+    }
+
+    Some(RuleSet {
+        name,
+        url: url.to_string(),
+        target,
+        behavior,
+        format,
+    })
 }
 
 fn convert(proxy: ClashProxy) -> Result<Node, String> {
@@ -515,5 +794,54 @@ proxies:
         assert!(looks_like_clash("proxies:\n  - name: a\n"));
         assert!(looks_like_clash("port: 7890\nproxies: []\n"));
         assert!(!looks_like_clash("trojan://pw@a.example.com:443#A\n"));
+    }
+
+    #[test]
+    fn imports_clash_rules_groups_and_rule_providers() {
+        let text = r#"
+proxies:
+  - name: NodeA
+    type: trojan
+    server: t.example.com
+    port: 443
+    password: pw
+proxy-groups:
+  - name: 🚀 节点选择
+    type: select
+    proxies:
+      - NodeA
+  - name: 🎯 全球直连
+    type: select
+    proxies:
+      - DIRECT
+  - name: 🛑 全球拦截
+    type: select
+    proxies:
+      - REJECT
+rule-providers:
+  reject_ads:
+    type: http
+    behavior: domain
+    format: mrs
+    url: https://example.com/ads.mrs
+rules:
+  - RULE-SET,reject_ads,🛑 全球拦截
+  - DOMAIN-SUFFIX,internal.corp,🎯 全球直连
+  - DOMAIN,openai.com,🚀 节点选择
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - GEOIP,CN,🎯 全球直连
+  - MATCH,🚀 节点选择
+"#;
+        let parsed = parse_full(text);
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.rule_sets.len(), 1);
+        assert_eq!(parsed.rule_sets[0].target, RuleTarget::Reject);
+        assert_eq!(parsed.rules.len(), 4);
+        assert_eq!(parsed.rules[0].kind, RuleKind::DomainSuffix);
+        assert_eq!(parsed.rules[0].target, RuleTarget::Direct);
+        assert_eq!(parsed.rules[1].target, RuleTarget::Proxy);
+        assert_eq!(parsed.rules[2].kind, RuleKind::IpCidr);
+        assert_eq!(parsed.rules[3].kind, RuleKind::GeoIp);
+        assert_eq!(parsed.default_target, Some(RuleTarget::Proxy));
     }
 }

@@ -111,7 +111,7 @@ export function Profiles() {
                 className="w-full resize-y rounded-lg border border-line bg-panel-2 px-3 py-2 font-mono text-[12px] leading-relaxed text-fg outline-none placeholder:text-faint focus:border-line-strong"
               />
               <p className="mt-1.5 text-[12px] text-faint">
-                支持订阅 URL、Shadowsocks / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS5 / HTTP。单行解析失败不会影响其余节点；按 Ctrl/⌘+Enter 快速保存。
+                支持订阅 URL、Shadowsocks / VMess / VLESS / Trojan / Hysteria2 / TUIC / SOCKS5 / HTTP。导入 Clash 订阅时会自动继承其规则，没有规则时使用内置分流规则；按 Ctrl/⌘+Enter 快速保存。
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -159,6 +159,10 @@ export function Profiles() {
                     </div>
                     <div className="mt-1 text-[12.5px] text-muted tabular">
                       {profile.node_count} 个节点 ·{' '}
+                      {(profile.rule_count ?? 0) > 0
+                        ? `${profile.rule_count} 条订阅规则`
+                        : '内置分流规则'}{' '}
+                      ·{' '}
                       {profile.format === 'base64_subscription'
                         ? 'base64 订阅'
                         : profile.format === 'clash_yaml'
@@ -169,7 +173,7 @@ export function Profiles() {
                       )}
                     </div>
                     <div className="mt-1 truncate text-[12px] text-faint">
-                      {profile.source || '—'}
+                      {profile.source === 'pasted' ? '本地导入' : profile.source || '—'}
                     </div>
                     {profile.subscription?.last_error && (
                       <div
