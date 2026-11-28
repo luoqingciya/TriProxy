@@ -4,26 +4,25 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
-## 本次更新（v0.2.10）
+## 本次更新（v0.2.11-rc.2 预发布体验版）
 
-**这一版是一次围绕稳定性、安全性、性能与前后端一致性的全面优化。**
+**这是一个用于体验 TUN 图形化提权、订阅/内置规则与 FlClash 风格交互的预发布版本（Pre-release），不会覆盖当前稳定版 `v0.2.10`。**
 
-### 控制器与连接体验
+### TUN 一键提权与 `triproxy` 网卡
 
-- **控制器字段对齐与鉴权**：修复 Mihomo / sing-box 控制器快照及连接字段在 `camelCase` 与 `snake_case` 上的解析差异；自动生成并校验 Bearer `api_secret`，控制器请求跳过系统代理，设置页新增 `api_port` 配置
-- **流量流与轮询优化**：桌面端改为后台常驻订阅流量流并复用缓存的控制器客户端；页面不可见（`document.hidden`）时暂停后台轮询，降低空闲资源开销
+- **图形化弹窗输入密码授权**：首次开启 TUN 时自动弹出系统授权窗口（Linux 通过 `pkexec` 加载 `tun` 并为 `sing-box` / `mihomo` 授予 `cap_net_admin`；macOS 通过 `osascript`；Windows 通过 UAC 提权重启），只读包（AppImage/RPM/DEB）中的核心会自动迁移至 `<data>/bin` 并持久生效，无需每次启动手动执行 `sudo`
+- **能力探测与网卡命名**：Linux 启动前可准确识别核心已持有的 `cap_net_admin` 文件能力；TUN 网卡名称统一设为 **`triproxy`**
 
-### 路由、DNS 与内核生命周期
+### 订阅规则优先 + 内置开箱分流
 
-- **DNS 直连分流与规则集镜像**：补齐国内域名直连 DNS 分流规则（Mihomo `nameserver-policy`；sing-box 在 `fakeip` 前让 `geosite-cn`/`cn` 走 `local-dns`），并为 sing-box 规则集补齐下载镜像支持
-- **端口与配置一致性**：修复 Xray 监听端口为 `65535` 时的 HTTP 端口冲突并统一 `http_proxy_port` 计算；`start`/`switch` 完整保留已保存的 `tun`、`system_proxy`、`api_port`、`api_secret`、`rule_set_mirror` 配置，同核心切换走重载路径
-- **代理与进程健壮性**：补齐 macOS / GNOME 系统代理绕过域名格式化与写入失败回滚；核心日志管道改为有界通道 + `BufWriter` 并支持运行时轮转；进程探测增加 PID 复用与 Linux 僵尸进程防护，核心下载更新先校验可用性再替换
+- **完整保留订阅规则**：导入 Clash YAML 订阅时同步解析 `rules`、`proxy-groups` 与 `rule-providers`（含 `REJECT` 与 `GEOSITE`/`GEOIP`/`PROCESS-NAME`/`DST-PORT`/`RULE-SET`）
+- **内置分流规则兜底**：当订阅不含规则（如 URI 列表 / base64 订阅）时，自动启用软件内置实用分流规则 + 核心 Geo 规则；编译优先级为 **自定义规则 > 订阅自带规则 > 内置分流规则**
+- **三模式免重启秒切**：新增 `规则 / 全局 / 直连` 三模式，运行中通过控制器 `PATCH /configs` 即时生效，无需重启核心
 
-### 安全、存储与桌面端细节
+### FlClash 级桌面体验（含 v0.2.11-rc.1 性能与交互优化）
 
-- **原子写入与路径校验**：配置与设置保存统一使用临时文件原子替换（`write_atomic`），profile ID 全路径校验防止路径穿越
-- **桌面端与 CLI 改进**：支持冷启动传入的 `triproxy://` 深链接并校验 `http://`/`https://` 来源；资料页支持直接导入 URL 订阅；同步 I/O 与系统平台调用移入 `spawn_blocking` 避免阻塞界面，通知与错误横幅改为分层堆叠；CLI 拆分为模块化子命令，延迟测速并发化并改用批量内存读取
-- **文档修正**：更正 Fedora RPM 依赖说明与实际卸载包名（`tri-proxy`）
+- **仪表盘与节点体验**：网络模式提供 TUN 一键开关与三态代理模式控制；节点页默认采用 FlClash 风格多列卡片网格视图（可切换列表），支持每张卡片单独点击实时测速；切换活动配置时自动热重载核心
+- **运行效率优化**：30 秒核心状态缓存、`profiles/index.json` 元数据缓存、隐藏窗口自动暂停 `/traffic` 流、并发分享与真实测速流式推送、长列表虚拟滚动与 `Ctrl/⌘ + 1..6` 全局快捷键
 
 ### v0.2.0 起的功能
 
