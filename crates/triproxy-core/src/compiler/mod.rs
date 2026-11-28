@@ -40,7 +40,8 @@ pub mod xray;
 pub mod yaml;
 
 pub use rules::{
-    parse_rule_sets, parse_rules, CustomRule, RuleError, RuleKind, RuleSet, RuleSetBehavior,
+    build_effective_rules, parse_rule_sets, parse_rules, CustomRule, EffectiveRuleEntry,
+    EffectiveRuleSetEntry, EffectiveRulesView, RuleError, RuleKind, RuleSet, RuleSetBehavior,
     RuleSetFormat, RuleTarget,
 };
 
@@ -69,6 +70,26 @@ pub const AUTO_TEST_INTERVAL_SECS: u64 = 300;
 /// nothing else.
 pub const AUTO_TEST_URL: &str = "http://www.gstatic.com/generate_204";
 
+/// TUN packet processing stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TunStack {
+    #[default]
+    Mixed,
+    Gvisor,
+    System,
+}
+
+impl TunStack {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TunStack::Mixed => "mixed",
+            TunStack::Gvisor => "gvisor",
+            TunStack::System => "system",
+        }
+    }
+}
+
 /// Knobs that are about the local listener, not about the profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompileOptions {
@@ -83,6 +104,15 @@ pub struct CompileOptions {
     pub allow_lan: bool,
     /// Create a TUN interface instead of only a local mixed port.
     pub tun: bool,
+    /// TUN packet stack (`mixed`, `gvisor`, or `system`).
+    #[serde(default)]
+    pub tun_stack: TunStack,
+    /// Enable strict route on TUN inbound to eliminate DNS/traffic leaks.
+    #[serde(default = "default_strict_route")]
+    pub strict_route: bool,
+    /// Enable IPv6 handling in TUN, DNS, and core listeners.
+    #[serde(default)]
+    pub ipv6: bool,
     /// How the core resolves names. See [`DnsMode`].
     pub dns: DnsMode,
     /// How traffic is split between the proxy and a direct connection.
@@ -107,6 +137,10 @@ pub struct CompileOptions {
     /// Optional mirror prefix applied to GitHub-hosted rule-sets (e.g. sing-box split).
     #[serde(default)]
     pub rule_set_mirror: Option<String>,
+}
+
+fn default_strict_route() -> bool {
+    true
 }
 
 /// Routing strategy.
@@ -166,11 +200,11 @@ impl DnsMode {
 
     /// TUN cannot work well without the core answering DNS itself: without a
     /// hijack rule the queries are just tunnelled to the original resolver as
-    /// plain UDP, which is both slow and leaky. So TUN upgrades Off to Split
-    /// unless the caller explicitly asked for something else.
+    /// plain UDP, which is both slow and leaky. Upgrading Off to FakeIp under TUN
+    /// also avoids systemd-resolved / stub-resolver routing loops on Linux.
     pub fn effective(self, tun: bool) -> DnsMode {
         match (self, tun) {
-            (DnsMode::Off, true) => DnsMode::Split,
+            (DnsMode::Off, true) => DnsMode::FakeIp,
             (mode, _) => mode,
         }
     }
@@ -185,6 +219,9 @@ impl Default for CompileOptions {
             log_level: "info".to_string(),
             allow_lan: false,
             tun: false,
+            tun_stack: TunStack::default(),
+            strict_route: true,
+            ipv6: false,
             dns: DnsMode::Off,
             rules: RuleMode::Global,
             selected_node: None,
@@ -366,6 +403,124 @@ pub fn compile_all(
         .collect()
 }
 
+/// Build acyclic, non-empty subscription proxy groups referencing only
+/// included nodes, other kept groups, `PROXY`, `AUTO`, `DIRECT`, (and `REJECT`
+/// when `allow_reject` is true).
+pub(crate) fn resolved_subscription_groups(
+    profile: &Profile,
+    included: &[String],
+    allow_reject: bool,
+) -> Vec<crate::profile::ProxyGroup> {
+    use std::collections::{HashMap, HashSet};
+
+    let included_set: HashSet<&str> = included.iter().map(String::as_str).collect();
+    let is_reserved = |name: &str| {
+        matches!(
+            name.trim().to_ascii_uppercase().as_str(),
+            "" | "PROXY" | "AUTO" | "GLOBAL" | "DIRECT" | "REJECT" | "REJECT-DROP" | "BLOCK"
+        )
+    };
+
+    let mut candidate_names = HashSet::new();
+    let mut candidates = Vec::new();
+    for group in &profile.groups {
+        let trimmed = group.name.trim();
+        if is_reserved(trimmed) || !candidate_names.insert(trimmed.to_string()) {
+            continue;
+        }
+        let mut g = group.clone();
+        g.name = trimmed.to_string();
+        candidates.push(g);
+    }
+
+    // Prune empty groups to fixed point.
+    loop {
+        let valid_groups: HashSet<String> = candidates.iter().map(|g| g.name.clone()).collect();
+        let before = candidates.len();
+        candidates.retain_mut(|group| {
+            let mut seen_members = HashSet::new();
+            group.members.retain_mut(|member| {
+                let m = member.trim().to_string();
+                *member = m;
+                let upper = member.to_ascii_uppercase();
+                let valid = if upper == "DIRECT" {
+                    *member = "DIRECT".to_string();
+                    true
+                } else if matches!(upper.as_str(), "REJECT" | "REJECT-DROP") {
+                    if allow_reject {
+                        *member = "REJECT".to_string();
+                        true
+                    } else {
+                        false
+                    }
+                } else if member == PROXY_GROUP
+                    || member == AUTO_GROUP
+                    || included_set.contains(member.as_str())
+                {
+                    true
+                } else {
+                    valid_groups.contains(member.as_str()) && member != &group.name
+                };
+                valid && seen_members.insert(member.clone())
+            });
+            !group.members.is_empty()
+        });
+        if candidates.len() == before {
+            break;
+        }
+    }
+
+    // Break any mutual group cycles (which sing-box rejects as outbound cycles).
+    let name_to_idx: HashMap<String, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.name.clone(), i))
+        .collect();
+    let mut visited = vec![0u8; candidates.len()]; // 0=unvisited, 1=visiting, 2=done
+    let mut bad_edges: HashSet<(usize, String)> = HashSet::new();
+
+    fn dfs(
+        idx: usize,
+        candidates: &[crate::profile::ProxyGroup],
+        name_to_idx: &HashMap<String, usize>,
+        visited: &mut [u8],
+        bad_edges: &mut HashSet<(usize, String)>,
+    ) {
+        visited[idx] = 1;
+        for member in &candidates[idx].members {
+            if let Some(&next) = name_to_idx.get(member) {
+                match visited[next] {
+                    0 => dfs(next, candidates, name_to_idx, visited, bad_edges),
+                    1 => {
+                        bad_edges.insert((idx, member.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        visited[idx] = 2;
+    }
+
+    for i in 0..candidates.len() {
+        if visited[i] == 0 {
+            dfs(i, &candidates, &name_to_idx, &mut visited, &mut bad_edges);
+        }
+    }
+
+    if !bad_edges.is_empty() {
+        for (idx, group) in candidates.iter_mut().enumerate() {
+            group
+                .members
+                .retain(|m| !bad_edges.contains(&(idx, m.clone())));
+            if group.members.is_empty() {
+                group.members.push(PROXY_GROUP.to_string());
+            }
+        }
+    }
+
+    candidates
+}
+
 /// Reasons no core can express a node faithfully.
 ///
 /// These are not "unsupported by this core" but "unsupported by the protocol":
@@ -519,6 +674,7 @@ mod tests {
                 kind: RuleKind::DomainSuffix,
                 value: "corp.internal".to_string(),
                 target: RuleTarget::Direct,
+                group: None,
             }],
             ..Default::default()
         };
@@ -537,9 +693,19 @@ mod tests {
 
         let singbox = compile(CoreKind::SingBox, &profile, &options).unwrap();
         let document: serde_json::Value = serde_json::from_str(&singbox.text).unwrap();
-        let first = &document["route"]["rules"][0];
-        assert_eq!(first["domain_suffix"][0], "corp.internal");
-        assert_eq!(first["outbound"], "direct");
+        let rules = document["route"]["rules"].as_array().unwrap();
+        let custom_pos = rules
+            .iter()
+            .position(|r| r["domain_suffix"] == serde_json::json!(["corp.internal"]))
+            .unwrap();
+        let preset_pos = rules
+            .iter()
+            .position(|r| r["rule_set"] == "geosite-cn")
+            .unwrap();
+        assert!(
+            custom_pos < preset_pos,
+            "custom rule must precede preset: {rules:?}"
+        );
 
         let xray = compile(CoreKind::Xray, &profile, &options).unwrap();
         let document: serde_json::Value = serde_json::from_str(&xray.text).unwrap();
@@ -560,6 +726,7 @@ mod tests {
                 kind: RuleKind::IpCidr,
                 value: "10.0.0.0/8".to_string(),
                 target: RuleTarget::Direct,
+                group: None,
             }],
             ..Default::default()
         };
@@ -671,7 +838,7 @@ mod tests {
             .iter()
             .map(|entry| entry["tag"].as_str().unwrap())
             .collect();
-        assert_eq!(tags, vec!["us"], "{tags:?}");
+        assert_eq!(tags, vec!["us", "geosite-cn", "geoip-cn"], "{tags:?}");
 
         // Xray has no rule-set concept at all; the entry must not leak into it.
         let xray = compile(CoreKind::Xray, &profile, &options).unwrap();

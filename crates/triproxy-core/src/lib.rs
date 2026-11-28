@@ -60,11 +60,14 @@ pub mod subscription_service;
 pub use binaries::{InstallOptions, InstalledBinary, UpdateCheck, UpdateStatus};
 pub use capability::{CoreCapability, ProfileRequirement, Protocol};
 pub use compiler::{
-    compile, compile_all, parse_rule_sets, parse_rules, CompileError, CompileOptions,
-    CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleError, RuleKind, RuleMode, RuleSet,
-    RuleSetBehavior, RuleSetFormat, RuleTarget, SkippedNode, AUTO_GROUP, PROXY_GROUP,
+    build_effective_rules, compile, compile_all, parse_rule_sets, parse_rules, CompileError,
+    CompileOptions, CompiledConfig, ConfigCompiler, CustomRule, DnsMode, EffectiveRuleEntry,
+    EffectiveRuleSetEntry, EffectiveRulesView, RuleError, RuleKind, RuleMode, RuleSet,
+    RuleSetBehavior, RuleSetFormat, RuleTarget, SkippedNode, TunStack, AUTO_GROUP, PROXY_GROUP,
 };
-pub use controller::{ConnectionInfo, ConnectionsSnapshot, ControllerClient, TrafficSample};
+pub use controller::{
+    ConnectionInfo, ConnectionsSnapshot, ControllerClient, ProxyGroupInfo, TrafficSample,
+};
 pub use core::{
     CoreKind, CoreManager, CoreReport, ManagerStatus, ProxyCore, RecoveryReport, StartReport,
     SwitchReport, SwitchStep, DEFAULT_API_PORT,
@@ -72,15 +75,16 @@ pub use core::{
 pub use error::{Error, Result};
 pub use health::CoreHealth;
 pub use latency::{
-    active_delay, measure_nodes, measure_nodes_streaming, measure_proxy_delay,
+    active_delay, check_outbound_ip, measure_nodes, measure_nodes_streaming, measure_proxy_delay,
     measure_proxy_delay_streaming, tcp_latency, ActiveDelay, LatencyKind, LatencySample,
-    DEFAULT_PROBE_URL,
+    OutboundIpInfo, DEFAULT_PROBE_URL,
 };
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{
-    authorize_tun_binaries, binary_has_tun_capability, is_elevated, is_tun_authorized_for,
-    leftovers, relaunch_elevated, tun_unavailable_reason, tun_unavailable_reason_for, AppliedProxy,
-    ProxyBackend, SystemProxyManager, TunAdapter, INTERFACE_NAME,
+    authorize_tun_binaries, binary_has_tun_capability, ensure_tun_device, is_elevated,
+    is_tun_authorized_for, leftovers, relaunch_elevated, tun_unavailable_reason,
+    tun_unavailable_reason_for, AppliedProxy, ProxyBackend, SystemProxyManager, TunAdapter,
+    INTERFACE_NAME,
 };
 pub use paths::Layout;
 pub use platform::{Desktop, Distro, PackageFamily, Selinux};

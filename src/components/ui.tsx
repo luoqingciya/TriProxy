@@ -182,6 +182,28 @@ export function Empty({ children }: { children: ReactNode }) {
   )
 }
 
+export function FilterChip({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean
+  onClick: () => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-md px-2 py-1 text-[12px] transition-colors ${
+        active ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
 /**
  * A `<select>` that keeps the app's colours on every platform.
  *

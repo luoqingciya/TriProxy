@@ -80,6 +80,9 @@ let settings: Settings = {
   theme: 'dark',
   core_preference: null,
   tun: false,
+  tun_stack: 'mixed',
+  strict_route: true,
+  ipv6: false,
   rule_set: false,
   proxy_groups: false,
   allow_lan: false,
@@ -87,6 +90,7 @@ let settings: Settings = {
   dns_mode: 'off',
   rule_mode: 'global',
   log_level: 'info',
+  probe_url: null,
   listen_port: 7890,
   api_port: 9090,
   close_to_tray: true,
@@ -353,6 +357,58 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
     case 'set_system_proxy':
       proxyEnabled = Boolean(args?.enabled)
       return (proxyEnabled ? { endpoint: '127.0.0.1:7890', backend: 'windows-registry', applied_at_ms: now } : null) as T
+    case 'proxy_groups':
+      return (activeCore
+        ? [
+            {
+              name: 'PROXY',
+              group_type: 'Selector',
+              now: nodes[1]?.name ?? 'AUTO',
+              all: ['AUTO', ...nodes.map((n) => n.name)],
+            },
+            {
+              name: 'AUTO',
+              group_type: 'URLTest',
+              now: nodes[0]?.name ?? null,
+              all: nodes.map((n) => n.name),
+            },
+          ]
+        : []) as T
+    case 'select_group_proxy':
+      return undefined as T
+    case 'effective_rules':
+      return {
+        mode: settings.rule_mode,
+        source: 'builtin',
+        default_target: 'PROXY',
+        custom_rules: [],
+        profile_rules: [
+          { kind: 'DOMAIN-SUFFIX', value: 'cn', target: 'DIRECT', source: 'builtin' },
+          { kind: 'IP-CIDR', value: '192.168.0.0/16', target: 'DIRECT', source: 'builtin' },
+          { kind: 'GEOSITE', value: 'cn', target: 'DIRECT', source: 'builtin' },
+          { kind: 'GEOIP', value: 'CN', target: 'DIRECT', source: 'builtin' },
+        ],
+        rule_sets: [
+          {
+            name: 'geosite-cn',
+            format: 'sing-box',
+            behavior: 'domain',
+            url: 'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs',
+            target: 'DIRECT',
+            source: 'builtin',
+          },
+        ],
+        groups: [],
+      } as T
+    case 'check_outbound_ip':
+      return {
+        ip: '203.0.113.42',
+        country: '日本',
+        city: 'Tokyo',
+        isp: 'Example Cloud',
+        via_proxy: activeCore !== null,
+        error: null,
+      } as T
     default:
       throw new Error(`unknown command: ${command}`)
   }

@@ -21,13 +21,16 @@ import type {
   CoreKind,
   CoreUpdate,
   ConnectionsSnapshot,
+  EffectiveRulesView,
   LatencySample,
   LibrarySnapshot,
   TrafficSample,
   LogEntry,
   ManagerStatus,
   NodeSummary,
+  OutboundIpInfo,
   ProfileLibrary,
+  ProxyGroupInfo,
   RuleMode,
   Selection,
   Settings,
@@ -154,4 +157,13 @@ export const api = {
 
   setSystemProxy: (enabled: boolean) =>
     call<AppliedProxy | null>('set_system_proxy', { enabled }),
+
+  proxyGroups: () => call<ProxyGroupInfo[]>('proxy_groups'),
+
+  selectGroupProxy: (group: string, nodeName: string) =>
+    call<void>('select_group_proxy', { group, nodeName }),
+
+  effectiveRules: () => call<EffectiveRulesView>('effective_rules'),
+
+  checkOutboundIp: () => call<OutboundIpInfo>('check_outbound_ip'),
 }

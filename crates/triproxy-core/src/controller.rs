@@ -47,6 +47,16 @@ pub struct TrafficSample {
     pub down: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyGroupInfo {
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub now: Option<String>,
+    #[serde(default)]
+    pub all: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ConnectionsSnapshot {
     #[serde(alias = "uploadTotal", default)]
@@ -404,6 +414,66 @@ impl ControllerClient {
             .await
             .map_err(|error| Error::Other(format!("cannot parse the group: {error}")))?;
         Ok(group.now)
+    }
+
+    /// Fetch all selector / url-test / fallback groups exposed by `GET /proxies`.
+    pub async fn proxy_groups(&self) -> Result<Vec<ProxyGroupInfo>> {
+        #[derive(Deserialize)]
+        struct ProxiesResponse {
+            #[serde(default)]
+            proxies: std::collections::BTreeMap<String, RawProxy>,
+        }
+        #[derive(Deserialize)]
+        struct RawProxy {
+            #[serde(rename = "type", default)]
+            kind: String,
+            #[serde(default)]
+            now: Option<String>,
+            #[serde(default)]
+            all: Vec<String>,
+        }
+
+        let response = self
+            .auth(self.http.get(format!("{}/proxies", self.base)))
+            .send()
+            .await
+            .map_err(|error| Error::Other(format!("cannot read /proxies: {error}")))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Other(format!(
+                "/proxies returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let payload: ProxiesResponse = response
+            .json()
+            .await
+            .map_err(|error| Error::Other(format!("cannot parse /proxies: {error}")))?;
+
+        let mut groups: Vec<ProxyGroupInfo> = payload
+            .proxies
+            .into_iter()
+            .filter(|(name, raw)| !raw.all.is_empty() && !name.eq_ignore_ascii_case("GLOBAL"))
+            .map(|(name, raw)| ProxyGroupInfo {
+                name,
+                kind: raw.kind,
+                now: raw.now,
+                all: raw.all,
+            })
+            .collect();
+
+        groups.sort_by(|a, b| {
+            let rank = |name: &str| match name {
+                crate::compiler::PROXY_GROUP => 0,
+                crate::compiler::AUTO_GROUP => 1,
+                _ => 2,
+            };
+            rank(&a.name)
+                .cmp(&rank(&b.name))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(groups)
     }
 
     /// Switch the core's routing mode live (`"rule"`, `"global"`, or `"direct"`).

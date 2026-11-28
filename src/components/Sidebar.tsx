@@ -17,6 +17,7 @@ import {
   Activity,
   FileText,
   Gauge,
+  GitBranch,
   Layers,
   Network,
   ScrollText,
@@ -31,6 +32,7 @@ import { StateDot } from './ui'
 const NAV: { page: Page; label: string; icon: typeof Gauge }[] = [
   { page: 'dashboard', label: '仪表盘', icon: Gauge },
   { page: 'proxies', label: '节点', icon: Activity },
+  { page: 'rules', label: '规则', icon: GitBranch },
   { page: 'connections', label: '连接', icon: Network },
   { page: 'profiles', label: '配置', icon: Layers },
   { page: 'logs', label: '日志', icon: ScrollText },

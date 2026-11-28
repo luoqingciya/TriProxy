@@ -322,6 +322,10 @@ pub fn run() {
             commands::test_node_delay,
             commands::system_proxy_status,
             commands::set_system_proxy,
+            commands::proxy_groups,
+            commands::select_group_proxy,
+            commands::effective_rules,
+            commands::check_outbound_ip,
         ])
         .build(tauri::generate_context!())
         .expect("error while running TriProxy")

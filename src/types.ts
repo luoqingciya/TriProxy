@@ -185,6 +185,51 @@ export interface LogEntry {
 
 export type DnsMode = 'off' | 'split' | 'fake_ip'
 export type RuleMode = 'global' | 'split' | 'direct'
+export type TunStack = 'mixed' | 'gvisor' | 'system'
+
+export interface ProxyGroupInfo {
+  name: string
+  group_type: string
+  now: string | null
+  all: string[]
+}
+
+export interface OutboundIpInfo {
+  ip: string | null
+  country: string | null
+  city: string | null
+  isp: string | null
+  via_proxy: boolean
+  error: string | null
+}
+
+export interface EffectiveRuleEntry {
+  kind: string
+  value: string
+  target: string
+  group?: string | null
+  source: string
+}
+
+export interface EffectiveRuleSetEntry {
+  name: string
+  format: string
+  behavior: string
+  url: string
+  target: string
+  group?: string | null
+  source: string
+}
+
+export interface EffectiveRulesView {
+  mode: RuleMode
+  source: string
+  default_target: string
+  custom_rules: EffectiveRuleEntry[]
+  profile_rules: EffectiveRuleEntry[]
+  rule_sets: EffectiveRuleSetEntry[]
+  groups: string[]
+}
 
 export interface TunAdapterInfo {
   name: string
@@ -209,6 +254,9 @@ export interface Settings {
   theme: 'light' | 'dark' | 'system'
   core_preference: CoreKind | null
   tun: boolean
+  tun_stack: TunStack
+  strict_route: boolean
+  ipv6: boolean
   rule_set: boolean
   proxy_groups: boolean
   allow_lan: boolean
@@ -219,6 +267,7 @@ export interface Settings {
   /** Routing strategy baked into the generated config. */
   rule_mode: RuleMode
   log_level: string
+  probe_url: string | null
   /** Local inbound port for the mixed listener. */
   listen_port: number
   /** Local controller API port (Mihomo / sing-box). */

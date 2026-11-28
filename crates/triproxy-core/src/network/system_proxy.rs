@@ -655,17 +655,104 @@ mod macos {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod linux {
+    use std::path::PathBuf;
+
     use serde_json::{json, Value};
 
     use super::{format_gnome_ignore_hosts, Error, ProxyBackend, Result};
 
     pub struct LinuxProxyBackend;
 
+    struct DesktopSession {
+        username: String,
+        dbus_address: Option<String>,
+        xdg_runtime_dir: Option<String>,
+    }
+
+    fn non_empty_var(name: &str) -> Option<String> {
+        std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+    }
+
+    fn resolve_desktop_session() -> Option<DesktopSession> {
+        if !crate::network::tun::is_elevated() {
+            return None;
+        }
+
+        let uid_from_env = non_empty_var("TRIPROXY_ORIG_UID")
+            .or_else(|| non_empty_var("PKEXEC_UID"))
+            .or_else(|| non_empty_var("SUDO_UID"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&uid| uid != 0);
+
+        let username = non_empty_var("TRIPROXY_ORIG_USER")
+            .or_else(|| non_empty_var("SUDO_USER"))
+            .filter(|user| user != "root")
+            .or_else(|| {
+                uid_from_env
+                    .and_then(crate::paths::passwd_user_for_uid)
+                    .map(|(name, _)| name)
+            })?;
+
+        let xdg_runtime_dir = non_empty_var("TRIPROXY_ORIG_XDG_RUNTIME_DIR")
+            .or_else(|| {
+                non_empty_var("XDG_RUNTIME_DIR").filter(|dir| !dir.ends_with("/run/user/0"))
+            })
+            .or_else(|| {
+                uid_from_env.and_then(|uid| {
+                    let candidate = format!("/run/user/{uid}");
+                    PathBuf::from(&candidate).is_dir().then_some(candidate)
+                })
+            });
+
+        let dbus_address = non_empty_var("TRIPROXY_ORIG_DBUS_SESSION_BUS_ADDRESS")
+            .or_else(|| non_empty_var("DBUS_SESSION_BUS_ADDRESS"))
+            .or_else(|| {
+                xdg_runtime_dir.as_ref().and_then(|dir| {
+                    let bus = format!("{dir}/bus");
+                    PathBuf::from(&bus)
+                        .exists()
+                        .then(|| format!("unix:path={bus}"))
+                })
+            });
+
+        Some(DesktopSession {
+            username,
+            dbus_address,
+            xdg_runtime_dir,
+        })
+    }
+
     fn gsettings(args: &[&str]) -> Result<String> {
-        let output = std::process::Command::new("gsettings")
-            .args(args)
-            .output()
-            .map_err(|error| Error::Other(format!("gsettings failed: {error}")))?;
+        let output = if let Some(session) = resolve_desktop_session() {
+            let runuser = crate::paths::find_on_path("runuser").or_else(|| {
+                ["/usr/sbin/runuser", "/sbin/runuser"]
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .find(|p| p.is_file())
+            });
+            if let Some(runuser_bin) = runuser {
+                let mut cmd = std::process::Command::new(runuser_bin);
+                cmd.args(["-u", &session.username, "--", "env"]);
+                if let Some(addr) = &session.dbus_address {
+                    cmd.arg(format!("DBUS_SESSION_BUS_ADDRESS={addr}"));
+                }
+                if let Some(runtime) = &session.xdg_runtime_dir {
+                    cmd.arg(format!("XDG_RUNTIME_DIR={runtime}"));
+                }
+                cmd.arg("gsettings").args(args);
+                cmd.output()
+            } else {
+                let mut cmd = std::process::Command::new("gsettings");
+                if let Some(addr) = &session.dbus_address {
+                    cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
+                }
+                cmd.args(args).output()
+            }
+        } else {
+            std::process::Command::new("gsettings").args(args).output()
+        }
+        .map_err(|error| Error::Other(format!("gsettings failed: {error}")))?;
+
         if !output.status.success() {
             return Err(Error::Other(format!(
                 "gsettings {args:?} failed: {}",
@@ -704,13 +791,7 @@ mod linux {
         }
 
         fn supported(&self) -> bool {
-            std::process::Command::new("gsettings")
-                .arg("get")
-                .arg("org.gnome.system.proxy")
-                .arg("mode")
-                .output()
-                .map(|output| output.status.success())
-                .unwrap_or(false)
+            gsettings(&["get", "org.gnome.system.proxy", "mode"]).is_ok()
         }
 
         fn capture(&self) -> Result<Value> {

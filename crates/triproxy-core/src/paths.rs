@@ -40,6 +40,85 @@ pub fn write_atomic(path: &Path, data: impl AsRef<[u8]>) -> Result<()> {
 
 pub const APP_DIR_NAME: &str = "TriProxy";
 
+#[cfg(unix)]
+fn non_empty_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(unix)]
+pub(crate) fn passwd_home_for_user(username: &str) -> Option<PathBuf> {
+    let content = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in content.lines() {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let _pw = fields.next()?;
+        let _uid = fields.next()?;
+        let _gid = fields.next()?;
+        let _gecos = fields.next()?;
+        let home = fields.next()?;
+        if name == username && !home.is_empty() {
+            return Some(PathBuf::from(home));
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+pub(crate) fn passwd_user_for_uid(uid: u32) -> Option<(String, PathBuf)> {
+    let uid_str = uid.to_string();
+    let content = std::fs::read_to_string("/etc/passwd").ok()?;
+    for line in content.lines() {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let _pw = fields.next()?;
+        let entry_uid = fields.next()?;
+        let _gid = fields.next()?;
+        let _gecos = fields.next()?;
+        let home = fields.next()?;
+        if entry_uid == uid_str && !name.is_empty() && !home.is_empty() {
+            return Some((name.to_string(), PathBuf::from(home)));
+        }
+    }
+    None
+}
+
+/// When elevated to `root` on Linux/macOS, keep using the original desktop user's
+/// data directory so profiles, settings, and downloaded cores are not stranded under `/root`.
+#[cfg(unix)]
+fn elevated_user_data_dir() -> Option<PathBuf> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(xdg) = non_empty_env("TRIPROXY_ORIG_XDG_DATA_HOME") {
+        return Some(xdg);
+    }
+
+    let orig_home = non_empty_env("TRIPROXY_ORIG_HOME")
+        .or_else(|| {
+            std::env::var("SUDO_USER")
+                .ok()
+                .filter(|user| !user.is_empty() && user != "root")
+                .and_then(|user| passwd_home_for_user(&user))
+        })
+        .or_else(|| {
+            std::env::var("PKEXEC_UID")
+                .ok()
+                .and_then(|raw| raw.parse::<u32>().ok())
+                .filter(|&uid| uid != 0)
+                .and_then(passwd_user_for_uid)
+                .map(|(_, home)| home)
+        })?;
+
+    #[cfg(target_os = "macos")]
+    {
+        Some(orig_home.join("Library").join("Application Support"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(orig_home.join(".local").join("share"))
+    }
+}
+
 /// Filesystem layout owned by TriProxy.
 ///
 /// Everything the application writes lives under a single root so that
@@ -100,6 +179,13 @@ impl Layout {
 
         if let Some(root) = portable_root() {
             return Ok(Self::new(root));
+        }
+
+        #[cfg(unix)]
+        if crate::network::tun::is_elevated() {
+            if let Some(base) = elevated_user_data_dir() {
+                return Ok(Self::new(base.join(APP_DIR_NAME)));
+            }
         }
 
         let base = dirs::data_dir()

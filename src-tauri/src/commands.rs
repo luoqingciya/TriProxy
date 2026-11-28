@@ -67,6 +67,10 @@ async fn controller_client(state: &AppState) -> CmdResult<ControllerClient> {
 /// into `<data>/bin` and triggers the OS password dialog (`pkexec` / `osascript`)
 /// so the user does not have to run a terminal command manually.
 async fn ensure_tun_ready(state: &AppState, kind: Option<CoreKind>) -> CmdResult<()> {
+    if triproxy_core::is_elevated() {
+        blocking(|| triproxy_core::ensure_tun_device().map_err(err)).await?;
+    }
+
     let check_kind = kind.unwrap_or(CoreKind::SingBox);
     let binary = state.manager.binary_path_for(check_kind);
     let initial_reason =
@@ -150,10 +154,9 @@ async fn apply_compiled_switch(
         .switch_with_config(kind, &compiled.text, compiled.file_name)
         .await
         .map_err(err)?;
-    state.compiled_with_rules.store(
-        settings.rule_mode == triproxy_core::RuleMode::Split,
-        Ordering::Relaxed,
-    );
+    state
+        .compiled_with_rules
+        .store(kind.has_controller(), Ordering::Relaxed);
 
     apply_network_proxy_state(state, settings).await;
     state.notify_traffic();
@@ -190,11 +193,20 @@ pub(crate) async fn sync_tray(app: &tauri::AppHandle) {
     let node = blocking(move || Ok(tray_status_node(&layout)))
         .await
         .unwrap_or_else(|_| "无配置".to_string());
-    let label = match state.manager.persisted_active().await {
+    let active = state.manager.persisted_active().await;
+    let label = match active {
         Some(kind) => format!("{} · {node}", kind.display_name()),
         None => "未运行".to_string(),
     };
-    crate::tray::set_status(app, &label);
+    let settings = state.cached_settings();
+    let tray_state = crate::tray::TrayState {
+        status: label,
+        running: active.is_some(),
+        rule_mode: settings.rule_mode,
+        system_proxy: state.cached_system_proxy().is_some(),
+        tun: settings.tun,
+    };
+    crate::tray::sync(app, &tray_state);
 }
 
 #[tauri::command]
@@ -696,10 +708,9 @@ pub async fn start_core(
                 .start_with_config(kind, &compiled.text, compiled.file_name)
                 .await
                 .map_err(err)?;
-            state.compiled_with_rules.store(
-                settings.rule_mode == triproxy_core::RuleMode::Split,
-                Ordering::Relaxed,
-            );
+            state
+                .compiled_with_rules
+                .store(kind.has_controller(), Ordering::Relaxed);
         }
         StartPlan::Bootstrap => {
             let kind = match core {
@@ -830,6 +841,16 @@ pub async fn select_node(
     })
 }
 
+fn probe_url_for(settings: &AppSettings) -> String {
+    settings
+        .probe_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(triproxy_core::DEFAULT_PROBE_URL)
+        .to_string()
+}
+
 #[tauri::command]
 pub async fn test_proxy_delay(
     app: tauri::AppHandle,
@@ -850,10 +871,11 @@ pub async fn test_proxy_delay(
         format!("真实延迟需要运行中的 Mihomo 或 sing-box（Xray 没有控制器 API）：{error}")
     })?;
 
+    let probe_url = probe_url_for(&state.cached_settings());
     Ok(triproxy_core::measure_proxy_delay_streaming(
         &client,
         &profile.nodes,
-        triproxy_core::DEFAULT_PROBE_URL,
+        &probe_url,
         timeout_secs.max(1) * 1000,
         12,
         move |sample| {
@@ -888,13 +910,8 @@ pub async fn active_delay(state: State<'_, AppState>) -> CmdResult<triproxy_core
         });
     }
 
-    Ok(triproxy_core::active_delay(
-        &client,
-        triproxy_core::PROXY_GROUP,
-        triproxy_core::DEFAULT_PROBE_URL,
-        3000,
-    )
-    .await)
+    let probe_url = probe_url_for(&state.cached_settings());
+    Ok(triproxy_core::active_delay(&client, triproxy_core::PROXY_GROUP, &probe_url, 3000).await)
 }
 
 #[tauri::command]
@@ -1096,6 +1113,7 @@ pub async fn set_tun(
         return apply_compiled_switch(&app, &state, &next_settings, target_core).await;
     }
 
+    sync_tray(&app).await;
     Ok(state.manager.status().await)
 }
 
@@ -1114,6 +1132,7 @@ pub async fn set_rule_mode(
     state.set_cached_settings(next_settings.clone());
 
     if !state.manager.has_running_core().await {
+        sync_tray(&app).await;
         return Ok(false);
     }
 
@@ -1121,6 +1140,7 @@ pub async fn set_rule_mode(
         if let Ok(client) = controller_client(&state).await {
             if client.version().await.is_ok() {
                 client.set_mode(mode.clash_mode()).await.map_err(err)?;
+                sync_tray(&app).await;
                 return Ok(true);
             }
         }
@@ -1151,12 +1171,11 @@ pub async fn test_node_delay(
 
     let timeout = std::time::Duration::from_secs(timeout_secs.max(1));
     let timeout_ms = (timeout.as_millis() as u64).max(1000);
+    let probe_url = probe_url_for(&state.cached_settings());
 
     if let Ok(client) = controller_client(&state).await {
         if client.version().await.is_ok() {
-            let result = client
-                .proxy_delay(&node.name, triproxy_core::DEFAULT_PROBE_URL, timeout_ms)
-                .await;
+            let result = client.proxy_delay(&node.name, &probe_url, timeout_ms).await;
             return Ok(triproxy_core::LatencySample {
                 node_id: node.id.clone(),
                 name: node.name.clone(),
@@ -1188,6 +1207,7 @@ pub async fn system_proxy_status(state: State<'_, AppState>) -> CmdResult<Option
 
 #[tauri::command]
 pub async fn set_system_proxy(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     enabled: bool,
 ) -> CmdResult<Option<AppliedProxy>> {
@@ -1206,5 +1226,95 @@ pub async fn set_system_proxy(
     })
     .await?;
     state.set_cached_system_proxy(applied.clone());
+    sync_tray(&app).await;
     Ok(applied)
+}
+
+#[tauri::command]
+pub async fn proxy_groups(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<triproxy_core::ProxyGroupInfo>> {
+    if !state.manager.has_running_core().await {
+        return Ok(Vec::new());
+    }
+    if let Some(kind) = state.manager.persisted_active().await {
+        if !kind.has_controller() {
+            return Ok(Vec::new());
+        }
+    }
+    let client = controller_client(&state).await?;
+    client.proxy_groups().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn select_group_proxy(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    group: String,
+    node_name: String,
+) -> CmdResult<()> {
+    let client = controller_client(&state).await?;
+    client.select_proxy(&group, &node_name).await.map_err(err)?;
+
+    if group == triproxy_core::PROXY_GROUP {
+        let should_clear = node_name == triproxy_core::AUTO_GROUP;
+        let node_id = if should_clear {
+            None
+        } else {
+            let layout = state.manager.layout().clone();
+            let target_name = node_name;
+            blocking(move || {
+                let store = ProfileStore::new(&layout);
+                let Some((_, profile)) = store.active().map_err(err)? else {
+                    return Ok(None);
+                };
+                Ok(profile
+                    .nodes
+                    .into_iter()
+                    .find(|node| node.name == target_name)
+                    .map(|node| node.id))
+            })
+            .await?
+        };
+        if should_clear || node_id.is_some() {
+            let store = ProfileStore::new(state.manager.layout());
+            let _ =
+                triproxy_core::selection::select_node(&store, Some(&client), node_id.as_deref())
+                    .await;
+        }
+        sync_tray(&app).await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn effective_rules(
+    state: State<'_, AppState>,
+) -> CmdResult<triproxy_core::EffectiveRulesView> {
+    let layout = state.manager.layout().clone();
+    let settings = state.cached_settings();
+    blocking(move || {
+        let profile = ProfileStore::new(&layout)
+            .active()
+            .map_err(err)?
+            .map(|(_, profile)| profile);
+        Ok(triproxy_core::build_effective_rules(
+            profile.as_ref(),
+            &settings,
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn check_outbound_ip(
+    state: State<'_, AppState>,
+) -> CmdResult<triproxy_core::OutboundIpInfo> {
+    let proxy_port = if state.manager.has_running_core().await {
+        state.manager.persisted_http_proxy_port()
+    } else {
+        None
+    };
+    Ok(triproxy_core::check_outbound_ip(proxy_port).await)
 }

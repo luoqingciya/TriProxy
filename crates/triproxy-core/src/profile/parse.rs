@@ -73,6 +73,7 @@ pub fn parse_payload(text: &str, name: &str, source: &str) -> ParsedProfile {
         let clash = super::clash::parse_full(trimmed);
         let mut profile =
             Profile::new(name, clash.nodes).with_metadata(source, InputFormat::ClashYaml);
+        profile.groups = clash.groups;
         profile.rules = clash.rules;
         profile.rule_sets = clash.rule_sets;
         profile.default_target = clash.default_target;

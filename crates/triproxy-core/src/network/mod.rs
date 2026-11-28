@@ -20,7 +20,8 @@ pub use system_proxy::{AppliedProxy, ProxyBackend, SystemProxyManager};
 // Renamed on the way out: inside `tun` the bare name is unambiguous, but at the
 // crate root `unavailable_reason` says nothing about *what* is unavailable.
 pub use tun::{
-    authorize_tun_binaries, binary_has_tun_capability, is_elevated, is_tun_authorized_for,
-    leftovers, relaunch_elevated, unavailable_reason as tun_unavailable_reason,
+    authorize_tun_binaries, binary_has_tun_capability, ensure_tun_device, is_elevated,
+    is_tun_authorized_for, leftovers, relaunch_elevated,
+    unavailable_reason as tun_unavailable_reason,
     unavailable_reason_for as tun_unavailable_reason_for, TunAdapter, INTERFACE_NAME,
 };
