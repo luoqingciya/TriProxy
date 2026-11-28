@@ -708,7 +708,9 @@ fn parse_hysteria2(rest: &str) -> Result<Node, ParseIssue> {
     }
 
     let obfs = query_non_empty(&uri.query, "obfs").map(str::to_string);
-    let obfs_password = query_non_empty(&uri.query, "obfs-password").map(str::to_string);
+    let obfs_password = query_non_empty(&uri.query, "obfs-password")
+        .or_else(|| query_non_empty(&uri.query, "obfs_password"))
+        .map(str::to_string);
 
     if obfs.is_some() && obfs_password.is_none() {
         return Err(ParseIssue::new(
@@ -720,7 +722,9 @@ fn parse_hysteria2(rest: &str) -> Result<Node, ParseIssue> {
     // Hysteria2 has no plaintext mode, so TLS is built here rather than derived
     // from a `security` parameter that the link format does not define.
     let allow_insecure = query_non_empty(&uri.query, "insecure")
-        .map(|value| matches!(value, "1" | "true" | "yes"))
+        .or_else(|| query_non_empty(&uri.query, "allowinsecure"))
+        .or_else(|| query_non_empty(&uri.query, "skip-cert-verify"))
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
     let tls = Some(TlsConfig {
         server_name: Some(
@@ -1144,6 +1148,26 @@ mod tests {
         // why, instead of surfacing as a mysterious handshake failure.
         let error = parse_uri("hysteria2://pw@hy.example.com:443?obfs=salamander#x").unwrap_err();
         assert_eq!(error.code, "hysteria2.obfs_without_password");
+    }
+
+    #[test]
+    fn hysteria2_accepts_allowinsecure_and_obfs_password_aliases() {
+        let node = parse_uri(
+            "hy2://secret@hy.example.com:443?obfs=salamander&obfs_password=obfspw&allowInsecure=1#Hy2",
+        )
+        .unwrap();
+        assert!(node.tls.as_ref().unwrap().allow_insecure);
+        match node.credentials {
+            Credentials::Hysteria2 {
+                obfs,
+                obfs_password,
+                ..
+            } => {
+                assert_eq!(obfs.as_deref(), Some("salamander"));
+                assert_eq!(obfs_password.as_deref(), Some("obfspw"));
+            }
+            other => panic!("expected hysteria2, got {other:?}"),
+        }
     }
 
     #[test]

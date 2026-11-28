@@ -170,6 +170,18 @@ pub fn sync(app: &AppHandle, state: &TrayState) {
 }
 
 pub fn install(app: &tauri::App) -> tauri::Result<()> {
+    #[cfg(target_os = "linux")]
+    if triproxy_core::is_elevated()
+        && std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .ok()
+            .is_none_or(|v| v.trim().is_empty())
+    {
+        tracing::info!(
+            "skipping tray icon while elevated without DBUS_SESSION_BUS_ADDRESS so window close exits cleanly"
+        );
+        return Ok(());
+    }
+
     let menu = build_menu(app, &TrayState::default())?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)

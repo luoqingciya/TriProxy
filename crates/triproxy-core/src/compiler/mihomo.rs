@@ -298,11 +298,21 @@ fn dns_block(mode: DnsMode, ipv6: bool, use_geosite_policy: bool) -> Yaml {
         .with("ipv6", Yaml::bool(ipv6))
         .with(
             "default-nameserver",
-            Yaml::strings(["223.5.5.5", "119.29.29.29"]),
+            Yaml::strings([
+                "https://1.12.12.12/dns-query",
+                "https://223.5.5.5/dns-query",
+                "223.5.5.5",
+                "119.29.29.29",
+            ]),
         )
         .with(
             "proxy-server-nameserver",
-            Yaml::strings(["223.5.5.5", "119.29.29.29"]),
+            Yaml::strings([
+                "https://1.12.12.12/dns-query",
+                "https://223.5.5.5/dns-query",
+                "223.5.5.5",
+                "119.29.29.29",
+            ]),
         )
         .with(
             "nameserver",

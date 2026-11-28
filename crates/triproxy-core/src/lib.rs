@@ -81,8 +81,8 @@ pub use latency::{
 };
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{
-    authorize_tun_binaries, binary_has_tun_capability, ensure_tun_device, is_elevated,
-    is_tun_authorized_for, leftovers, relaunch_elevated, tun_unavailable_reason,
+    authorize_tun_binaries, binary_has_tun_capability, cleanup_tun_interface, ensure_tun_device,
+    is_elevated, is_tun_authorized_for, leftovers, relaunch_elevated, tun_unavailable_reason,
     tun_unavailable_reason_for, AppliedProxy, ProxyBackend, SystemProxyManager, TunAdapter,
     INTERFACE_NAME,
 };

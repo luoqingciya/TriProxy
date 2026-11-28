@@ -641,6 +641,7 @@ impl CoreManager {
         }
 
         self.write_state(PersistedState::default()).await?;
+        crate::network::tun::cleanup_tun_interface();
         Ok(stopped)
     }
 

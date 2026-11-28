@@ -132,7 +132,7 @@ fn default_api_port() -> u16 {
 }
 
 fn default_close_to_tray() -> bool {
-    true
+    false
 }
 
 impl Default for AppSettings {
@@ -329,16 +329,14 @@ mod tests {
     fn missing_file_yields_defaults() {
         let layout = layout("missing");
         assert_eq!(AppSettings::load(&layout), AppSettings::default());
-        // Tray residency is on by default: closing the window must not cut the
-        // connection the user is using.
-        assert!(AppSettings::default().close_to_tray);
+        assert!(!AppSettings::default().close_to_tray);
     }
 
     #[test]
     fn settings_file_from_before_the_tray_option_still_loads() {
         let layout = layout("legacy-tray");
         std::fs::write(layout.root().join("settings.json"), r#"{"theme":"dark"}"#).unwrap();
-        assert!(AppSettings::load(&layout).close_to_tray);
+        assert!(!AppSettings::load(&layout).close_to_tray);
     }
 
     #[test]
