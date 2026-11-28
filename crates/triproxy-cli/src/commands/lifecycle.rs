@@ -93,15 +93,15 @@ pub async fn cmd_start(
         rules.as_deref(),
     )?;
 
-    if options.tun {
-        check_tun_ready()?;
-    }
-
     let choice = match core {
         Some(name) => parse_core_choice(name)?,
         None => CoreChoice::Fixed(resolve_default_core(manager).await?),
     };
     let (kind, compiled) = resolve_target(manager, choice, profile, &options, network)?;
+
+    if options.tun {
+        check_tun_ready(manager, kind)?;
+    }
 
     let report = match compiled {
         Some(compiled) => {
@@ -187,12 +187,12 @@ pub async fn cmd_switch(
         rules.as_deref(),
     )?;
 
-    if options.tun {
-        check_tun_ready()?;
-    }
-
     let choice = parse_core_choice(core)?;
     let (kind, compiled) = resolve_target(manager, choice, profile, &options, network)?;
+
+    if options.tun {
+        check_tun_ready(manager, kind)?;
+    }
 
     let report = match compiled {
         Some(compiled) => {

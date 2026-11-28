@@ -21,9 +21,9 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use triproxy_core::{
-    compile, tun_unavailable_reason, CompileOptions, CompiledConfig, ControllerClient, CoreKind,
-    CoreManager, DnsMode, NetworkRequirements, ParsedProfile, Profile, ProfileStore, RuleMode,
-    Selector, SystemProxyManager,
+    compile, tun_unavailable_reason_for, CompileOptions, CompiledConfig, ControllerClient,
+    CoreKind, CoreManager, DnsMode, NetworkRequirements, ParsedProfile, Profile, ProfileStore,
+    RuleMode, Selector, SystemProxyManager,
 };
 
 pub fn parse_core(value: &str) -> Result<CoreKind> {
@@ -42,8 +42,9 @@ pub fn parse_dns_mode(value: Option<&str>) -> Result<DnsMode> {
 pub fn parse_rule_mode(value: Option<&str>) -> Result<RuleMode> {
     match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         None | Some("global") => Ok(RuleMode::Global),
-        Some("split") => Ok(RuleMode::Split),
-        Some(other) => bail!("unknown rule mode `{other}` (expected global or split)"),
+        Some("split") | Some("rule") => Ok(RuleMode::Split),
+        Some("direct") => Ok(RuleMode::Direct),
+        Some(other) => bail!("unknown rule mode `{other}` (expected global, split/rule or direct)"),
     }
 }
 
@@ -76,8 +77,9 @@ pub async fn running_controller(manager: &CoreManager) -> Option<ControllerClien
 }
 
 /// Refuse to start TUN when a prerequisite is visibly missing.
-pub fn check_tun_ready() -> Result<()> {
-    if let Some(reason) = tun_unavailable_reason() {
+pub fn check_tun_ready(manager: &CoreManager, core: CoreKind) -> Result<()> {
+    let binary = manager.binary_path_for(core);
+    if let Some(reason) = tun_unavailable_reason_for(binary.as_deref()) {
         bail!("{reason}");
     }
     Ok(())

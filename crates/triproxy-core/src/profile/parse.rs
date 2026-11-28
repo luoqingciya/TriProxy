@@ -70,8 +70,13 @@ pub fn parse_payload(text: &str, name: &str, source: &str) -> ParsedProfile {
     // URI/base64 path because YAML is not line-oriented in the same way and would
     // otherwise produce one "unsupported scheme" error per line.
     if super::clash::looks_like_clash(trimmed) {
-        let (nodes, mut diagnostics) = super::clash::parse(trimmed);
-        let profile = Profile::new(name, nodes).with_metadata(source, InputFormat::ClashYaml);
+        let clash = super::clash::parse_full(trimmed);
+        let mut profile =
+            Profile::new(name, clash.nodes).with_metadata(source, InputFormat::ClashYaml);
+        profile.rules = clash.rules;
+        profile.rule_sets = clash.rule_sets;
+        profile.default_target = clash.default_target;
+        let mut diagnostics = clash.diagnostics;
         diagnostics.extend(validate_profile(&profile));
         return ParsedProfile {
             profile,

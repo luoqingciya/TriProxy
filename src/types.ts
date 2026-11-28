@@ -85,6 +85,7 @@ export interface StoredProfile {
   source: string
   format: 'uri_list' | 'base64_subscription' | 'clash_yaml'
   node_count: number
+  rule_count?: number
   content_id: string
   updated_at_ms: number
   subscription?: Subscription | null
@@ -183,7 +184,20 @@ export interface LogEntry {
 }
 
 export type DnsMode = 'off' | 'split' | 'fake_ip'
-export type RuleMode = 'global' | 'split'
+export type RuleMode = 'global' | 'split' | 'direct'
+
+export interface TunAdapterInfo {
+  name: string
+  id: string
+}
+
+export interface TunStatus {
+  elevated: boolean
+  authorized: boolean
+  interface_name: string
+  unavailable_reason: string | null
+  leftovers: TunAdapterInfo[]
+}
 
 export interface AppliedProxy {
   endpoint: string

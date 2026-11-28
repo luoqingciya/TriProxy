@@ -30,9 +30,11 @@ import type {
   ManagerStatus,
   NodeSummary,
   ProfileLibrary,
+  RuleMode,
   Selection,
   Settings,
   StoredProfile,
+  TunStatus,
 } from '../types'
 
 const now = Date.now()
@@ -46,6 +48,7 @@ let library: ProfileLibrary = {
       source: 'sub.txt',
       format: 'uri_list',
       node_count: 4,
+      rule_count: 0,
       content_id: '837dc357d6deeb27',
       updated_at_ms: now - 1000 * 60 * 12,
       selected_node: 'n2',
@@ -69,6 +72,7 @@ let library: ProfileLibrary = {
 }
 
 let proxyEnabled = false
+let tunAuthorized = false
 
 let activeCore: CoreReport['kind'] | null = 'sing-box'
 
@@ -305,6 +309,45 @@ export async function mockCall<T>(command: string, args?: Record<string, unknown
       return undefined as T
     case 'preview_selection':
       return selection() as T
+    case 'tun_status':
+      return {
+        elevated: false,
+        authorized: tunAuthorized,
+        interface_name: 'triproxy',
+        unavailable_reason: tunAuthorized ? null : 'TUN 模式需要管理员权限：请在弹窗中输入密码授权',
+        leftovers: [],
+      } satisfies TunStatus as T
+    case 'authorize_tun':
+      tunAuthorized = true
+      return {
+        elevated: false,
+        authorized: true,
+        interface_name: 'triproxy',
+        unavailable_reason: null,
+        leftovers: [],
+      } satisfies TunStatus as T
+    case 'set_tun': {
+      const enabled = Boolean(args?.enabled)
+      if (enabled) tunAuthorized = true
+      settings = { ...settings, tun: enabled }
+      if (enabled) proxyEnabled = false
+      return status() as T
+    }
+    case 'set_rule_mode':
+      settings = { ...settings, rule_mode: args?.mode as RuleMode }
+      return (activeCore !== null) as T
+    case 'test_node_delay': {
+      const target = nodes.find((n) => n.id === args?.nodeId) ?? nodes[0]
+      return {
+        node_id: target.id,
+        name: target.name,
+        endpoint: `${target.server}:${target.port}`,
+        kind: 'http',
+        latency_ms: 95,
+        error: null,
+        measured_at_ms: now,
+      } as T
+    }
     case 'system_proxy_status':
       return (proxyEnabled ? { endpoint: '127.0.0.1:7890', backend: 'windows-registry', applied_at_ms: now } : null) as T
     case 'set_system_proxy':

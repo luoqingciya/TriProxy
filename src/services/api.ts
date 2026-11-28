@@ -28,9 +28,11 @@ import type {
   ManagerStatus,
   NodeSummary,
   ProfileLibrary,
+  RuleMode,
   Selection,
   Settings,
   StoredProfile,
+  TunStatus,
 } from '../types'
 import { mockCall } from './mock'
 
@@ -136,6 +138,17 @@ export const api = {
   importBackup: () => call<number | null>('import_backup'),
 
   previewSelection: () => call<Selection | null>('preview_selection'),
+
+  tunStatus: () => call<TunStatus>('tun_status'),
+
+  authorizeTun: () => call<TunStatus>('authorize_tun'),
+
+  setTun: (enabled: boolean) => call<ManagerStatus>('set_tun', { enabled }),
+
+  setRuleMode: (mode: RuleMode) => call<boolean>('set_rule_mode', { mode }),
+
+  testNodeDelay: (nodeId: string, timeoutSecs: number) =>
+    call<LatencySample>('test_node_delay', { nodeId, timeoutSecs }),
 
   systemProxyStatus: () => call<AppliedProxy | null>('system_proxy_status'),
 

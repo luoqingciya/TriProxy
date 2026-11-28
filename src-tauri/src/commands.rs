@@ -17,6 +17,8 @@
 //! operation. Business rules (core selection, compilation, exclusivity) stay in
 //! the core crate so the CLI and the GUI cannot drift apart.
 
+use std::sync::atomic::Ordering;
+
 use serde::Serialize;
 use tauri::State;
 
@@ -59,20 +61,104 @@ async fn controller_client(state: &AppState) -> CmdResult<ControllerClient> {
     Ok(client)
 }
 
-/// Pre-flight for TUN in the desktop app.
+/// Pre-flight and interactive elevation for TUN in the desktop app.
 ///
-/// The window is not run as root in normal use, so this is where the user finds
-/// out *why* TUN refuses: the missing privilege, or (on Linux) the missing
-/// device node. Letting the core fail instead produces an error that names
-/// neither, which is the one outcome worth spending a check on.
-fn check_tun(settings: &AppSettings) -> CmdResult<()> {
-    if !settings.tun {
+/// If privilege is missing on Linux/macOS, this copies any bundled/PATH TUN cores
+/// into `<data>/bin` and triggers the OS password dialog (`pkexec` / `osascript`)
+/// so the user does not have to run a terminal command manually.
+async fn ensure_tun_ready(state: &AppState, kind: Option<CoreKind>) -> CmdResult<()> {
+    let check_kind = kind.unwrap_or(CoreKind::SingBox);
+    let binary = state.manager.binary_path_for(check_kind);
+    let initial_reason =
+        blocking(move || Ok(triproxy_core::tun_unavailable_reason_for(binary.as_deref()))).await?;
+    if initial_reason.is_none() {
         return Ok(());
     }
-    match triproxy_core::tun_unavailable_reason() {
-        Some(reason) => Err(reason),
-        None => Ok(()),
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let manager = state.manager.clone();
+        blocking(move || {
+            let paths = manager
+                .ensure_managed_for_tun(&[CoreKind::SingBox, CoreKind::Mihomo])
+                .map_err(err)?;
+            triproxy_core::authorize_tun_binaries(&paths).map_err(err)?;
+            let updated_binary = manager.binary_path_for(check_kind);
+            if let Some(reason) =
+                triproxy_core::tun_unavailable_reason_for(updated_binary.as_deref())
+            {
+                return Err(reason);
+            }
+            Ok(())
+        })
+        .await
     }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(initial_reason.unwrap_or_else(|| "TUN 模式需要管理员权限".to_string()))
+    }
+}
+
+async fn apply_network_proxy_state(state: &AppState, settings: &AppSettings) {
+    if settings.tun {
+        let layout = state.manager.layout().clone();
+        if blocking(move || SystemProxyManager::new(&layout).disable().map_err(err))
+            .await
+            .is_ok()
+        {
+            state.set_cached_system_proxy(None);
+        }
+    } else if settings.system_proxy {
+        if let Some(port) = state.manager.persisted_http_proxy_port() {
+            let layout = state.manager.layout().clone();
+            match blocking(move || {
+                SystemProxyManager::new(&layout)
+                    .enable(&format!("127.0.0.1:{port}"))
+                    .map_err(err)
+            })
+            .await
+            {
+                Ok(applied) => state.set_cached_system_proxy(Some(applied)),
+                Err(error) => {
+                    tracing::warn!(%error, "could not enable the system proxy after reload")
+                }
+            }
+        }
+    }
+}
+
+async fn apply_compiled_switch(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &AppSettings,
+    requested: Option<CoreKind>,
+) -> CmdResult<ManagerStatus> {
+    let layout = state.manager.layout().clone();
+    let api_secret = state.manager.ensure_api_secret();
+    let compile_settings = settings.clone();
+    let (kind, compiled) =
+        blocking(move || compile_with_settings(&layout, &compile_settings, requested, &api_secret))
+            .await?;
+
+    if settings.tun {
+        ensure_tun_ready(state, Some(kind)).await?;
+    }
+
+    state
+        .manager
+        .switch_with_config(kind, &compiled.text, compiled.file_name)
+        .await
+        .map_err(err)?;
+    state.compiled_with_rules.store(
+        settings.rule_mode == triproxy_core::RuleMode::Split,
+        Ordering::Relaxed,
+    );
+
+    apply_network_proxy_state(state, settings).await;
+    state.notify_traffic();
+    sync_tray(app).await;
+    Ok(state.manager.status().await)
 }
 
 /// What the tray should say it is currently doing.
@@ -594,9 +680,6 @@ pub async fn start_core(
     core: Option<CoreKind>,
 ) -> CmdResult<ManagerStatus> {
     let settings = state.cached_settings();
-    let check_settings = settings.clone();
-    blocking(move || check_tun(&check_settings)).await?;
-
     let layout = state.manager.layout().clone();
     let api_secret = state.manager.ensure_api_secret();
     let plan_settings = settings.clone();
@@ -605,11 +688,18 @@ pub async fn start_core(
 
     match plan {
         StartPlan::Compiled(kind, compiled) => {
+            if settings.tun {
+                ensure_tun_ready(&state, Some(kind)).await?;
+            }
             state
                 .manager
                 .start_with_config(kind, &compiled.text, compiled.file_name)
                 .await
                 .map_err(err)?;
+            state.compiled_with_rules.store(
+                settings.rule_mode == triproxy_core::RuleMode::Split,
+                Ordering::Relaxed,
+            );
         }
         StartPlan::Bootstrap => {
             let kind = match core {
@@ -620,26 +710,15 @@ pub async fn start_core(
                     .await
                     .ok_or_else(|| "还没有活动配置，请先导入配置".to_string())?,
             };
-            state.manager.start(kind).await.map_err(err)?;
-        }
-    }
-
-    if !settings.tun && settings.system_proxy {
-        if let Some(port) = state.manager.persisted_http_proxy_port() {
-            let layout = state.manager.layout().clone();
-            match blocking(move || {
-                SystemProxyManager::new(&layout)
-                    .enable(&format!("127.0.0.1:{port}"))
-                    .map_err(err)
-            })
-            .await
-            {
-                Ok(applied) => state.set_cached_system_proxy(Some(applied)),
-                Err(error) => tracing::warn!(%error, "could not enable the system proxy"),
+            if settings.tun {
+                ensure_tun_ready(&state, Some(kind)).await?;
             }
+            state.manager.start(kind).await.map_err(err)?;
+            state.compiled_with_rules.store(false, Ordering::Relaxed);
         }
     }
 
+    apply_network_proxy_state(&state, &settings).await;
     state.notify_traffic();
     sync_tray(&app).await;
     Ok(state.manager.status().await)
@@ -679,51 +758,7 @@ pub async fn switch_core(
     };
 
     let settings = state.cached_settings();
-    let check_settings = settings.clone();
-    blocking(move || check_tun(&check_settings)).await?;
-
-    let layout = state.manager.layout().clone();
-    let api_secret = state.manager.ensure_api_secret();
-    let compile_settings = settings.clone();
-    let (kind, compiled) =
-        blocking(move || compile_with_settings(&layout, &compile_settings, requested, &api_secret))
-            .await?;
-
-    state
-        .manager
-        .switch_with_config(kind, &compiled.text, compiled.file_name)
-        .await
-        .map_err(err)?;
-
-    if settings.tun {
-        let layout = state.manager.layout().clone();
-        if blocking(move || SystemProxyManager::new(&layout).disable().map_err(err))
-            .await
-            .is_ok()
-        {
-            state.set_cached_system_proxy(None);
-        }
-    } else if settings.system_proxy {
-        if let Some(port) = state.manager.persisted_http_proxy_port() {
-            let layout = state.manager.layout().clone();
-            match blocking(move || {
-                SystemProxyManager::new(&layout)
-                    .enable(&format!("127.0.0.1:{port}"))
-                    .map_err(err)
-            })
-            .await
-            {
-                Ok(applied) => state.set_cached_system_proxy(Some(applied)),
-                Err(error) => {
-                    tracing::warn!(%error, "could not enable the system proxy after switch")
-                }
-            }
-        }
-    }
-
-    state.notify_traffic();
-    sync_tray(&app).await;
-    Ok(state.manager.status().await)
+    apply_compiled_switch(&app, &state, &settings, requested).await
 }
 
 #[derive(Serialize)]
@@ -942,18 +977,208 @@ pub async fn recent_logs(
 #[derive(Serialize)]
 pub struct TunStatus {
     elevated: bool,
+    authorized: bool,
+    interface_name: String,
+    unavailable_reason: Option<String>,
     leftovers: Vec<triproxy_core::TunAdapter>,
 }
 
+fn build_tun_status(manager: &triproxy_core::CoreManager) -> CmdResult<TunStatus> {
+    let elevated = triproxy_core::is_elevated();
+    let singbox_bin = manager.binary_path_for(CoreKind::SingBox);
+    let mihomo_bin = manager.binary_path_for(CoreKind::Mihomo);
+    let installed_tun_bins: Vec<_> = [singbox_bin, mihomo_bin].into_iter().flatten().collect();
+
+    let authorized = elevated
+        || (!installed_tun_bins.is_empty()
+            && installed_tun_bins
+                .iter()
+                .all(|path| triproxy_core::binary_has_tun_capability(path)));
+
+    let unavailable_reason = if elevated {
+        triproxy_core::tun_unavailable_reason_for(None)
+    } else if installed_tun_bins.is_empty() {
+        triproxy_core::tun_unavailable_reason_for(None)
+    } else {
+        let missing = installed_tun_bins
+            .iter()
+            .find(|path| !triproxy_core::binary_has_tun_capability(path))
+            .unwrap_or(&installed_tun_bins[0]);
+        triproxy_core::tun_unavailable_reason_for(Some(missing.as_path()))
+    };
+
+    Ok(TunStatus {
+        elevated,
+        authorized,
+        interface_name: triproxy_core::INTERFACE_NAME.to_string(),
+        unavailable_reason,
+        leftovers: triproxy_core::leftovers().map_err(err)?,
+    })
+}
+
 #[tauri::command]
-pub async fn tun_status() -> CmdResult<TunStatus> {
-    blocking(|| {
-        Ok(TunStatus {
-            elevated: triproxy_core::is_elevated(),
-            leftovers: triproxy_core::leftovers().map_err(err)?,
-        })
+pub async fn tun_status(state: State<'_, AppState>) -> CmdResult<TunStatus> {
+    let manager = state.manager.clone();
+    blocking(move || build_tun_status(&manager)).await
+}
+
+#[tauri::command]
+pub async fn authorize_tun(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<TunStatus> {
+    let _ = &app;
+    #[cfg(windows)]
+    if !triproxy_core::is_elevated() {
+        let layout = state.manager.layout().clone();
+        let mut settings = state.cached_settings();
+        settings.tun = true;
+        let to_save = settings.clone();
+        blocking(move || to_save.save(&layout).map_err(err)).await?;
+        state.set_cached_settings(settings);
+        blocking(|| triproxy_core::relaunch_elevated().map_err(err)).await?;
+        let exit_app = app.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            exit_app.exit(0);
+        });
+        let manager = state.manager.clone();
+        return blocking(move || build_tun_status(&manager)).await;
+    }
+
+    let manager = state.manager.clone();
+    blocking(move || {
+        let paths = manager
+            .ensure_managed_for_tun(&[CoreKind::SingBox, CoreKind::Mihomo])
+            .map_err(err)?;
+        triproxy_core::authorize_tun_binaries(&paths).map_err(err)?;
+        build_tun_status(&manager)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn set_tun(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<ManagerStatus> {
+    let mut next_settings = state.cached_settings();
+    let target_core = next_settings.core_preference;
+
+    if enabled {
+        #[cfg(windows)]
+        if !triproxy_core::is_elevated() {
+            let layout = state.manager.layout().clone();
+            next_settings.tun = true;
+            let to_save = next_settings.clone();
+            blocking(move || to_save.save(&layout).map_err(err)).await?;
+            state.set_cached_settings(next_settings);
+            blocking(|| triproxy_core::relaunch_elevated().map_err(err)).await?;
+            let exit_app = app.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                exit_app.exit(0);
+            });
+            return Ok(state.manager.status().await);
+        }
+
+        ensure_tun_ready(&state, target_core).await?;
+    }
+
+    next_settings.tun = enabled;
+    let layout = state.manager.layout().clone();
+    let to_save = next_settings.clone();
+    blocking(move || to_save.save(&layout).map_err(err)).await?;
+    state.set_cached_settings(next_settings.clone());
+
+    if state.manager.has_running_core().await {
+        return apply_compiled_switch(&app, &state, &next_settings, target_core).await;
+    }
+
+    Ok(state.manager.status().await)
+}
+
+#[tauri::command]
+pub async fn set_rule_mode(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    mode: triproxy_core::RuleMode,
+) -> CmdResult<bool> {
+    let mut next_settings = state.cached_settings();
+    next_settings.rule_mode = mode;
+
+    let layout = state.manager.layout().clone();
+    let to_save = next_settings.clone();
+    blocking(move || to_save.save(&layout).map_err(err)).await?;
+    state.set_cached_settings(next_settings.clone());
+
+    if !state.manager.has_running_core().await {
+        return Ok(false);
+    }
+
+    if state.compiled_with_rules.load(Ordering::Relaxed) {
+        if let Ok(client) = controller_client(&state).await {
+            if client.version().await.is_ok() {
+                client.set_mode(mode.clash_mode()).await.map_err(err)?;
+                return Ok(true);
+            }
+        }
+    }
+
+    apply_compiled_switch(&app, &state, &next_settings, next_settings.core_preference).await?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn test_node_delay(
+    state: State<'_, AppState>,
+    node_id: String,
+    timeout_secs: u64,
+) -> CmdResult<triproxy_core::LatencySample> {
+    let layout = state.manager.layout().clone();
+    let node = blocking(move || {
+        let Some((_, profile)) = ProfileStore::new(&layout).active().map_err(err)? else {
+            return Err("还没有活动配置".to_string());
+        };
+        profile
+            .nodes
+            .into_iter()
+            .find(|node| node.id == node_id)
+            .ok_or_else(|| "未找到该节点".to_string())
+    })
+    .await?;
+
+    let timeout = std::time::Duration::from_secs(timeout_secs.max(1));
+    let timeout_ms = (timeout.as_millis() as u64).max(1000);
+
+    if let Ok(client) = controller_client(&state).await {
+        if client.version().await.is_ok() {
+            let result = client
+                .proxy_delay(&node.name, triproxy_core::DEFAULT_PROBE_URL, timeout_ms)
+                .await;
+            return Ok(triproxy_core::LatencySample {
+                node_id: node.id.clone(),
+                name: node.name.clone(),
+                endpoint: format!("{}:{}", node.server, node.port),
+                kind: triproxy_core::LatencyKind::Http,
+                latency_ms: result.as_ref().ok().copied(),
+                error: result.err().map(|e| e.to_string()),
+                measured_at_ms: triproxy_core::logging::now_ms(),
+            });
+        }
+    }
+
+    let result = triproxy_core::tcp_latency(&node.server, node.port, timeout).await;
+    Ok(triproxy_core::LatencySample {
+        node_id: node.id.clone(),
+        name: node.name.clone(),
+        endpoint: format!("{}:{}", node.server, node.port),
+        kind: triproxy_core::LatencyKind::Tcp,
+        latency_ms: result.as_ref().ok().copied(),
+        error: result.err().map(|e| e.to_string()),
+        measured_at_ms: triproxy_core::logging::now_ms(),
+    })
 }
 
 #[tauri::command]

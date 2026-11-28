@@ -69,6 +69,7 @@ export function Dashboard() {
   const nodes = useApp((state) => state.nodes)
   const selection = useApp((state) => state.selection)
   const settings = useApp((state) => state.settings)
+  const tunStatus = useApp((state) => state.tunStatus)
   const proxy = useApp((state) => state.proxy)
   const traffic = useApp((state) => state.traffic)
   const trafficHistory = useApp((state) => state.trafficHistory)
@@ -80,7 +81,8 @@ export function Dashboard() {
   const applySettingsRestart = useApp((state) => state.applySettingsRestart)
   const setPage = useApp((state) => state.setPage)
   const setSystemProxy = useApp((state) => state.setSystemProxy)
-  const updateSettings = useApp((state) => state.updateSettings)
+  const setTun = useApp((state) => state.setTun)
+  const setRuleMode = useApp((state) => state.setRuleMode)
   const start = useApp((state) => state.start)
   const switchTo = useApp((state) => state.switchTo)
   const installCore = useApp((state) => state.installCore)
@@ -289,8 +291,23 @@ export function Dashboard() {
           {activeProfile ? (
             <div className="space-y-1.5 text-[13px]">
               <Row label="名称" value={activeProfile.name} />
-              <Row label="节点" value={`${activeProfile.node_count}`} />
-              <Row label="来源" value={activeProfile.source || '—'} />
+              <Row label="节点" value={`${activeProfile.node_count} 个`} />
+              <Row
+                label="规则"
+                value={
+                  (activeProfile.rule_count ?? 0) > 0
+                    ? `订阅规则 ${activeProfile.rule_count} 条`
+                    : '内置分流规则'
+                }
+              />
+              <Row
+                label="来源"
+                value={
+                  activeProfile.source === 'pasted'
+                    ? '本地导入'
+                    : activeProfile.source || '—'
+                }
+              />
             </div>
           ) : (
             <p className="text-[13px] text-faint">
@@ -324,38 +341,49 @@ export function Dashboard() {
                 />
               </span>
             </div>
-            <Row
-              label="TUN"
-              value={settings?.tun ? '已启用' : '未启用'}
-              hint={settings?.tun ? '需要管理员' : undefined}
-            />
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted">分流规则</span>
+              <span className="text-muted">
+                TUN 模式
+                <span className="ml-1.5 text-[11px] text-faint">
+                  {busyAction === 'tun'
+                    ? '授权中…'
+                    : settings?.tun
+                      ? `网卡 ${tunStatus?.interface_name ?? 'triproxy'}`
+                      : tunStatus?.authorized
+                        ? '已授权'
+                        : '开启时弹窗提权'}
+                </span>
+              </span>
+              <Toggle
+                checked={settings?.tun ?? false}
+                disabled={!settings || busy}
+                onChange={(enabled) => void setTun(enabled)}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-muted">代理模式</span>
               <div className="flex items-center gap-0.5 rounded-md border border-line bg-panel-2 p-0.5 text-[11.5px]">
-                <button
-                  type="button"
-                  disabled={!settings}
-                  onClick={() => void updateSettings({ rule_mode: 'split' })}
-                  className={`rounded px-2 py-0.5 transition-colors ${
-                    settings?.rule_mode === 'split'
-                      ? 'bg-accent-soft text-accent'
-                      : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  分流
-                </button>
-                <button
-                  type="button"
-                  disabled={!settings}
-                  onClick={() => void updateSettings({ rule_mode: 'global' })}
-                  className={`rounded px-2 py-0.5 transition-colors ${
-                    settings?.rule_mode !== 'split'
-                      ? 'bg-accent-soft text-accent'
-                      : 'text-muted hover:text-fg'
-                  }`}
-                >
-                  全局
-                </button>
+                {(
+                  [
+                    { key: 'split', label: '规则' },
+                    { key: 'global', label: '全局' },
+                    { key: 'direct', label: '直连' },
+                  ] as const
+                ).map((mode) => (
+                  <button
+                    key={mode.key}
+                    type="button"
+                    disabled={!settings || busy}
+                    onClick={() => void setRuleMode(mode.key)}
+                    className={`rounded px-2 py-0.5 transition-colors ${
+                      settings?.rule_mode === mode.key
+                        ? 'bg-accent-soft text-accent'
+                        : 'text-muted hover:text-fg'
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
               </div>
             </div>
           </div>

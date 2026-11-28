@@ -133,7 +133,7 @@ impl Default for AppSettings {
             allow_lan: false,
             system_proxy: false,
             dns_mode: crate::compiler::DnsMode::Off,
-            rule_mode: crate::compiler::RuleMode::Global,
+            rule_mode: crate::compiler::RuleMode::Split,
             log_level: default_log_level(),
             listen_port: default_listen_port(),
             api_port: default_api_port(),

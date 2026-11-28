@@ -78,8 +78,9 @@ pub use latency::{
 };
 pub use logging::{LogBuffer, LogLevel, LogLine, LogStream};
 pub use network::{
-    is_elevated, leftovers, tun_unavailable_reason, AppliedProxy, ProxyBackend, SystemProxyManager,
-    TunAdapter, INTERFACE_NAME,
+    authorize_tun_binaries, binary_has_tun_capability, is_elevated, is_tun_authorized_for,
+    leftovers, relaunch_elevated, tun_unavailable_reason, tun_unavailable_reason_for, AppliedProxy,
+    ProxyBackend, SystemProxyManager, TunAdapter, INTERFACE_NAME,
 };
 pub use paths::Layout;
 pub use platform::{Desktop, Distro, PackageFamily, Selinux};

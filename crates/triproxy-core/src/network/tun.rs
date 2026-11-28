@@ -28,12 +28,14 @@
 //! removing a network adapter is an administrative act with system-wide effects,
 //! and doing it automatically on a false positive would be worse than reporting.
 
+use std::path::{Path, PathBuf};
+
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Adapter name pinned into every generated TUN config.
-pub const INTERFACE_NAME: &str = "TriProxy";
+pub const INTERFACE_NAME: &str = "triproxy";
 
 /// Adapter names that indicate a leftover from a supported core.
 ///
@@ -93,7 +95,97 @@ pub fn is_elevated() -> bool {
     }
 }
 
-/// Why TUN cannot start here, in words the user can act on.
+/// Linux `CAP_NET_ADMIN` capability index (`include/uapi/linux/capability.h`).
+#[cfg(any(target_os = "linux", test))]
+const CAP_NET_ADMIN_BIT: u32 = 1 << 12;
+#[cfg(any(target_os = "linux", test))]
+const VFS_CAP_REVISION_2: u32 = 0x0200_0000;
+#[cfg(any(target_os = "linux", test))]
+const VFS_CAP_REVISION_3: u32 = 0x0300_0000;
+#[cfg(any(target_os = "linux", test))]
+const VFS_CAP_FLAGS_EFFECTIVE: u32 = 0x0000_0001;
+
+/// Parse Linux `security.capability` (`vfs_cap_data` / `vfs_ns_cap_data`) bytes
+/// and check whether `CAP_NET_ADMIN` is present in the permitted + effective sets.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn parse_linux_vfs_cap_data(bytes: &[u8]) -> bool {
+    if bytes.len() < 20 {
+        return false;
+    }
+    let magic_etc = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let version = magic_etc & 0xFF00_0000;
+    if !matches!(version, VFS_CAP_REVISION_2 | VFS_CAP_REVISION_3) {
+        return false;
+    }
+    let effective = (magic_etc & VFS_CAP_FLAGS_EFFECTIVE) != 0;
+    let permitted_lo = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+    effective && (permitted_lo & CAP_NET_ADMIN_BIT) != 0
+}
+
+/// Whether the core executable itself has persistent privilege to open TUN
+/// (Linux `cap_net_admin` xattr or macOS root setuid).
+pub fn binary_has_tun_capability(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        extern "C" {
+            fn getxattr(
+                path: *const std::ffi::c_char,
+                name: *const std::ffi::c_char,
+                value: *mut u8,
+                size: usize,
+            ) -> isize;
+        }
+
+        let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+            return false;
+        };
+        let Ok(c_attr) = CString::new("security.capability") else {
+            return false;
+        };
+        let mut buf = [0u8; 64];
+        // SAFETY: both pointers are valid NUL-terminated C strings and `buf` is writable for `buf.len()` bytes.
+        let len = unsafe {
+            getxattr(
+                c_path.as_ptr(),
+                c_attr.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+            )
+        };
+        if len < 0 {
+            return false;
+        }
+        parse_linux_vfs_cap_data(&buf[..len as usize])
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .map(|meta| meta.uid() == 0 && (meta.mode() & 0o4000) != 0)
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+/// Whether TUN can be started using either current process privileges or
+/// capabilities attached to `binary`.
+pub fn is_tun_authorized_for(binary: Option<&Path>) -> bool {
+    is_elevated() || binary.is_some_and(binary_has_tun_capability)
+}
+
+/// Why TUN cannot start for the given core binary, in words the user can act on.
 ///
 /// Two things can be missing before a core ever tries: the privilege to create
 /// an interface, and — on Linux — the device node the kernel exposes for it.
@@ -104,12 +196,13 @@ pub fn is_elevated() -> bool {
 /// Returns `None` when nothing is visibly missing. That is not a promise the
 /// start will succeed — only that the check found no reason to refuse early,
 /// and the core's own validation stays authoritative.
-pub fn unavailable_reason() -> Option<String> {
-    if !is_elevated() {
+pub fn unavailable_reason_for(binary: Option<&Path>) -> Option<String> {
+    if !is_tun_authorized_for(binary) {
         return Some(if cfg!(windows) {
             "TUN 模式需要管理员权限：请以管理员身份重新启动 TriProxy".to_string()
         } else {
-            "TUN 模式需要 root 权限：请用 sudo 运行，或为该核心授予 cap_net_admin".to_string()
+            "TUN 模式需要管理员权限：请在弹窗中输入密码授权，或手动为该核心授予 cap_net_admin"
+                .to_string()
         });
     }
 
@@ -121,6 +214,194 @@ pub fn unavailable_reason() -> Option<String> {
     }
 
     None
+}
+
+/// Convenience wrapper when no specific core binary path is available.
+pub fn unavailable_reason() -> Option<String> {
+    unavailable_reason_for(None)
+}
+
+/// Prompt the user with an OS authentication dialog and grant TUN permissions
+/// to the given core binaries (`setcap cap_net_admin,cap_net_bind_service,cap_net_raw=+ep`
+/// on Linux, root setuid on macOS).
+pub fn authorize_tun_binaries(paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        return Err(Error::Other(
+            "未找到可用的代理核心（Mihomo 或 sing-box），请先下载核心".to_string(),
+        ));
+    }
+    for path in paths {
+        if !path.is_file() {
+            return Err(Error::Other(format!(
+                "核心文件不存在，无法授权：{}",
+                path.display()
+            )));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let pkexec = find_linux_tool("pkexec", &["/usr/bin/pkexec", "/bin/pkexec"]).ok_or_else(
+            || {
+                Error::Other(format!(
+                    "未找到 pkexec（polkit），无法弹出系统密码框；请在终端执行：\nsudo setcap cap_net_admin,cap_net_bind_service,cap_net_raw=+ep {}",
+                    paths[0].display()
+                ))
+            },
+        )?;
+        let setcap = find_linux_tool(
+            "setcap",
+            &["/usr/sbin/setcap", "/sbin/setcap", "/usr/bin/setcap"],
+        )
+        .unwrap_or_else(|| PathBuf::from("setcap"));
+        let modprobe = find_linux_tool("modprobe", &["/usr/sbin/modprobe", "/sbin/modprobe"])
+            .unwrap_or_else(|| PathBuf::from("modprobe"));
+
+        let mut command = std::process::Command::new(&pkexec);
+        command.arg("/bin/sh").arg("-c").arg(
+            "if [ ! -e /dev/net/tun ]; then \"$1\" tun || true; fi; setcap_bin=\"$2\"; shift 2; for p in \"$@\"; do \"$setcap_bin\" \"cap_net_admin,cap_net_bind_service,cap_net_raw=+ep\" \"$p\" || exit 1; done",
+        );
+        command.arg("_").arg(&modprobe).arg(&setcap);
+        for path in paths {
+            command.arg(path);
+        }
+
+        let output = command
+            .output()
+            .map_err(|error| Error::Other(format!("启动管理员密码授权框失败：{error}")))?;
+
+        if !output.status.success() {
+            if matches!(output.status.code(), Some(126) | Some(127)) {
+                return Err(Error::Other("已取消管理员密码授权".to_string()));
+            }
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let reason = if !detail.is_empty() { detail } else { stdout };
+            return Err(Error::Other(if reason.is_empty() {
+                format!("TUN 权限授权失败（退出码 {:?}）", output.status.code())
+            } else {
+                format!("TUN 权限授权失败：{reason}")
+            }));
+        }
+
+        if crate::platform::tun_device_present() == Some(false) {
+            return Err(Error::Other(format!(
+                "已授权核心，但内核设备 {} 仍不存在，请检查 tun 内核模块",
+                crate::platform::TUN_DEVICE
+            )));
+        }
+
+        for path in paths {
+            if !binary_has_tun_capability(path) {
+                return Err(Error::Other(format!(
+                    "已执行授权，但未能验证 {} 的 cap_net_admin 权限",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut commands = Vec::with_capacity(paths.len());
+        for path in paths {
+            let quoted = shell_single_quote(&path.to_string_lossy());
+            commands.push(format!("chown root:wheel {quoted} && chmod 4755 {quoted}"));
+        }
+        let script = commands.join(" && ");
+        let escaped = script.replace('\\', "\\\\").replace('"', "\\\"");
+        let apple_script = format!("do shell script \"{escaped}\" with administrator privileges");
+
+        let output = std::process::Command::new("osascript")
+            .args(["-e", &apple_script])
+            .output()
+            .map_err(|error| Error::Other(format!("启动 macOS 管理员授权框失败：{error}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.contains("-128") || stderr.to_ascii_lowercase().contains("cancel") {
+                return Err(Error::Other("已取消管理员密码授权".to_string()));
+            }
+            return Err(Error::Other(if stderr.is_empty() {
+                "macOS 管理员权限授权失败".to_string()
+            } else {
+                format!("macOS 管理员权限授权失败：{stderr}")
+            }));
+        }
+
+        for path in paths {
+            if !binary_has_tun_capability(path) {
+                return Err(Error::Other(format!(
+                    "已执行授权，但未能验证 {} 的 root setuid 权限",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        if is_elevated() {
+            Ok(())
+        } else {
+            Err(Error::Other(
+                "Windows 启用 TUN 需要管理员权限，请在弹窗确认以管理员身份重启 TriProxy"
+                    .to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        Err(Error::Other("当前平台不支持图形化 TUN 提权".to_string()))
+    }
+}
+
+/// Trigger a native UAC elevation prompt to relaunch the current executable
+/// with administrator privileges on Windows.
+pub fn relaunch_elevated() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe()
+            .map_err(|error| Error::Other(format!("无法确定当前程序路径：{error}")))?;
+        let escaped = exe.to_string_lossy().replace('\'', "''");
+        let ps = format!("Start-Process -FilePath '{escaped}' -Verb RunAs");
+        let output = crate::process::hidden_command("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps])
+            .output()
+            .map_err(|error| Error::Other(format!("触发 Windows UAC 提权失败：{error}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                return Err(Error::Other("已取消管理员授权".to_string()));
+            }
+            return Err(Error::Other(format!("管理员提权失败：{stderr}")));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err(Error::Other("仅 Windows 支持整应用管理员重启".to_string()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_tool(name: &str, fallbacks: &[&str]) -> Option<PathBuf> {
+    if let Some(found) = crate::paths::find_on_path(name) {
+        return Some(found);
+    }
+    fallbacks
+        .iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Adapters that look like a TUN interface left behind by a core.
@@ -304,5 +585,41 @@ mod tests {
         }
         let reason = unavailable_reason().expect("an unelevated process is refused");
         assert!(reason.contains("权限"), "{reason}");
+    }
+
+    #[test]
+    fn tun_interface_name_is_lowercase_triproxy() {
+        assert_eq!(INTERFACE_NAME, "triproxy");
+    }
+
+    #[test]
+    fn parses_linux_vfs_cap_data_accurately() {
+        let mut valid_v2 = [0u8; 20];
+        valid_v2[0..4]
+            .copy_from_slice(&(VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE).to_le_bytes());
+        valid_v2[4..8].copy_from_slice(&(CAP_NET_ADMIN_BIT | (1 << 13)).to_le_bytes());
+        assert!(parse_linux_vfs_cap_data(&valid_v2));
+
+        let mut valid_v3 = [0u8; 24];
+        valid_v3[0..4]
+            .copy_from_slice(&(VFS_CAP_REVISION_3 | VFS_CAP_FLAGS_EFFECTIVE).to_le_bytes());
+        valid_v3[4..8].copy_from_slice(&CAP_NET_ADMIN_BIT.to_le_bytes());
+        assert!(parse_linux_vfs_cap_data(&valid_v3));
+
+        // Missing effective flag
+        let mut not_effective = [0u8; 20];
+        not_effective[0..4].copy_from_slice(&VFS_CAP_REVISION_2.to_le_bytes());
+        not_effective[4..8].copy_from_slice(&CAP_NET_ADMIN_BIT.to_le_bytes());
+        assert!(!parse_linux_vfs_cap_data(&not_effective));
+
+        // Wrong capability bit
+        let mut wrong_cap = [0u8; 20];
+        wrong_cap[0..4]
+            .copy_from_slice(&(VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE).to_le_bytes());
+        wrong_cap[4..8].copy_from_slice(&(1u32 << 10).to_le_bytes());
+        assert!(!parse_linux_vfs_cap_data(&wrong_cap));
+
+        // Truncated
+        assert!(!parse_linux_vfs_cap_data(&valid_v2[..12]));
     }
 }

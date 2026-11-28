@@ -58,6 +58,15 @@ pub struct Profile {
     /// import lands (Phase 3).
     #[serde(default)]
     pub groups: Vec<ProxyGroup>,
+    /// Routing rules parsed from the subscription itself (for example Clash YAML `rules:`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::compiler::CustomRule>,
+    /// Remote rule providers declared by the subscription (Clash YAML `rule-providers:`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_sets: Vec<crate::compiler::RuleSet>,
+    /// Default fallback target declared by the subscription's `MATCH` rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_target: Option<crate::compiler::RuleTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +132,14 @@ impl Profile {
             },
             nodes,
             groups: Vec::new(),
+            rules: Vec::new(),
+            rule_sets: Vec::new(),
+            default_target: None,
         }
+    }
+
+    pub fn has_subscription_rules(&self) -> bool {
+        !self.rules.is_empty() || !self.rule_sets.is_empty()
     }
 
     pub fn with_metadata(mut self, source: impl Into<String>, format: InputFormat) -> Self {

@@ -63,7 +63,20 @@ impl ConfigCompiler for XrayCompiler {
             }
         }
 
+        let use_subscription_rules =
+            options.rules == RuleMode::Split && profile.has_subscription_rules();
+        let needs_blackhole = options
+            .custom_rules
+            .iter()
+            .any(|r| r.target == RuleTarget::Reject)
+            || (use_subscription_rules
+                && (profile.rules.iter().any(|r| r.target == RuleTarget::Reject)
+                    || profile.default_target == Some(RuleTarget::Reject)));
+
         outbounds.push(json!({ "tag": "direct", "protocol": "freedom" }));
+        if needs_blackhole {
+            outbounds.push(json!({ "tag": "block", "protocol": "blackhole" }));
+        }
 
         let listen = if options.allow_lan {
             "0.0.0.0"
@@ -101,12 +114,12 @@ impl ConfigCompiler for XrayCompiler {
         if dns_mode != DnsMode::Off {
             document["dns"] = dns_object();
         }
-        // Custom rules need a routing section even in global mode: they are the
-        // only thing that can send a request somewhere other than the proxy.
+        // Custom rules or non-Global modes need a routing section.
         if options.rules != RuleMode::Global || !options.custom_rules.is_empty() {
             document["routing"] = routing_object(
                 included.first().map(String::as_str).unwrap_or("proxy"),
                 options.rules,
+                profile,
                 &options.custom_rules,
             );
         }
@@ -137,17 +150,63 @@ impl ConfigCompiler for XrayCompiler {
 /// `proxy_tag` is the first outbound's tag — Xray has no group to name, so a
 /// custom rule pointing at the proxy has to name the node that currently holds
 /// that position.
-fn routing_object(proxy_tag: &str, mode: RuleMode, custom: &[CustomRule]) -> Value {
+fn routing_object(
+    proxy_tag: &str,
+    mode: RuleMode,
+    profile: &Profile,
+    custom: &[CustomRule],
+) -> Value {
     let mut rules: Vec<Value> = custom
         .iter()
-        .map(|rule| custom_rule(rule, proxy_tag))
+        .filter_map(|rule| custom_rule(rule, proxy_tag))
         .collect();
 
-    if mode != RuleMode::Global {
-        rules.push(json!({ "type": "field", "outboundTag": "direct", "domain": ["geosite:cn"] }));
-        rules.push(
-            json!({ "type": "field", "outboundTag": "direct", "ip": ["geoip:cn", "geoip:private"] }),
-        );
+    match mode {
+        RuleMode::Global => {}
+        RuleMode::Direct => {
+            rules.push(json!({
+                "type": "field",
+                "outboundTag": "direct",
+                "network": "tcp,udp",
+            }));
+        }
+        RuleMode::Split => {
+            if profile.has_subscription_rules() {
+                rules.extend(
+                    profile
+                        .rules
+                        .iter()
+                        .filter_map(|rule| custom_rule(rule, proxy_tag)),
+                );
+                match profile.default_target {
+                    Some(RuleTarget::Direct) => rules.push(json!({
+                        "type": "field",
+                        "outboundTag": "direct",
+                        "network": "tcp,udp",
+                    })),
+                    Some(RuleTarget::Reject) => rules.push(json!({
+                        "type": "field",
+                        "outboundTag": "block",
+                        "network": "tcp,udp",
+                    })),
+                    Some(RuleTarget::Proxy) | None => {}
+                }
+            } else {
+                rules.extend(
+                    super::builtin_rules::builtin_split_rules()
+                        .iter()
+                        .filter_map(|rule| custom_rule(rule, proxy_tag)),
+                );
+                rules.push(
+                    json!({ "type": "field", "outboundTag": "direct", "domain": ["geosite:cn"] }),
+                );
+                rules.push(json!({
+                    "type": "field",
+                    "outboundTag": "direct",
+                    "ip": ["geoip:cn", "geoip:private"],
+                }));
+            }
+        }
     }
 
     json!({
@@ -160,33 +219,59 @@ fn routing_object(proxy_tag: &str, mode: RuleMode, custom: &[CustomRule]) -> Val
 ///
 /// Xray encodes the match kind inside the value (`domain:`, `full:`, `keyword:`)
 /// rather than as a separate field.
-fn custom_rule(rule: &CustomRule, proxy_tag: &str) -> Value {
+fn custom_rule(rule: &CustomRule, proxy_tag: &str) -> Option<Value> {
     let tag = match rule.target {
         RuleTarget::Proxy => proxy_tag,
         RuleTarget::Direct => "direct",
+        RuleTarget::Reject => "block",
     };
 
     match rule.kind {
-        RuleKind::Domain => json!({
+        RuleKind::Domain => Some(json!({
             "type": "field",
             "outboundTag": tag,
             "domain": [format!("full:{}", rule.value)],
-        }),
-        RuleKind::DomainSuffix => json!({
+        })),
+        RuleKind::DomainSuffix => Some(json!({
             "type": "field",
             "outboundTag": tag,
             "domain": [format!("domain:{}", rule.value)],
-        }),
-        RuleKind::DomainKeyword => json!({
+        })),
+        RuleKind::DomainKeyword => Some(json!({
             "type": "field",
             "outboundTag": tag,
             "domain": [format!("keyword:{}", rule.value)],
-        }),
-        RuleKind::IpCidr => json!({
+        })),
+        RuleKind::IpCidr => Some(json!({
             "type": "field",
             "outboundTag": tag,
             "ip": [rule.value],
-        }),
+        })),
+        RuleKind::GeoSite => Some(json!({
+            "type": "field",
+            "outboundTag": tag,
+            "domain": [format!("geosite:{}", rule.value.trim().to_ascii_lowercase())],
+        })),
+        RuleKind::GeoIp => {
+            let code = rule.value.trim().to_ascii_lowercase();
+            let mapped = if code == "lan" {
+                "private"
+            } else {
+                code.as_str()
+            };
+            Some(json!({
+                "type": "field",
+                "outboundTag": tag,
+                "ip": [format!("geoip:{mapped}")],
+            }))
+        }
+        RuleKind::DstPort => Some(json!({
+            "type": "field",
+            "outboundTag": tag,
+            "port": rule.value,
+        })),
+        // Xray has no built-in process name matcher.
+        RuleKind::ProcessName => None,
     }
 }
 
@@ -678,9 +763,12 @@ mod tests {
             .unwrap();
         let document: Value = serde_json::from_str(&compiled.text).unwrap();
         let rules = document["routing"]["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 2);
-        assert_eq!(rules[0]["outboundTag"], "direct");
-        assert_eq!(rules[1]["ip"][0], "geoip:cn");
+        assert!(rules
+            .iter()
+            .any(|r| r["outboundTag"] == "direct" && r["domain"] == json!(["geosite:cn"])));
+        assert!(rules.iter().any(
+            |r| r["outboundTag"] == "direct" && r["ip"] == json!(["geoip:cn", "geoip:private"])
+        ));
     }
 
     #[test]

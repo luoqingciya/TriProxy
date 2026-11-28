@@ -44,7 +44,11 @@ export function Settings() {
   const busy = useApp((state) => state.busy)
   const busyAction = useApp((state) => state.busyAction)
   const proxy = useApp((state) => state.proxy)
+  const tunStatus = useApp((state) => state.tunStatus)
   const setSystemProxy = useApp((state) => state.setSystemProxy)
+  const setTun = useApp((state) => state.setTun)
+  const authorizeTun = useApp((state) => state.authorizeTun)
+  const setRuleMode = useApp((state) => state.setRuleMode)
   const autostart = useApp((state) => state.autostart)
   const setAutostart = useApp((state) => state.setAutostart)
   const update = useApp((state) => state.updateSettings)
@@ -300,9 +304,28 @@ export function Settings() {
         </SettingRow>
         <SettingRow
           title="TUN 模式"
-          hint="接管全局流量，需要以管理员身份运行；启用后 Xray 会被排除"
+          hint={
+            tunStatus?.authorized
+              ? `网卡名称 ${tunStatus.interface_name}（已获得内核授权）；开启后 Xray 会被排除`
+              : `网卡名称 ${tunStatus?.interface_name ?? 'triproxy'}；开启时自动弹出系统密码框授权`
+          }
         >
-          <Toggle checked={settings.tun} onChange={(tun) => update({ tun })} />
+          <div className="flex items-center gap-2.5">
+            {!tunStatus?.authorized && (
+              <Button
+                disabled={busy}
+                onClick={() => void authorizeTun()}
+                className="px-2.5 py-1 text-[12px]"
+              >
+                {busyAction === 'authorize-tun' ? '授权中…' : '授权 TUN'}
+              </Button>
+            )}
+            <Toggle
+              checked={settings.tun}
+              disabled={busy}
+              onChange={(tun) => void setTun(tun)}
+            />
+          </div>
         </SettingRow>
         <SettingRow title="原生 rule-set" hint="仅 sing-box 原生支持；开启后 mihomo/xray 会被淘汰">
           <Toggle
@@ -399,8 +422,8 @@ export function Settings() {
           <p className="mt-2 text-[12px] text-danger">{rulesError}</p>
         ) : (
           <p className="mt-2 text-[11.5px] text-faint">
-            支持 DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / IP-CIDR，目标写 PROXY 或 DIRECT。
-            改完点空白处保存，改动在下次启动核心时生效。
+            优先级：自定义规则 &gt; 订阅自带规则 &gt; 软件内置分流规则。支持 DOMAIN / DOMAIN-SUFFIX /
+            DOMAIN-KEYWORD / IP-CIDR / GEOSITE / GEOIP / PROCESS-NAME / DST-PORT，目标可写 PROXY、DIRECT 或 REJECT。
           </p>
         )}
       </Card>
@@ -432,15 +455,19 @@ export function Settings() {
 
       <Card>
         <SectionTitle title="高级" />
-        <SettingRow title="分流模式" hint="global 全部走代理；split 局域网与国内站点直连">
+        <SettingRow
+          title="代理模式"
+          hint="规则模式优先使用订阅规则，无订阅规则时自动启用内置规则；全局/直连切换即时生效"
+        >
           <Select
             value={settings.rule_mode}
             onChange={(value) =>
-              update({ rule_mode: value as AppSettings['rule_mode'] })
+              void setRuleMode(value as AppSettings['rule_mode'])
             }
           >
-            <option value="global">global</option>
-            <option value="split">split</option>
+            <option value="split">规则分流（split）</option>
+            <option value="global">全局代理（global）</option>
+            <option value="direct">全局直连（direct）</option>
           </Select>
         </SettingRow>
         <SettingRow title="DNS 模式" hint="split：走代理解析；fake-ip：TUN 下最快，但部分应用不兼容">

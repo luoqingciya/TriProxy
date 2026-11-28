@@ -243,6 +243,103 @@ impl CoreManager {
         &self.binaries
     }
 
+    pub fn binary_path_for(&self, kind: CoreKind) -> Option<PathBuf> {
+        self.binaries.resolve(kind).map(|(path, _)| path)
+    }
+
+    /// Ensure the requested cores live at writable paths (`<data>/bin` when
+    /// copied from read-only bundled/PATH locations) so OS privilege elevation
+    /// (such as `setcap`) can persist on them.
+    pub fn ensure_managed_for_tun(&self, kinds: &[CoreKind]) -> Result<Vec<PathBuf>> {
+        self.layout.ensure()?;
+        let mut paths = Vec::new();
+        for &kind in kinds {
+            let Some((resolved, source)) = self.binaries.resolve(kind) else {
+                continue;
+            };
+            let target_path = match source {
+                crate::binaries::BinarySource::Managed | crate::binaries::BinarySource::Env => {
+                    resolved
+                }
+                crate::binaries::BinarySource::Bundled | crate::binaries::BinarySource::Path => {
+                    let managed = self.layout.managed_binary(kind.exe_stem());
+                    let bytes = std::fs::read(&resolved).map_err(|e| Error::io(&resolved, e))?;
+                    let staging =
+                        managed.with_extension(format!("tun-stage.{}", std::process::id()));
+                    std::fs::write(&staging, bytes).map_err(|e| Error::io(&staging, e))?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = std::fs::Permissions::from_mode(0o755);
+                        std::fs::set_permissions(&staging, perms)
+                            .map_err(|e| Error::io(&staging, e))?;
+                    }
+                    if let Err(err) = std::fs::rename(&staging, &managed) {
+                        let _ = std::fs::remove_file(&staging);
+                        return Err(Error::io(&managed, err));
+                    }
+
+                    // Bring companion geo/record files alongside bundled cores
+                    // so the copied binary finds them in <data>/bin.
+                    if source == crate::binaries::BinarySource::Bundled {
+                        if let Some(src_dir) = resolved.parent() {
+                            let record_name = format!("{}.json", kind.exe_stem());
+                            let src_record = src_dir.join(&record_name);
+                            if src_record.is_file() {
+                                if let Ok(data) = std::fs::read(&src_record) {
+                                    let _ = write_atomic(
+                                        &self.layout.install_record(kind.exe_stem()),
+                                        &data,
+                                    );
+                                }
+                            }
+                            if let Ok(entries) = std::fs::read_dir(src_dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    let Some(ext) = path
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .map(str::to_ascii_lowercase)
+                                    else {
+                                        continue;
+                                    };
+                                    if matches!(ext.as_str(), "dat" | "mmdb" | "db" | "metadb") {
+                                        if let Some(fname) = path.file_name() {
+                                            let dest = self.layout.bin_dir().join(fname);
+                                            if !dest.exists() {
+                                                let _ = std::fs::copy(&path, &dest);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    self.binaries.invalidate_cache(Some(kind));
+                    // Only swap the live core handle when it is not currently active:
+                    // replacing an active handle here would orphan its PID before
+                    // `switch_inner` stops it. `switch_inner` refreshes the core handle
+                    // from `self.binaries` right after stopping the previous process.
+                    let is_active = self
+                        .persisted
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .active_core
+                        == Some(kind);
+                    if !is_active {
+                        let core =
+                            build_core(kind, managed.clone(), self.logs.clone(), &self.layout);
+                        self.cores_write().insert(kind, core);
+                    }
+                    managed
+                }
+            };
+            paths.push(target_path);
+        }
+        Ok(paths)
+    }
+
     pub fn logs(&self) -> Arc<LogBuffer> {
         self.logs.clone()
     }
@@ -674,6 +771,20 @@ impl CoreManager {
             }
             None => steps.push(SwitchStep::ok("stop current core", "no core was running")),
         }
+
+        // Refresh the core handle in case `ensure_managed_for_tun` copied a bundled
+        // binary to `<data>/bin` while the old handle was still running.
+        let core = if let Some((resolved_path, _)) = self.binaries.resolve(target) {
+            if core.binary_path() != resolved_path {
+                let updated = build_core(target, resolved_path, self.logs.clone(), &self.layout);
+                self.cores_write().insert(target, updated.clone());
+                updated
+            } else {
+                core
+            }
+        } else {
+            core
+        };
 
         core.set_listen_port(settings.listen_port);
         self.api_port.store(settings.api_port, Ordering::Relaxed);
