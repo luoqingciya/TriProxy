@@ -134,8 +134,19 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
-          npx tauri build --bundles "${{ matrix.bundles }}" \
-            --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\"}}}"
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [[ "${{ matrix.label }}" == "linux" && "$version" == *-* ]]; then
+            rpm_version="${version%%-*}"
+            pre="${version#*-}"
+            rpm_release="0.${pre//[^0-9A-Za-z.]/}"
+            npx tauri build --bundles "appimage,deb" \
+              --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\"}}}"
+            npx tauri bundle --bundles rpm \
+              --config "{\"version\":\"${rpm_version}\",\"bundle\":{\"linux\":{\"rpm\":{\"release\":\"${rpm_release}\"}},\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\"}}}"
+          else
+            npx tauri build --bundles "${{ matrix.bundles }}" \
+              --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\"}}}"
+          fi
 
       - name: Collect the lite bundle
         shell: bash
@@ -292,9 +303,19 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -euo pipefail
-          npx tauri build --bundles "${{ matrix.bundles }}" \
-            --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\",\"resources/cores/*\":\"cores/\"}}}"
           version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          if [[ "${{ matrix.label }}" == "linux" && "$version" == *-* ]]; then
+            rpm_version="${version%%-*}"
+            pre="${version#*-}"
+            rpm_release="0.${pre//[^0-9A-Za-z.]/}"
+            npx tauri build --bundles "appimage,deb" \
+              --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\",\"resources/cores/*\":\"cores/\"}}}"
+            npx tauri bundle --bundles rpm \
+              --config "{\"version\":\"${rpm_version}\",\"bundle\":{\"linux\":{\"rpm\":{\"release\":\"${rpm_release}\"}},\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\",\"resources/cores/*\":\"cores/\"}}}"
+          else
+            npx tauri build --bundles "${{ matrix.bundles }}" \
+              --config "{\"bundle\":{\"resources\":{\"resources/${{ matrix.cli }}\":\"${{ matrix.cli }}\",\"resources/cores/*\":\"cores/\"}}}"
+          fi
           shopt -s nullglob
           for f in src-tauri/target/release/bundle/*/*; do
             [ -f "$f" ] || continue
