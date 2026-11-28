@@ -4,26 +4,25 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
-## 本次更新（v0.2.10）
+## 本次更新（v0.2.11-rc.3）
 
-**这一版是一次围绕稳定性、安全性、性能与前后端一致性的全面优化。**
+**这一版（RC3）重点修复 Linux TUN 全局代理转发链路、实现整应用 Root 启动提权、补全订阅策略组与分流规则，并将桌面端体验对齐 FlClash。**
 
-### 控制器与连接体验
+### TUN 全局路由与内核编译增强
 
-- **控制器字段对齐与鉴权**：修复 Mihomo / sing-box 控制器快照及连接字段在 `camelCase` 与 `snake_case` 上的解析差异；自动生成并校验 Bearer `api_secret`，控制器请求跳过系统代理，设置页新增 `api_port` 配置
-- **流量流与轮询优化**：桌面端改为后台常驻订阅流量流并复用缓存的控制器客户端；页面不可见（`document.hidden`）时暂停后台轮询，降低空闲资源开销
+- **修复 TUN 全局转发与 DNS 回环**：为 `sing-box` 补齐 `route.auto_detect_interface` 与首条 `sniff` 规则，为 `mihomo` 在全部模式下生成 `GLOBAL` 策略组与完整规则集，补全 `sniffer`、`listen: 0.0.0.0:1053`、`proxy-server-nameserver` 与 `tcp://any:53`；开启 TUN 时默认将 `DnsMode::Off` 升级为 `FakeIp`，避免 Ubuntu `systemd-resolved` 下流量未能接管的问题
+- **高级 TUN 参数**：新增 `TUN 协议栈`（`mixed` / `gvisor` / `system`）、`严格路由 (strict-route)` 与 `IPv6 支持` 开关，并统一在所有支持控制器的核心启用 `PATCH /configs` 热切换代理模式
+- **订阅策略组与规则解析**：完整解析 Clash 订阅 `proxy-groups` 及每条规则/规则集引用的目标组，无订阅规则时自动回退至软件内置分流规则
 
-### 路由、DNS 与内核生命周期
+### Linux Root 运行与用户态保留
 
-- **DNS 直连分流与规则集镜像**：补齐国内域名直连 DNS 分流规则（Mihomo `nameserver-policy`；sing-box 在 `fakeip` 前让 `geosite-cn`/`cn` 走 `local-dns`），并为 sing-box 规则集补齐下载镜像支持
-- **端口与配置一致性**：修复 Xray 监听端口为 `65535` 时的 HTTP 端口冲突并统一 `http_proxy_port` 计算；`start`/`switch` 完整保留已保存的 `tun`、`system_proxy`、`api_port`、`api_secret`、`rule_set_mirror` 配置，同核心切换走重载路径
-- **代理与进程健壮性**：补齐 macOS / GNOME 系统代理绕过域名格式化与写入失败回滚；核心日志管道改为有界通道 + `BufWriter` 并支持运行时轮转；进程探测增加 PID 复用与 Linux 僵尸进程防护，核心下载更新先校验可用性再替换
+- **启动自动提权**：Linux GUI 启动时通过 `pkexec` 弹窗提权以 Root 身份运行（取消授权则回退为普通用户），并自动放行本地 X11/XWayland（`xhost +SI:localuser:root`）
+- **保留原用户数据与桌面代理**：以 Root 运行后仍读写原桌面用户的数据目录（`TRIPROXY_ORIG_HOME` / `SUDO_USER` / `PKEXEC_UID`），并通过 `runuser -u <user>` 注入桌面会话环境变量操作 `gsettings` 系统代理
 
-### 安全、存储与桌面端细节
+### 对齐 FlClash 的交互与界面升级
 
-- **原子写入与路径校验**：配置与设置保存统一使用临时文件原子替换（`write_atomic`），profile ID 全路径校验防止路径穿越
-- **桌面端与 CLI 改进**：支持冷启动传入的 `triproxy://` 深链接并校验 `http://`/`https://` 来源；资料页支持直接导入 URL 订阅；同步 I/O 与系统平台调用移入 `spawn_blocking` 避免阻塞界面，通知与错误横幅改为分层堆叠；CLI 拆分为模块化子命令，延迟测速并发化并改用批量内存读取
-- **文档修正**：更正 Fedora RPM 依赖说明与实际卸载包名（`tri-proxy`）
+- **规则页与节点分组**：新增「规则」侧边栏页面（展示订阅/内置规则来源、策略组、规则集与匹配筛选）；「节点」页支持策略组标签切换与「隐藏超时」过滤
+- **托盘菜单、仪表盘与测速**：托盘菜单新增「规则 / 全局 / 直连」模式切换、系统代理与 TUN 快速开关；仪表盘新增「出口 IP 检测」、Root 权限标识与会话累计流量统计；支持自定义节点测速 URL（`probe_url`）
 
 ### v0.2.0 起的功能
 
