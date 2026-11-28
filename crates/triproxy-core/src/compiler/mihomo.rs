@@ -157,7 +157,12 @@ impl ConfigCompiler for MihomoCompiler {
 
         let dns_mode = options.dns.effective(options.tun);
         if dns_mode != DnsMode::Off {
-            document = document.with("dns", dns_block(dns_mode, options.ipv6));
+            let use_geosite_policy = options
+                .custom_rules
+                .iter()
+                .chain(profile.rules.iter())
+                .any(|rule| rule.kind == RuleKind::GeoSite);
+            document = document.with("dns", dns_block(dns_mode, options.ipv6, use_geosite_policy));
         }
 
         document = document.with("sniffer", sniffer_block());
@@ -258,7 +263,35 @@ impl ConfigCompiler for MihomoCompiler {
 /// suffix is the entire leak-protection story here: without it every lookup
 /// leaves the machine in plain sight of the local network, even when the traffic
 /// itself is tunnelled.
-fn dns_block(mode: DnsMode, ipv6: bool) -> Yaml {
+fn dns_block(mode: DnsMode, ipv6: bool, use_geosite_policy: bool) -> Yaml {
+    let mut policy = Yaml::map();
+    if use_geosite_policy {
+        policy = policy.with("geosite:cn", Yaml::str("223.5.5.5"));
+    } else {
+        for suffix in [
+            "+.cn",
+            "+.qq.com",
+            "+.weixin.qq.com",
+            "+.taobao.com",
+            "+.tmall.com",
+            "+.aliyun.com",
+            "+.alipay.com",
+            "+.jd.com",
+            "+.baidu.com",
+            "+.bilibili.com",
+            "+.zhihu.com",
+            "+.163.com",
+            "+.douyin.com",
+            "+.xiaohongshu.com",
+            "+.feishu.cn",
+            "+.dingtalk.com",
+            "+.mi.com",
+            "+.huawei.com",
+        ] {
+            policy = policy.with(suffix, Yaml::str("223.5.5.5"));
+        }
+    }
+
     let mut dns = Yaml::map()
         .with("enable", Yaml::bool(true))
         .with("listen", Yaml::str("0.0.0.0:1053"))
@@ -282,10 +315,7 @@ fn dns_block(mode: DnsMode, ipv6: bool) -> Yaml {
             "fallback",
             Yaml::strings([format!("tls://8.8.8.8:853#{PROXY_GROUP}")]),
         )
-        .with(
-            "nameserver-policy",
-            Yaml::map().with("geosite:cn", Yaml::str("223.5.5.5")),
-        );
+        .with("nameserver-policy", policy);
 
     if mode == DnsMode::FakeIp {
         dns = dns
@@ -407,8 +437,6 @@ fn rule_lines(
                 .iter()
                 .map(|rule| custom_line(rule, valid_groups)),
         );
-        lines.push("GEOSITE,cn,DIRECT".to_string());
-        lines.push("GEOIP,CN,DIRECT".to_string());
         RuleTarget::Proxy
     };
 
@@ -865,9 +893,10 @@ mod tests {
         let text = compile_yaml(&Profile::new("p", vec![node]), &options)
             .unwrap()
             .text;
-        assert!(text.contains("GEOSITE,cn,DIRECT"), "{text}");
-        assert!(text.contains("GEOIP,CN,DIRECT"), "{text}");
+        assert!(text.contains("DOMAIN-SUFFIX,qq.com,DIRECT"), "{text}");
         assert!(text.contains("IP-CIDR,192.168.0.0/16,DIRECT"), "{text}");
+        assert!(!text.contains("GEOSITE,cn,DIRECT"), "{text}");
+        assert!(!text.contains("GEOIP,CN,DIRECT"), "{text}");
         // The catch-all must stay last, otherwise nothing reaches the proxy.
         assert!(text.contains("MATCH,PROXY"), "{text}");
     }
@@ -1111,7 +1140,7 @@ mod tests {
             .text;
         assert!(text.contains("\"secret\": \"s3cr3t\""), "{text}");
         assert!(text.contains("\"nameserver-policy\":"), "{text}");
-        assert!(text.contains("\"geosite:cn\": \"223.5.5.5\""), "{text}");
+        assert!(text.contains("\"+.cn\": \"223.5.5.5\""), "{text}");
         assert!(text.contains("tls://8.8.8.8:853#PROXY"), "{text}");
     }
 }
