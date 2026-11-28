@@ -282,9 +282,11 @@ impl ConfigCompiler for SingBoxCompiler {
         }
 
         let mut route = json!({
-            "auto_detect_interface": true,
             "final": final_outbound,
         });
+        if options.tun {
+            route["auto_detect_interface"] = json!(true);
+        }
         if !rules.is_empty() {
             route["rules"] = json!(rules);
         }
@@ -314,8 +316,23 @@ impl ConfigCompiler for SingBoxCompiler {
         let mut experimental = json!({
             "clash_api": clash_api
         });
-        if !declared.is_empty() {
-            experimental["cache_file"] = json!({ "enabled": true });
+        if !declared.is_empty() || dns_mode == DnsMode::FakeIp {
+            experimental["cache_file"] = json!({
+                "enabled": true,
+                "store_fakeip": true,
+            });
+        }
+
+        let mut server_domains: Vec<String> = Vec::new();
+        let mut seen_domains = HashSet::new();
+        for node in &profile.nodes {
+            let host = node.server.trim();
+            if !host.is_empty()
+                && host.parse::<std::net::IpAddr>().is_err()
+                && seen_domains.insert(host.to_string())
+            {
+                server_domains.push(host.to_string());
+            }
         }
 
         let mut document = json!({
@@ -330,7 +347,13 @@ impl ConfigCompiler for SingBoxCompiler {
         });
 
         if dns_mode != DnsMode::Off {
-            document["dns"] = dns_object(dns_mode, options.rules, has_geosite_cn, options.ipv6);
+            document["dns"] = dns_object(
+                dns_mode,
+                options.rules,
+                has_geosite_cn,
+                options.ipv6,
+                &server_domains,
+            );
         }
 
         let mut text =
@@ -594,7 +617,13 @@ fn push_batched_rules(
     flush(out, &mut current);
 }
 
-fn dns_object(mode: DnsMode, rules_mode: RuleMode, has_geosite_cn: bool, ipv6: bool) -> Value {
+fn dns_object(
+    mode: DnsMode,
+    rules_mode: RuleMode,
+    has_geosite_cn: bool,
+    ipv6: bool,
+    server_domains: &[String],
+) -> Value {
     let mut servers = vec![
         json!({
             "tag": "proxy-dns",
@@ -604,8 +633,8 @@ fn dns_object(mode: DnsMode, rules_mode: RuleMode, has_geosite_cn: bool, ipv6: b
         }),
         json!({
             "tag": "local-dns",
-            "type": "udp",
-            "server": "223.5.5.5",
+            "type": "https",
+            "server": "1.12.12.12",
         }),
     ];
 
@@ -616,7 +645,13 @@ fn dns_object(mode: DnsMode, rules_mode: RuleMode, has_geosite_cn: bool, ipv6: b
         json!(if ipv6 { "prefer_ipv4" } else { "ipv4_only" }),
     );
 
-    let mut dns_rules = vec![json!({ "clash_mode": "direct", "server": "local-dns" })];
+    let mut dns_rules = Vec::new();
+    // Resolve proxy server domains directly via DoH before FakeIP or mode rules
+    // so outbound dials never receive synthetic 198.18.0.x addresses.
+    if !server_domains.is_empty() {
+        dns_rules.push(json!({ "domain": server_domains, "server": "local-dns" }));
+    }
+    dns_rules.push(json!({ "clash_mode": "direct", "server": "local-dns" }));
 
     if mode == DnsMode::FakeIp {
         let mut fakeip = json!({
@@ -1022,18 +1057,20 @@ mod tests {
     }
 
     #[test]
-    fn global_mode_sets_clash_mode_and_auto_detect_interface() {
+    fn global_mode_sets_clash_mode_and_tun_gates_auto_detect_and_dns() {
         let node = node_with(
             Credentials::Trojan {
                 password: "pw".to_string(),
             },
             Some(TlsConfig::default()),
         );
+        let profile = Profile::new("p", vec![node]);
+
         let compiled = SingBoxCompiler
-            .compile(&Profile::new("p", vec![node]), &CompileOptions::default())
+            .compile(&profile, &CompileOptions::default())
             .unwrap();
         let document: Value = serde_json::from_str(&compiled.text).unwrap();
-        assert_eq!(document["route"]["auto_detect_interface"], true);
+        assert!(document["route"].get("auto_detect_interface").is_none());
         assert_eq!(
             document["experimental"]["clash_api"]["default_mode"],
             "global"
@@ -1043,6 +1080,27 @@ mod tests {
         assert!(rules
             .iter()
             .any(|r| r["clash_mode"] == "global" && r["outbound"] == PROXY_GROUP));
+
+        let tun_compiled = SingBoxCompiler
+            .compile(
+                &profile,
+                &CompileOptions {
+                    tun: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tun_doc: Value = serde_json::from_str(&tun_compiled.text).unwrap();
+        assert_eq!(tun_doc["route"]["auto_detect_interface"], true);
+        assert_eq!(tun_doc["experimental"]["cache_file"]["enabled"], true);
+        assert_eq!(tun_doc["experimental"]["cache_file"]["store_fakeip"], true);
+        assert_eq!(tun_doc["dns"]["servers"][1]["type"], "https");
+        assert_eq!(tun_doc["dns"]["servers"][1]["server"], "1.12.12.12");
+        assert_eq!(
+            tun_doc["dns"]["rules"][0]["domain"],
+            json!(["jp.example.com"])
+        );
+        assert_eq!(tun_doc["dns"]["rules"][0]["server"], "local-dns");
     }
 
     #[test]

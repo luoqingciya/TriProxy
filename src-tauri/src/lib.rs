@@ -187,6 +187,17 @@ pub fn run() {
                 tracing::error!(%error, "could not create the tray icon");
             }
 
+            // Ensure SIGINT / SIGTERM also stop running cores, restore system proxy,
+            // and clean up the TUN adapter before exiting.
+            let signal_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                wait_for_termination_signal().await;
+                if !SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+                    shutdown(&signal_handle).await;
+                    signal_handle.exit(0);
+                }
+            });
+
             // Adopt any leftover core, restore a stale system proxy snapshot,
             // refresh tray/UI status, and honor `auto_connect` without blocking
             // initial window creation.
@@ -516,14 +527,34 @@ async fn maybe_auto_connect_async(app: &tauri::AppHandle) {
     }
 }
 
-/// Stop every core and restore the system proxy before the process goes away.
-/// Without this, quitting from the tray would leave a headless core holding the
-/// proxy port with the machine still pointed at it — the user would believe the
-/// proxy is off while their traffic kept flowing through it.
+async fn wait_for_termination_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = async {
+                if let Some(ref mut stream) = sigterm {
+                    let _ = stream.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Stop every core, restore the system proxy, and clean up the TUN interface before exit.
 async fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Manager;
 
-    let manager = app.state::<AppState>().manager.clone();
+    let state = app.state::<AppState>();
+    let manager = state.manager.clone();
 
     match manager.stop().await {
         Ok(kinds) if !kinds.is_empty() => tracing::info!(cores = kinds.len(), "stopped on exit"),
@@ -531,13 +562,18 @@ async fn shutdown<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         Err(error) => tracing::warn!(%error, "could not stop the core on exit"),
     }
 
-    let proxy = SystemProxyManager::new(manager.layout());
-    if proxy.status().is_some() {
-        match proxy.disable() {
-            Ok(_) => tracing::info!("system proxy restored on exit"),
-            Err(error) => tracing::warn!(%error, "could not restore the system proxy on exit"),
-        }
+    let layout = manager.layout().clone();
+    let disable_result =
+        tokio::task::spawn_blocking(move || SystemProxyManager::new(&layout).disable()).await;
+    state.set_cached_system_proxy(None);
+    match disable_result {
+        Ok(Ok(true)) => tracing::info!("system proxy restored on exit"),
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "could not restore the system proxy on exit"),
+        Err(error) => tracing::warn!(%error, "system proxy restore task failed on exit"),
     }
+
+    let _ = tokio::task::spawn_blocking(triproxy_core::cleanup_tun_interface).await;
 }
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;

@@ -248,7 +248,28 @@ pub fn ensure_tun_device() -> Result<()> {
     Ok(())
 }
 
-/// Prompt the user with an OS authentication dialog and grant TUN permissions
+/// Remove a leftover `triproxy` TUN interface on Linux after a core exits.
+/// Safe no-op if the interface does not exist or the process lacks root privilege.
+pub fn cleanup_tun_interface() {
+    #[cfg(target_os = "linux")]
+    {
+        if !is_elevated() {
+            return;
+        }
+        let sysfs_path = format!("/sys/class/net/{INTERFACE_NAME}");
+        if !Path::new(&sysfs_path).exists() {
+            return;
+        }
+        let ip_bin = find_linux_tool(
+            "ip",
+            &["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"],
+        )
+        .unwrap_or_else(|| PathBuf::from("ip"));
+        let _ = std::process::Command::new(ip_bin)
+            .args(["link", "delete", INTERFACE_NAME])
+            .output();
+    }
+}
 /// to the given core binaries (`setcap cap_net_admin,cap_net_bind_service,cap_net_raw=+ep`
 /// on Linux, root setuid on macOS).
 pub fn authorize_tun_binaries(paths: &[PathBuf]) -> Result<()> {
