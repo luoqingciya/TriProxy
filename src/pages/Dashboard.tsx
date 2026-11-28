@@ -13,14 +13,14 @@
  * Additional terms under GNU GPL v3 section 7 apply: see ADDITIONAL-TERMS.md.
  */
 
-import { ChevronDown, ChevronRight, Copy, Power, RotateCw, Zap } from 'lucide-react'
+import { ChevronDown, ChevronRight, Copy, Globe, Power, RotateCw, Zap } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
 import { useApp } from '../store/app'
 import { CORE_LABEL, STATE_LABEL, type Selection } from '../types'
 import { Badge, Button, Card, SectionTitle, StateDot, Toggle } from '../components/ui'
 import { PageHeader } from '../components/Sidebar'
-import { formatMemory, formatRate, formatUptime } from '../format'
+import { formatBytes, formatMemory, formatRate, formatUptime } from '../format'
 
 /**
  * How often the active node is re-measured.
@@ -72,7 +72,12 @@ export function Dashboard() {
   const tunStatus = useApp((state) => state.tunStatus)
   const proxy = useApp((state) => state.proxy)
   const traffic = useApp((state) => state.traffic)
+  const cumulativeUp = useApp((state) => state.cumulativeUp)
+  const cumulativeDown = useApp((state) => state.cumulativeDown)
   const trafficHistory = useApp((state) => state.trafficHistory)
+  const outboundIp = useApp((state) => state.outboundIp)
+  const checkingIp = useApp((state) => state.checkingIp)
+  const checkOutboundIp = useApp((state) => state.checkOutboundIp)
   const delay = useApp((state) => state.delay)
   const measureDelay = useApp((state) => state.measureDelay)
   const busy = useApp((state) => state.busy)
@@ -347,11 +352,15 @@ export function Dashboard() {
                 <span className="ml-1.5 text-[11px] text-faint">
                   {busyAction === 'tun'
                     ? '授权中…'
-                    : settings?.tun
-                      ? `网卡 ${tunStatus?.interface_name ?? 'triproxy'}`
-                      : tunStatus?.authorized
-                        ? '已授权'
-                        : '开启时弹窗提权'}
+                    : tunStatus?.elevated
+                      ? settings?.tun
+                        ? `Root · 网卡 ${tunStatus?.interface_name ?? 'triproxy'}`
+                        : 'Root 已就绪'
+                      : settings?.tun
+                        ? `网卡 ${tunStatus?.interface_name ?? 'triproxy'}`
+                        : tunStatus?.authorized
+                          ? '已授权'
+                          : '开启时弹窗提权'}
                 </span>
               </span>
               <Toggle
@@ -398,13 +407,56 @@ export function Dashboard() {
                 <span className="text-muted">↓ {formatRate(traffic.down)}</span>
               </div>
               <Sparkline history={trafficHistory} />
-              <div className="mt-1 text-[11px] text-faint">最近 3 分钟</div>
+              <div className="mt-1 flex items-center justify-between text-[11px] text-faint tabular">
+                <span>最近 3 分钟</span>
+                <span>
+                  累计 ↑ {formatBytes(cumulativeUp)} · ↓ {formatBytes(cumulativeDown)}
+                </span>
+              </div>
             </>
           ) : (
             <p className="text-[13px] text-faint">核心未运行</p>
           )}
         </Card>
       </div>
+
+      {/* Outbound IP Check */}
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft">
+              <Globe size={15} className="text-accent" strokeWidth={2.1} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 text-[14px] font-medium text-fg">
+                <span>出口 IP 检测</span>
+                {outboundIp && (
+                  <Badge tone={outboundIp.via_proxy ? 'accent' : 'neutral'}>
+                    {outboundIp.via_proxy ? '经代理探测' : '直连探测'}
+                  </Badge>
+                )}
+              </div>
+              <p className="mt-0.5 text-[12.5px] text-muted tabular">
+                {outboundIp
+                  ? outboundIp.error
+                    ? outboundIp.error
+                    : [
+                        outboundIp.ip,
+                        [outboundIp.country, outboundIp.city].filter(Boolean).join(' · '),
+                        outboundIp.isp,
+                      ]
+                        .filter(Boolean)
+                        .join(' — ')
+                  : '检测当前生效的出口 IP、归属地与运营商'}
+              </p>
+            </div>
+          </div>
+          <Button disabled={checkingIp} onClick={() => void checkOutboundIp()}>
+            <RotateCw size={13} className={checkingIp ? 'animate-spin' : ''} />
+            {checkingIp ? '检测中…' : '检测 IP'}
+          </Button>
+        </div>
+      </Card>
 
       {/* Smart Engine */}
       <Card>

@@ -65,6 +65,7 @@ export function Settings() {
   )
   const [apiPortDraft, setApiPortDraft] = useState(String(settings?.api_port ?? 9090))
   const [proxyBypassDraft, setProxyBypassDraft] = useState(settings?.proxy_bypass ?? '')
+  const [probeUrlDraft, setProbeUrlDraft] = useState(settings?.probe_url ?? '')
 
   useEffect(() => {
     setRulesText(settings?.custom_rules ?? '')
@@ -73,6 +74,7 @@ export function Settings() {
       setListenPortDraft(String(settings.listen_port))
       setApiPortDraft(String(settings.api_port))
       setProxyBypassDraft(settings.proxy_bypass ?? '')
+      setProbeUrlDraft(settings.probe_url ?? '')
     }
   }, [
     settings?.custom_rules,
@@ -80,7 +82,17 @@ export function Settings() {
     settings?.listen_port,
     settings?.api_port,
     settings?.proxy_bypass,
+    settings?.probe_url,
   ])
+
+  async function commitProbeUrl() {
+    if (!settings) return
+    const next = probeUrlDraft.trim() || null
+    if (next !== settings.probe_url) {
+      await update({ probe_url: next })
+      useApp.setState({ notice: '测速地址已保存' })
+    }
+  }
 
   async function commitListenPort() {
     if (!settings) return
@@ -305,9 +317,11 @@ export function Settings() {
         <SettingRow
           title="TUN 模式"
           hint={
-            tunStatus?.authorized
-              ? `网卡名称 ${tunStatus.interface_name}（已获得内核授权）；开启后 Xray 会被排除`
-              : `网卡名称 ${tunStatus?.interface_name ?? 'triproxy'}；开启时自动弹出系统密码框授权`
+            tunStatus?.elevated
+              ? `网卡名称 ${tunStatus.interface_name}（已以 Root 权限运行）；开启后 Xray 会被排除`
+              : tunStatus?.authorized
+                ? `网卡名称 ${tunStatus.interface_name}（已获得内核授权）；开启后 Xray 会被排除`
+                : `网卡名称 ${tunStatus?.interface_name ?? 'triproxy'}；开启时自动弹出系统密码框授权`
           }
         >
           <div className="flex items-center gap-2.5">
@@ -326,6 +340,39 @@ export function Settings() {
               onChange={(tun) => void setTun(tun)}
             />
           </div>
+        </SettingRow>
+        <SettingRow
+          title="TUN 协议栈"
+          hint="mixed 兼顾性能与兼容性；gvisor 纯用户态；system 原生内核栈"
+        >
+          <Select
+            value={settings.tun_stack}
+            onChange={(value) =>
+              update({ tun_stack: value as AppSettings['tun_stack'] })
+            }
+          >
+            <option value="mixed">Mixed（推荐）</option>
+            <option value="gvisor">gVisor</option>
+            <option value="system">System</option>
+          </Select>
+        </SettingRow>
+        <SettingRow
+          title="严格路由 (strict-route)"
+          hint="接管全部默认路由防止流量绕过 TUN；若与部分 VPN/容器网络冲突可关闭"
+        >
+          <Toggle
+            checked={settings.strict_route}
+            onChange={(strict_route) => update({ strict_route })}
+          />
+        </SettingRow>
+        <SettingRow
+          title="IPv6 支持"
+          hint="开启后 DNS 与 TUN 虚拟网卡将分配并转发 IPv6 流量（默认关闭防泄漏）"
+        >
+          <Toggle
+            checked={settings.ipv6}
+            onChange={(ipv6) => update({ ipv6 })}
+          />
         </SettingRow>
         <SettingRow title="原生 rule-set" hint="仅 sing-box 原生支持；开启后 mihomo/xray 会被淘汰">
           <Toggle
@@ -481,6 +528,24 @@ export function Settings() {
             <option value="split">split</option>
             <option value="fake_ip">fake-ip</option>
           </Select>
+        </SettingRow>
+        <SettingRow
+          title="测速地址 (URL)"
+          hint="节点延迟与自动选择组使用的 HTTP 探测地址，留空默认使用 gstatic generate_204"
+        >
+          <input
+            type="url"
+            value={probeUrlDraft}
+            placeholder="http://www.gstatic.com/generate_204"
+            onChange={(event) => setProbeUrlDraft(event.target.value)}
+            onBlur={() => void commitProbeUrl()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.currentTarget.blur()
+              }
+            }}
+            className="w-[260px] rounded-lg border border-line bg-panel-2 px-2.5 py-1.5 text-[12.5px] text-fg outline-none placeholder:text-faint"
+          />
         </SettingRow>
         <SettingRow title="日志级别">
           <Select

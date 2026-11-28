@@ -221,6 +221,33 @@ pub fn unavailable_reason() -> Option<String> {
     unavailable_reason_for(None)
 }
 
+/// Ensure `/dev/net/tun` exists on Linux before starting a core in TUN mode.
+/// When running as root, attempts `modprobe tun` if the device node is absent.
+pub fn ensure_tun_device() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if crate::platform::tun_device_present() != Some(false) {
+            return Ok(());
+        }
+        if !is_elevated() {
+            return Err(Error::Other(format!(
+                "缺少 {} 设备节点，请先执行 `sudo modprobe tun`",
+                crate::platform::TUN_DEVICE
+            )));
+        }
+        let modprobe = find_linux_tool("modprobe", &["/usr/sbin/modprobe", "/sbin/modprobe"])
+            .unwrap_or_else(|| PathBuf::from("modprobe"));
+        let _ = std::process::Command::new(modprobe).arg("tun").output();
+        if crate::platform::tun_device_present() == Some(false) {
+            return Err(Error::Other(format!(
+                "已执行 modprobe tun，但 {} 仍不存在",
+                crate::platform::TUN_DEVICE
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Prompt the user with an OS authentication dialog and grant TUN permissions
 /// to the given core binaries (`setcap cap_net_admin,cap_net_bind_service,cap_net_raw=+ep`
 /// on Linux, root setuid on macOS).

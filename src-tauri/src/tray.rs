@@ -19,11 +19,13 @@
 //! hides it. Quitting goes through the tray menu, which stops the core and
 //! restores the system proxy first (see `shutdown` in `lib.rs`).
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
+use triproxy_core::RuleMode;
 
 use crate::{commands, AppState};
 
@@ -47,24 +49,91 @@ static TRAY_READY: AtomicBool = AtomicBool::new(false);
 /// same banner it uses for its own errors.
 pub const NOTICE_EVENT: &str = "triproxy-notice";
 
+pub struct TrayState {
+    pub status: String,
+    pub running: bool,
+    pub rule_mode: RuleMode,
+    pub system_proxy: bool,
+    pub tun: bool,
+}
+
+impl Default for TrayState {
+    fn default() -> Self {
+        Self {
+            status: "未运行".to_string(),
+            running: false,
+            rule_mode: RuleMode::Split,
+            system_proxy: false,
+            tun: false,
+        }
+    }
+}
+
 pub fn is_ready() -> bool {
     TRAY_READY.load(Ordering::Relaxed)
 }
 
-/// Build the tray menu, with a read-only first line describing what is running.
-///
-/// Rebuilt rather than mutated: the status line changes on every core switch and
-/// node pick, and rebuilding three items is cheaper than tracking handles.
-fn build_menu(manager: &impl Manager<tauri::Wry>, status: &str) -> tauri::Result<Menu<tauri::Wry>> {
-    let status_item = MenuItem::with_id(manager, "status", status, false, None::<&str>)?;
+/// Build the FlClash-style tray menu with live core status, mode switcher, and network toggles.
+fn build_menu(
+    manager: &impl Manager<tauri::Wry>,
+    state: &TrayState,
+) -> tauri::Result<Menu<tauri::Wry>> {
+    let status_item = MenuItem::with_id(manager, "status", &state.status, false, None::<&str>)?;
     let show = MenuItem::with_id(manager, "show", "显示主窗口", true, None::<&str>)?;
+    let toggle_core_label = if state.running {
+        "停止核心"
+    } else {
+        "启动核心"
+    };
     let toggle = MenuItem::with_id(
         manager,
         "toggle-core",
-        "启动 / 停止核心",
+        toggle_core_label,
         true,
         None::<&str>,
     )?;
+
+    let mode_label = |mode: RuleMode, name: &str| {
+        if state.rule_mode == mode {
+            format!("● {name}")
+        } else {
+            format!("○ {name}")
+        }
+    };
+    let mode_rule = MenuItem::with_id(
+        manager,
+        "mode-rule",
+        mode_label(RuleMode::Split, "规则模式 (Rule)"),
+        true,
+        None::<&str>,
+    )?;
+    let mode_global = MenuItem::with_id(
+        manager,
+        "mode-global",
+        mode_label(RuleMode::Global, "全局模式 (Global)"),
+        true,
+        None::<&str>,
+    )?;
+    let mode_direct = MenuItem::with_id(
+        manager,
+        "mode-direct",
+        mode_label(RuleMode::Direct, "直连模式 (Direct)"),
+        true,
+        None::<&str>,
+    )?;
+
+    let proxy_label = if state.system_proxy {
+        "✓ 系统代理"
+    } else {
+        "   系统代理"
+    };
+    let tun_label = if state.tun {
+        "✓ TUN 虚拟网卡"
+    } else {
+        "   TUN 虚拟网卡"
+    };
+    let toggle_proxy = MenuItem::with_id(manager, "toggle-proxy", proxy_label, true, None::<&str>)?;
+    let toggle_tun = MenuItem::with_id(manager, "toggle-tun", tun_label, true, None::<&str>)?;
     let quit = MenuItem::with_id(manager, "quit", "退出 TriProxy", true, None::<&str>)?;
 
     Menu::with_items(
@@ -75,17 +144,24 @@ fn build_menu(manager: &impl Manager<tauri::Wry>, status: &str) -> tauri::Result
             &show,
             &toggle,
             &PredefinedMenuItem::separator(manager)?,
+            &mode_rule,
+            &mode_global,
+            &mode_direct,
+            &PredefinedMenuItem::separator(manager)?,
+            &toggle_proxy,
+            &toggle_tun,
+            &PredefinedMenuItem::separator(manager)?,
             &quit,
         ],
     )
 }
 
-/// Replace the menu with one that reports `status`.
-pub fn set_status(app: &AppHandle, status: &str) {
+/// Replace the menu with one that reflects `state`.
+pub fn sync(app: &AppHandle, state: &TrayState) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
-    match build_menu(app, status) {
+    match build_menu(app, state) {
         Ok(menu) => {
             let _ = tray.set_menu(Some(menu));
         }
@@ -94,21 +170,44 @@ pub fn set_status(app: &AppHandle, status: &str) {
 }
 
 pub fn install(app: &tauri::App) -> tauri::Result<()> {
-    let menu = build_menu(app, "未运行")?;
+    let menu = build_menu(app, &TrayState::default())?;
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .tooltip("TriProxy")
         .menu(&menu)
         // Left click is "show/hide the window"; the menu is right-click only.
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "show" => show_window(app),
-            "toggle-core" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move { toggle_core(app).await });
+        .on_menu_event(|app, event| {
+            let app = app.clone();
+            match event.id().as_ref() {
+                "show" => show_window(&app),
+                "toggle-core" => {
+                    tauri::async_runtime::spawn(async move { toggle_core(app).await });
+                }
+                "mode-rule" => {
+                    tauri::async_runtime::spawn(async move {
+                        switch_rule_mode(app, RuleMode::Split).await
+                    });
+                }
+                "mode-global" => {
+                    tauri::async_runtime::spawn(async move {
+                        switch_rule_mode(app, RuleMode::Global).await
+                    });
+                }
+                "mode-direct" => {
+                    tauri::async_runtime::spawn(async move {
+                        switch_rule_mode(app, RuleMode::Direct).await
+                    });
+                }
+                "toggle-proxy" => {
+                    tauri::async_runtime::spawn(async move { toggle_system_proxy(app).await });
+                }
+                "toggle-tun" => {
+                    tauri::async_runtime::spawn(async move { toggle_tun(app).await });
+                }
+                "quit" => app.exit(0),
+                _ => {}
             }
-            "quit" => app.exit(0),
-            _ => {}
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -159,6 +258,23 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
+async fn run_tray_action<F>(app: &AppHandle, action: F)
+where
+    F: Future<Output = Result<String, String>>,
+{
+    match action.await {
+        Ok(message) => {
+            let _ = app.emit(NOTICE_EVENT, message);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "tray action failed");
+            let _ = app.emit(NOTICE_EVENT, error);
+            // The banner lives in the window, so a failure has to be visible.
+            show_window(app);
+        }
+    }
+}
+
 /// Start or stop the core without opening the window.
 ///
 /// This reuses the Tauri commands rather than reimplementing the logic: the
@@ -171,28 +287,65 @@ async fn toggle_core(app: AppHandle) {
         state.manager.has_running_core().await
     };
 
-    let result = if running {
-        commands::stop_core(app.clone(), app.state::<AppState>())
-            .await
-            .map(|()| "核心已停止，系统代理已还原".to_string())
-    } else {
-        commands::start_core(app.clone(), app.state::<AppState>(), None)
-            .await
-            .map(|status| match status.active_core {
-                Some(kind) => format!("{} 已启动", kind.display_name()),
-                None => "核心已启动".to_string(),
-            })
-    };
+    run_tray_action(&app, async {
+        if running {
+            commands::stop_core(app.clone(), app.state::<AppState>())
+                .await
+                .map(|()| "核心已停止，系统代理已还原".to_string())
+        } else {
+            commands::start_core(app.clone(), app.state::<AppState>(), None)
+                .await
+                .map(|status| match status.active_core {
+                    Some(kind) => format!("{} 已启动", kind.display_name()),
+                    None => "核心已启动".to_string(),
+                })
+        }
+    })
+    .await;
+}
 
-    match result {
-        Ok(message) => {
-            let _ = app.emit(NOTICE_EVENT, message);
-        }
-        Err(error) => {
-            tracing::warn!(%error, "tray action failed");
-            let _ = app.emit(NOTICE_EVENT, error);
-            // The banner lives in the window, so a failure has to be visible.
-            show_window(&app);
-        }
-    }
+async fn switch_rule_mode(app: AppHandle, mode: RuleMode) {
+    let label = match mode {
+        RuleMode::Split => "规则分流模式",
+        RuleMode::Global => "全局代理模式",
+        RuleMode::Direct => "直接连接模式",
+    };
+    run_tray_action(&app, async {
+        commands::set_rule_mode(app.clone(), app.state::<AppState>(), mode)
+            .await
+            .map(|_| format!("已切换到{label}"))
+    })
+    .await;
+}
+
+async fn toggle_system_proxy(app: AppHandle) {
+    let next = app.state::<AppState>().cached_system_proxy().is_none();
+    run_tray_action(&app, async {
+        commands::set_system_proxy(app.clone(), app.state::<AppState>(), next)
+            .await
+            .map(|applied| {
+                if applied.is_some() {
+                    "系统代理已开启".to_string()
+                } else {
+                    "系统代理已关闭".to_string()
+                }
+            })
+    })
+    .await;
+}
+
+async fn toggle_tun(app: AppHandle) {
+    let next = !app.state::<AppState>().cached_settings().tun;
+    run_tray_action(&app, async {
+        commands::set_tun(app.clone(), app.state::<AppState>(), next)
+            .await
+            .map(|_| {
+                if next {
+                    "TUN 虚拟网卡已开启".to_string()
+                } else {
+                    "TUN 虚拟网卡已关闭".to_string()
+                }
+            })
+    })
+    .await;
 }

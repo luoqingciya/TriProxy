@@ -45,6 +45,12 @@ pub struct AppSettings {
     #[serde(default)]
     pub tun: bool,
     #[serde(default)]
+    pub tun_stack: crate::compiler::TunStack,
+    #[serde(default = "default_strict_route")]
+    pub strict_route: bool,
+    #[serde(default)]
+    pub ipv6: bool,
+    #[serde(default)]
     pub rule_set: bool,
     #[serde(default)]
     pub proxy_groups: bool,
@@ -61,6 +67,9 @@ pub struct AppSettings {
     pub rule_mode: crate::compiler::RuleMode,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Optional custom URL used for node HTTP delay probing.
+    #[serde(default)]
+    pub probe_url: Option<String>,
     /// Local inbound port for the mixed listener.
     ///
     /// Fixed at 7890 until now, which made TriProxy unusable on a machine where
@@ -106,6 +115,10 @@ pub struct AppSettings {
     pub rule_sets: Option<String>,
 }
 
+fn default_strict_route() -> bool {
+    true
+}
+
 fn default_log_level() -> String {
     "info".to_string()
 }
@@ -128,6 +141,9 @@ impl Default for AppSettings {
             theme: Theme::Dark,
             core_preference: None,
             tun: false,
+            tun_stack: crate::compiler::TunStack::default(),
+            strict_route: true,
+            ipv6: false,
             rule_set: false,
             proxy_groups: false,
             allow_lan: false,
@@ -135,6 +151,7 @@ impl Default for AppSettings {
             dns_mode: crate::compiler::DnsMode::Off,
             rule_mode: crate::compiler::RuleMode::Split,
             log_level: default_log_level(),
+            probe_url: None,
             listen_port: default_listen_port(),
             api_port: default_api_port(),
             close_to_tray: default_close_to_tray(),
@@ -201,6 +218,9 @@ impl AppSettings {
             log_level: self.log_level.clone(),
             allow_lan: self.allow_lan,
             tun: self.tun,
+            tun_stack: self.tun_stack,
+            strict_route: self.strict_route,
+            ipv6: self.ipv6,
             dns: self.dns_mode,
             rules: self.rule_mode,
             selected_node: None,
@@ -277,6 +297,9 @@ mod tests {
             theme: Theme::Light,
             core_preference: Some(CoreKind::Xray),
             tun: true,
+            tun_stack: crate::compiler::TunStack::Gvisor,
+            strict_route: false,
+            ipv6: true,
             rule_set: true,
             proxy_groups: false,
             allow_lan: true,
@@ -284,6 +307,7 @@ mod tests {
             dns_mode: crate::compiler::DnsMode::Split,
             rule_mode: crate::compiler::RuleMode::Split,
             log_level: "debug".to_string(),
+            probe_url: Some("https://cp.cloudflare.com/generate_204".to_string()),
             listen_port: 1080,
             api_port: 9091,
             close_to_tray: false,

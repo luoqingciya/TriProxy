@@ -22,6 +22,8 @@ import type {
   AppliedProxy,
   ConnectionsSnapshot,
   LatencySample,
+  OutboundIpInfo,
+  ProxyGroupInfo,
   TrafficSample,
   CoreKind,
   ManagerStatus,
@@ -40,6 +42,7 @@ const TRAFFIC_HISTORY_POINTS = 90
 export type Page =
   | 'dashboard'
   | 'proxies'
+  | 'rules'
   | 'connections'
   | 'profiles'
   | 'logs'
@@ -48,6 +51,7 @@ export type Page =
 const PAGES: Page[] = [
   'dashboard',
   'proxies',
+  'rules',
   'connections',
   'profiles',
   'logs',
@@ -80,6 +84,11 @@ interface AppState {
   latency: Record<string, LatencySample>
   testingNodeIds: Record<string, boolean>
   traffic: TrafficSample | null
+  cumulativeUp: number
+  cumulativeDown: number
+  proxyGroups: ProxyGroupInfo[]
+  outboundIp: OutboundIpInfo | null
+  checkingIp: boolean
   /**
    * Delay of the node the PROXY group is using, measured through the core.
    *
@@ -136,6 +145,9 @@ interface AppState {
   measureDelay: () => Promise<void>
   closeConnection: (id: string | null) => Promise<void>
   selectNode: (nodeId: string | null) => Promise<void>
+  refreshProxyGroups: () => Promise<void>
+  selectGroupProxy: (group: string, nodeName: string) => Promise<void>
+  checkOutboundIp: () => Promise<void>
   toggleFavorite: (nodeId: string) => Promise<void>
   updateSettings: (patch: Partial<Settings>) => Promise<void>
   setAutostart: (enabled: boolean) => Promise<void>
@@ -149,6 +161,9 @@ let liveInFlight = false
 const CORE_RESTART_FIELDS = new Set<keyof Settings>([
   'core_preference',
   'tun',
+  'tun_stack',
+  'strict_route',
+  'ipv6',
   'rule_set',
   'proxy_groups',
   'allow_lan',
@@ -179,6 +194,11 @@ export const useApp = create<AppState>((set, get) => ({
   latency: {},
   testingNodeIds: {},
   traffic: null,
+  cumulativeUp: 0,
+  cumulativeDown: 0,
+  proxyGroups: [],
+  outboundIp: null,
+  checkingIp: false,
   delay: null,
   trafficHistory: [],
   connections: null,
@@ -216,6 +236,17 @@ export const useApp = create<AppState>((set, get) => ({
         return {
           status,
           traffic: nextTraffic,
+          cumulativeUp: stopped
+            ? 0
+            : !isTauri && nextTraffic
+              ? state.cumulativeUp + nextTraffic.up
+              : state.cumulativeUp,
+          cumulativeDown: stopped
+            ? 0
+            : !isTauri && nextTraffic
+              ? state.cumulativeDown + nextTraffic.down
+              : state.cumulativeDown,
+          proxyGroups: stopped ? [] : state.proxyGroups,
           trafficHistory: stopped
             ? []
             : !isTauri && nextTraffic
@@ -267,10 +298,42 @@ export const useApp = create<AppState>((set, get) => ({
   pushTraffic: (sample) =>
     set((state) => ({
       traffic: sample,
+      cumulativeUp: state.cumulativeUp + sample.up,
+      cumulativeDown: state.cumulativeDown + sample.down,
       trafficHistory: [...state.trafficHistory, { up: sample.up, down: sample.down }].slice(
         -TRAFFIC_HISTORY_POINTS,
       ),
     })),
+
+  refreshProxyGroups: async () => {
+    try {
+      const proxyGroups = await api.proxyGroups()
+      set({ proxyGroups })
+    } catch {
+      // Ignore when controller is unavailable.
+    }
+  },
+
+  selectGroupProxy: async (group, nodeName) => {
+    try {
+      await api.selectGroupProxy(group, nodeName)
+      await Promise.all([get().refreshProxyGroups(), get().refreshLibrary()])
+    } catch (error) {
+      set({ error: describe(error) })
+    }
+  },
+
+  checkOutboundIp: async () => {
+    set({ checkingIp: true })
+    try {
+      const outboundIp = await api.checkOutboundIp()
+      set({ outboundIp, error: null })
+    } catch (error) {
+      set({ error: describe(error) })
+    } finally {
+      set({ checkingIp: false })
+    }
+  },
 
   mergeLatencySamples: (samples) => {
     if (samples.length === 0) return
@@ -315,6 +378,9 @@ export const useApp = create<AppState>((set, get) => ({
         status,
         proxy: null,
         traffic: null,
+        cumulativeUp: 0,
+        cumulativeDown: 0,
+        proxyGroups: [],
         trafficHistory: [],
         connections: null,
         delay: null,

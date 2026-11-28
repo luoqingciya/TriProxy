@@ -55,6 +55,21 @@ pub enum RuleKind {
     DstPort,
 }
 
+impl RuleKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleKind::Domain => "DOMAIN",
+            RuleKind::DomainSuffix => "DOMAIN-SUFFIX",
+            RuleKind::DomainKeyword => "DOMAIN-KEYWORD",
+            RuleKind::IpCidr => "IP-CIDR",
+            RuleKind::GeoSite => "GEOSITE",
+            RuleKind::GeoIp => "GEOIP",
+            RuleKind::ProcessName => "PROCESS-NAME",
+            RuleKind::DstPort => "DST-PORT",
+        }
+    }
+}
+
 /// Where a matching request goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,11 +79,24 @@ pub enum RuleTarget {
     Reject,
 }
 
+impl RuleTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleTarget::Proxy => "PROXY",
+            RuleTarget::Direct => "DIRECT",
+            RuleTarget::Reject => "REJECT",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CustomRule {
     pub kind: RuleKind,
     pub value: String,
     pub target: RuleTarget,
+    /// Optional subscription proxy-group name (used when that group is compiled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// A rejected line, with enough context to fix it.
@@ -167,6 +195,7 @@ pub fn parse_rules(text: &str) -> Result<Vec<CustomRule>, RuleError> {
             kind,
             value: value.to_string(),
             target,
+            group: None,
         });
     }
 
@@ -230,6 +259,15 @@ pub enum RuleSetFormat {
     SingBox,
 }
 
+impl RuleSetFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RuleSetFormat::Clash => "clash",
+            RuleSetFormat::SingBox => "sing-box",
+        }
+    }
+}
+
 /// What a Mihomo rule-provider contains.
 ///
 /// sing-box infers this from the file, so the field is ignored there — but
@@ -261,6 +299,9 @@ pub struct RuleSet {
     pub target: RuleTarget,
     pub behavior: RuleSetBehavior,
     pub format: RuleSetFormat,
+    /// Optional subscription proxy-group name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Parse rule-set lines: `目标,类型,URL`.
@@ -337,6 +378,7 @@ pub fn parse_rule_sets(text: &str) -> Result<Vec<RuleSet>, RuleError> {
             target,
             behavior,
             format,
+            group: None,
         });
     }
 
@@ -414,6 +456,166 @@ fn unique_name(existing: &[RuleSet], base: &str, format: RuleSetFormat) -> Strin
     unreachable!("the loop only exits by returning")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveRuleEntry {
+    pub kind: String,
+    pub value: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveRuleSetEntry {
+    pub name: String,
+    pub format: String,
+    pub behavior: String,
+    pub url: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveRulesView {
+    pub mode: super::RuleMode,
+    pub source: String,
+    pub default_target: String,
+    pub custom_rules: Vec<EffectiveRuleEntry>,
+    pub profile_rules: Vec<EffectiveRuleEntry>,
+    pub rule_sets: Vec<EffectiveRuleSetEntry>,
+    pub groups: Vec<String>,
+}
+
+fn rule_entry(rule: &CustomRule, source: &str) -> EffectiveRuleEntry {
+    EffectiveRuleEntry {
+        kind: rule.kind.as_str().to_string(),
+        value: rule.value.clone(),
+        target: rule.target.as_str().to_string(),
+        group: rule.group.clone(),
+        source: source.to_string(),
+    }
+}
+
+fn rule_set_entry(set: &RuleSet, source: &str) -> EffectiveRuleSetEntry {
+    EffectiveRuleSetEntry {
+        name: set.name.clone(),
+        format: set.format.as_str().to_string(),
+        behavior: set.behavior.as_str().to_string(),
+        url: set.url.clone(),
+        target: set.target.as_str().to_string(),
+        group: set.group.clone(),
+        source: source.to_string(),
+    }
+}
+
+/// Inspect the routing rules and rule-sets that will be compiled for `profile` + `settings`.
+pub fn build_effective_rules(
+    profile: Option<&crate::Profile>,
+    settings: &crate::AppSettings,
+) -> EffectiveRulesView {
+    let options = settings.compile_options(settings.listen_port, settings.api_port);
+    let custom_rules = options
+        .custom_rules
+        .iter()
+        .map(|rule| rule_entry(rule, "custom"))
+        .collect();
+
+    let mut rule_sets: Vec<EffectiveRuleSetEntry> = options
+        .rule_sets
+        .iter()
+        .map(|set| rule_set_entry(set, "user"))
+        .collect();
+
+    let has_sub_rules = profile.is_some_and(crate::Profile::has_subscription_rules);
+    let source = if has_sub_rules {
+        "subscription"
+    } else {
+        "builtin"
+    }
+    .to_string();
+
+    let default_target = if has_sub_rules {
+        profile
+            .and_then(|p| p.default_target)
+            .unwrap_or(RuleTarget::Proxy)
+            .as_str()
+    } else {
+        RuleTarget::Proxy.as_str()
+    }
+    .to_string();
+
+    let mut profile_rules = Vec::new();
+    if let Some(p) = profile.filter(|p| p.has_subscription_rules()) {
+        for set in &p.rule_sets {
+            rule_sets.push(rule_set_entry(set, "subscription"));
+        }
+        profile_rules.extend(p.rules.iter().map(|rule| rule_entry(rule, "subscription")));
+    } else {
+        profile_rules.extend(
+            super::builtin_rules::builtin_split_rules()
+                .iter()
+                .map(|rule| rule_entry(rule, "builtin")),
+        );
+        profile_rules.push(EffectiveRuleEntry {
+            kind: "GEOSITE".to_string(),
+            value: "cn".to_string(),
+            target: "DIRECT".to_string(),
+            group: None,
+            source: "builtin".to_string(),
+        });
+        profile_rules.push(EffectiveRuleEntry {
+            kind: "GEOIP".to_string(),
+            value: "CN".to_string(),
+            target: "DIRECT".to_string(),
+            group: None,
+            source: "builtin".to_string(),
+        });
+        rule_sets.push(EffectiveRuleSetEntry {
+            name: "geosite-cn".to_string(),
+            format: "sing-box".to_string(),
+            behavior: "domain".to_string(),
+            url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
+                .to_string(),
+            target: "DIRECT".to_string(),
+            group: None,
+            source: "builtin".to_string(),
+        });
+        rule_sets.push(EffectiveRuleSetEntry {
+            name: "geoip-cn".to_string(),
+            format: "sing-box".to_string(),
+            behavior: "ipcidr".to_string(),
+            url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
+                .to_string(),
+            target: "DIRECT".to_string(),
+            group: None,
+            source: "builtin".to_string(),
+        });
+    }
+
+    let groups = profile
+        .map(|p| {
+            let included: Vec<String> = p.nodes.iter().map(|n| n.name.clone()).collect();
+            super::resolved_subscription_groups(p, &included, true)
+                .into_iter()
+                .map(|g| g.name)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    EffectiveRulesView {
+        mode: settings.rule_mode,
+        source,
+        default_target,
+        custom_rules,
+        profile_rules,
+        rule_sets,
+        groups,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +629,7 @@ mod tests {
                 kind: RuleKind::DomainSuffix,
                 value: "corp.example.com".to_string(),
                 target: RuleTarget::Direct,
+                group: None,
             }]
         );
     }
@@ -537,5 +740,39 @@ mod tests {
         .unwrap();
         assert_eq!(sets[0].name, "geosite-cn-2");
         assert_eq!(sets[1].name, "geoip-cn-2");
+    }
+
+    #[test]
+    fn effective_rules_reports_subscription_precedence_and_builtin_fallback() {
+        let settings = crate::AppSettings {
+            custom_rules: Some("DOMAIN-SUFFIX,corp.example.com,DIRECT".to_string()),
+            ..Default::default()
+        };
+
+        let bare = crate::Profile::new("bare", Vec::new());
+        let builtin_view = build_effective_rules(Some(&bare), &settings);
+        assert_eq!(builtin_view.source, "builtin");
+        assert_eq!(builtin_view.custom_rules.len(), 1);
+        assert!(!builtin_view.profile_rules.is_empty());
+        assert!(builtin_view
+            .rule_sets
+            .iter()
+            .any(|set| set.source == "builtin" && set.name == "geosite-cn"));
+
+        let mut with_sub = bare;
+        with_sub.rules.push(CustomRule {
+            kind: RuleKind::DomainSuffix,
+            value: "netflix.com".to_string(),
+            target: RuleTarget::Proxy,
+            group: Some("Streaming".to_string()),
+        });
+        let sub_view = build_effective_rules(Some(&with_sub), &settings);
+        assert_eq!(sub_view.source, "subscription");
+        assert_eq!(sub_view.profile_rules.len(), 1);
+        assert_eq!(
+            sub_view.profile_rules[0].group.as_deref(),
+            Some("Streaming")
+        );
+        assert!(!sub_view.rule_sets.iter().any(|set| set.source == "builtin"));
     }
 }

@@ -13,15 +13,17 @@
 
 //! Mihomo (Clash.Meta) compiler: `Profile` → `config.yaml`.
 
+use std::collections::HashSet;
+
 use crate::core::CoreKind;
 use crate::profile::node::{Credentials, Node, Transport, VlessFlow};
-use crate::profile::Profile;
+use crate::profile::{GroupKind, Profile};
 
 use super::yaml::{emit, Yaml};
 use super::{
-    CompileError, CompileOptions, CompiledConfig, ConfigCompiler, CustomRule, DnsMode, RuleKind,
-    RuleMode, RuleSet, RuleSetFormat, RuleTarget, SkippedNode, AUTO_GROUP, AUTO_TEST_INTERVAL_SECS,
-    AUTO_TEST_URL, PROXY_GROUP,
+    resolved_subscription_groups, CompileError, CompileOptions, CompiledConfig, ConfigCompiler,
+    CustomRule, DnsMode, RuleKind, RuleSet, RuleSetFormat, RuleTarget, SkippedNode, AUTO_GROUP,
+    AUTO_TEST_INTERVAL_SECS, AUTO_TEST_URL, PROXY_GROUP,
 };
 
 pub struct MihomoCompiler;
@@ -93,13 +95,41 @@ impl ConfigCompiler for MihomoCompiler {
             .with("proxies", Yaml::strings(group_members));
 
         let mut groups = vec![auto, group];
-        if options.rules == RuleMode::Split {
-            groups.push(
-                Yaml::map()
-                    .with("name", Yaml::str("GLOBAL"))
-                    .with("type", Yaml::str("select"))
-                    .with("proxies", Yaml::strings([PROXY_GROUP, "DIRECT"])),
-            );
+        // Always include GLOBAL so `mode: global` (or live switch via `PATCH /configs`)
+        // routes through `PROXY` rather than Mihomo's default `DIRECT`.
+        groups.push(
+            Yaml::map()
+                .with("name", Yaml::str("GLOBAL"))
+                .with("type", Yaml::str("select"))
+                .with("proxies", Yaml::strings([PROXY_GROUP, "DIRECT"])),
+        );
+
+        let sub_groups = resolved_subscription_groups(profile, &included, true);
+        let mut compiled_group_names = HashSet::new();
+        for g in &sub_groups {
+            if g.members.is_empty() {
+                continue;
+            }
+            compiled_group_names.insert(g.name.clone());
+            let mut entry = Yaml::map().with("name", Yaml::str(g.name.clone()));
+            entry = match g.kind {
+                GroupKind::UrlTest => entry
+                    .with("type", Yaml::str("url-test"))
+                    .with("url", Yaml::str(AUTO_TEST_URL))
+                    .with("interval", Yaml::int(AUTO_TEST_INTERVAL_SECS as i64))
+                    .with("tolerance", Yaml::int(50)),
+                GroupKind::Fallback => entry
+                    .with("type", Yaml::str("fallback"))
+                    .with("url", Yaml::str(AUTO_TEST_URL))
+                    .with("interval", Yaml::int(AUTO_TEST_INTERVAL_SECS as i64)),
+                GroupKind::LoadBalance => entry
+                    .with("type", Yaml::str("load-balance"))
+                    .with("url", Yaml::str(AUTO_TEST_URL))
+                    .with("interval", Yaml::int(AUTO_TEST_INTERVAL_SECS as i64)),
+                GroupKind::Select => entry.with("type", Yaml::str("select")),
+            };
+            entry = entry.with("proxies", Yaml::strings(g.members.clone()));
+            groups.push(entry);
         }
 
         let mut document = Yaml::map()
@@ -107,7 +137,7 @@ impl ConfigCompiler for MihomoCompiler {
             .with("allow-lan", Yaml::bool(options.allow_lan))
             .with("mode", Yaml::str(options.rules.clash_mode()))
             .with("log-level", Yaml::str(options.log_level.clone()))
-            .with("ipv6", Yaml::bool(false))
+            .with("ipv6", Yaml::bool(options.ipv6))
             .with(
                 "external-controller",
                 Yaml::str(format!("127.0.0.1:{}", options.api_port)),
@@ -127,8 +157,10 @@ impl ConfigCompiler for MihomoCompiler {
 
         let dns_mode = options.dns.effective(options.tun);
         if dns_mode != DnsMode::Off {
-            document = document.with("dns", dns_block(dns_mode));
+            document = document.with("dns", dns_block(dns_mode, options.ipv6));
         }
+
+        document = document.with("sniffer", sniffer_block());
 
         if options.tun {
             // `device` names the wintun/tun adapter so a leftover can be
@@ -136,10 +168,11 @@ impl ConfigCompiler for MihomoCompiler {
             #[allow(unused_mut)]
             let mut tun = Yaml::map()
                 .with("enable", Yaml::bool(true))
-                .with("stack", Yaml::str("mixed"))
+                .with("stack", Yaml::str(options.tun_stack.as_str()))
                 .with("auto-route", Yaml::bool(true))
                 .with("auto-detect-interface", Yaml::bool(true))
-                .with("dns-hijack", Yaml::strings(["any:53"]));
+                .with("strict-route", Yaml::bool(options.strict_route))
+                .with("dns-hijack", Yaml::strings(["any:53", "tcp://any:53"]));
             #[cfg(not(target_os = "macos"))]
             {
                 tun = tun.with("device", Yaml::str(crate::network::tun::INTERFACE_NAME));
@@ -151,11 +184,9 @@ impl ConfigCompiler for MihomoCompiler {
             .with("proxies", Yaml::List(proxies))
             .with("proxy-groups", Yaml::List(groups));
 
-        // Remote rule-sets: merge user-configured and subscription-provided
-        // Clash-family providers (`.mrs`/`.yaml`), deduplicated by name.
-        let use_subscription_rules =
-            options.rules == RuleMode::Split && profile.has_subscription_rules();
-        let mut seen_providers = std::collections::HashSet::new();
+        // Remote rule-sets: always include Clash providers (`.mrs`/`.yaml`)
+        // so live switching to `mode: rule` works immediately in every initial mode.
+        let mut seen_providers = HashSet::new();
         let mut user_clash_sets: Vec<&RuleSet> = Vec::new();
         for set in &options.rule_sets {
             if set.format == RuleSetFormat::Clash && seen_providers.insert(set.name.as_str()) {
@@ -163,7 +194,7 @@ impl ConfigCompiler for MihomoCompiler {
             }
         }
         let mut sub_clash_sets: Vec<&RuleSet> = Vec::new();
-        if use_subscription_rules {
+        if profile.has_subscription_rules() {
             for set in &profile.rule_sets {
                 if set.format == RuleSetFormat::Clash && seen_providers.insert(set.name.as_str()) {
                     sub_clash_sets.push(set);
@@ -202,11 +233,11 @@ impl ConfigCompiler for MihomoCompiler {
         document = document.with(
             "rules",
             Yaml::strings(rule_lines(
-                options.rules,
                 profile,
                 &options.custom_rules,
                 &user_clash_sets,
                 &sub_clash_sets,
+                &compiled_group_names,
             )),
         );
 
@@ -222,19 +253,30 @@ impl ConfigCompiler for MihomoCompiler {
 
 /// DNS section.
 ///
-/// Nameservers carry the  suffix, which is how Mihomo is told to send
+/// Nameservers carry the `#<group>` suffix, which is how Mihomo is told to send
 /// the query through the proxy group instead of straight to the resolver. That
 /// suffix is the entire leak-protection story here: without it every lookup
 /// leaves the machine in plain sight of the local network, even when the traffic
 /// itself is tunnelled.
-fn dns_block(mode: DnsMode) -> Yaml {
+fn dns_block(mode: DnsMode, ipv6: bool) -> Yaml {
     let mut dns = Yaml::map()
         .with("enable", Yaml::bool(true))
-        .with("ipv6", Yaml::bool(false))
-        .with("default-nameserver", Yaml::strings(["223.5.5.5"]))
+        .with("listen", Yaml::str("0.0.0.0:1053"))
+        .with("ipv6", Yaml::bool(ipv6))
+        .with(
+            "default-nameserver",
+            Yaml::strings(["223.5.5.5", "119.29.29.29"]),
+        )
+        .with(
+            "proxy-server-nameserver",
+            Yaml::strings(["223.5.5.5", "119.29.29.29"]),
+        )
         .with(
             "nameserver",
-            Yaml::strings([format!("https://1.1.1.1/dns-query#{PROXY_GROUP}")]),
+            Yaml::strings([
+                format!("https://1.1.1.1/dns-query#{PROXY_GROUP}"),
+                format!("https://8.8.8.8/dns-query#{PROXY_GROUP}"),
+            ]),
         )
         .with(
             "fallback",
@@ -251,11 +293,46 @@ fn dns_block(mode: DnsMode) -> Yaml {
             .with("fake-ip-range", Yaml::str("198.18.0.1/16"))
             .with(
                 "fake-ip-filter",
-                Yaml::strings(["*.lan", "*.local", "localhost.ptlogin2.qq.com"]),
+                Yaml::strings([
+                    "*.lan",
+                    "*.local",
+                    "*.localhost",
+                    "localhost.ptlogin2.qq.com",
+                    "dns.msftncsi.com",
+                    "+.stun.*.*",
+                ]),
             );
     }
 
     dns
+}
+
+/// Protocol sniffer so TUN IP-only connections still recover hostnames for domain rules.
+fn sniffer_block() -> Yaml {
+    Yaml::map()
+        .with("enable", Yaml::bool(true))
+        .with("parse-pure-ip", Yaml::bool(true))
+        .with(
+            "sniff",
+            Yaml::map()
+                .with(
+                    "HTTP",
+                    Yaml::map()
+                        .with(
+                            "ports",
+                            Yaml::List(vec![Yaml::int(80), Yaml::str("8080-8880")]),
+                        )
+                        .with("override-destination", Yaml::bool(true)),
+                )
+                .with(
+                    "TLS",
+                    Yaml::map().with("ports", Yaml::List(vec![Yaml::int(443), Yaml::int(8443)])),
+                )
+                .with(
+                    "QUIC",
+                    Yaml::map().with("ports", Yaml::List(vec![Yaml::int(443), Yaml::int(8443)])),
+                ),
+        )
 }
 
 fn target_label(target: RuleTarget) -> &'static str {
@@ -266,53 +343,73 @@ fn target_label(target: RuleTarget) -> &'static str {
     }
 }
 
+fn target_label_for<'a>(
+    target: RuleTarget,
+    group: Option<&'a str>,
+    valid_groups: &HashSet<String>,
+) -> &'a str {
+    if target == RuleTarget::Proxy {
+        if let Some(name) = group {
+            if valid_groups.contains(name) {
+                return name;
+            }
+        }
+    }
+    target_label(target)
+}
+
 /// Mihomo rule list.
 ///
-/// Precedence in Split mode:
+/// Precedence:
 /// user custom rules -> user rule-sets -> subscription rules/rule-sets (if present)
 /// -> built-in split rules + core geo fallback -> final target.
+///
+/// Always emitted regardless of initial `mode` so live `PATCH /configs` mode switching
+/// between `global`, `rule`, and `direct` works immediately without recompiling.
 fn rule_lines(
-    mode: RuleMode,
     profile: &Profile,
     custom: &[CustomRule],
     user_sets: &[&RuleSet],
     sub_sets: &[&RuleSet],
+    valid_groups: &HashSet<String>,
 ) -> Vec<String> {
-    let mut lines: Vec<String> = custom.iter().map(custom_line).collect();
+    let mut lines: Vec<String> = custom
+        .iter()
+        .map(|rule| custom_line(rule, valid_groups))
+        .collect();
 
     for set in user_sets {
         lines.push(format!(
             "RULE-SET,{},{}",
             set.name,
-            target_label(set.target)
+            target_label_for(set.target, set.group.as_deref(), valid_groups)
         ));
     }
 
-    let final_target = match mode {
-        RuleMode::Global => RuleTarget::Proxy,
-        RuleMode::Direct => RuleTarget::Direct,
-        RuleMode::Split => {
-            if profile.has_subscription_rules() {
-                for set in sub_sets {
-                    lines.push(format!(
-                        "RULE-SET,{},{}",
-                        set.name,
-                        target_label(set.target)
-                    ));
-                }
-                lines.extend(profile.rules.iter().map(custom_line));
-                profile.default_target.unwrap_or(RuleTarget::Proxy)
-            } else {
-                lines.extend(
-                    super::builtin_rules::builtin_split_rules()
-                        .iter()
-                        .map(custom_line),
-                );
-                lines.push("GEOSITE,cn,DIRECT".to_string());
-                lines.push("GEOIP,CN,DIRECT".to_string());
-                RuleTarget::Proxy
-            }
+    let final_target = if profile.has_subscription_rules() {
+        for set in sub_sets {
+            lines.push(format!(
+                "RULE-SET,{},{}",
+                set.name,
+                target_label_for(set.target, set.group.as_deref(), valid_groups)
+            ));
         }
+        lines.extend(
+            profile
+                .rules
+                .iter()
+                .map(|rule| custom_line(rule, valid_groups)),
+        );
+        profile.default_target.unwrap_or(RuleTarget::Proxy)
+    } else {
+        lines.extend(
+            super::builtin_rules::builtin_split_rules()
+                .iter()
+                .map(|rule| custom_line(rule, valid_groups)),
+        );
+        lines.push("GEOSITE,cn,DIRECT".to_string());
+        lines.push("GEOIP,CN,DIRECT".to_string());
+        RuleTarget::Proxy
     };
 
     lines.push(format!("MATCH,{}", target_label(final_target)));
@@ -320,8 +417,8 @@ fn rule_lines(
 }
 
 /// One rule in Mihomo's syntax.
-fn custom_line(rule: &CustomRule) -> String {
-    let target = target_label(rule.target);
+fn custom_line(rule: &CustomRule, valid_groups: &HashSet<String>) -> String {
+    let target = target_label_for(rule.target, rule.group.as_deref(), valid_groups);
     match rule.kind {
         RuleKind::Domain => format!("DOMAIN,{},{target}", rule.value),
         RuleKind::DomainSuffix => format!("DOMAIN-SUFFIX,{},{target}", rule.value),
@@ -541,6 +638,7 @@ pub fn compile_yaml(
 mod tests {
     use super::*;
     use crate::profile::node::{GrpcOptions, RealityConfig, TlsConfig, WsOptions};
+    use crate::RuleMode;
 
     fn node_with(credentials: Credentials, tls: Option<TlsConfig>) -> Node {
         let mut node = Node {
@@ -775,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn global_mode_is_a_single_catch_all_rule() {
+    fn global_mode_sets_global_mode_and_global_group() {
         let node = node_with(
             Credentials::Trojan {
                 password: "pw".to_string(),
@@ -785,7 +883,8 @@ mod tests {
         let text = compile_yaml(&Profile::new("p", vec![node]), &CompileOptions::default())
             .unwrap()
             .text;
-        assert!(!text.contains("GEOSITE"), "{text}");
+        assert!(text.contains(r#""mode": "global""#), "{text}");
+        assert!(text.contains(r#""name": "GLOBAL""#), "{text}");
         assert!(text.contains("MATCH,PROXY"), "{text}");
     }
 
@@ -829,14 +928,14 @@ mod tests {
     }
 
     #[test]
-    fn tun_upgrades_off_dns_to_split() {
+    fn tun_upgrades_off_dns_to_fakeip() {
         let node = node_with(
             Credentials::Trojan {
                 password: "pw".to_string(),
             },
             None,
         );
-        // dns is Off, but TUN makes a DNS section necessary.
+        // dns is Off, but TUN upgrades it to FakeIp so stub resolvers never loop.
         let options = CompileOptions {
             tun: true,
             ..Default::default()
@@ -845,6 +944,7 @@ mod tests {
             .unwrap()
             .text;
         assert!(text.contains(r#""dns":"#), "{text}");
+        assert!(text.contains(r#""enhanced-mode": "fake-ip""#), "{text}");
     }
 
     #[test]
@@ -960,6 +1060,7 @@ mod tests {
             kind: RuleKind::DomainSuffix,
             value: "sub.example.com".to_string(),
             target: RuleTarget::Direct,
+            group: None,
         }];
         let options = CompileOptions {
             rules: RuleMode::Split,
@@ -974,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_mode_sets_clash_mode_and_match_direct() {
+    fn direct_mode_sets_clash_mode_and_retains_global_group() {
         let node = node_with(
             Credentials::Trojan {
                 password: "pw".to_string(),
@@ -989,7 +1090,7 @@ mod tests {
             .unwrap()
             .text;
         assert!(text.contains(r#""mode": "direct""#), "{text}");
-        assert!(text.contains("MATCH,DIRECT"), "{text}");
+        assert!(text.contains(r#""name": "GLOBAL""#), "{text}");
     }
 
     #[test]

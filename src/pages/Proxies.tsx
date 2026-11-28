@@ -14,11 +14,11 @@
  */
 
 import { Activity, Check, LayoutGrid, List, Search, Star, X, Zap } from 'lucide-react'
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 
 import { PageHeader } from '../components/Sidebar'
 import { VirtualList } from '../components/VirtualList'
-import { Badge, Button, Card, Empty } from '../components/ui'
+import { Badge, Button, Card, Empty, FilterChip } from '../components/ui'
 import { useApp } from '../store/app'
 import type { LatencySample, Protocol } from '../types'
 
@@ -61,11 +61,23 @@ export function Proxies() {
   const testNodeDelay = useApp((state) => state.testNodeDelay)
   const selectNode = useApp((state) => state.selectNode)
   const toggleFavorite = useApp((state) => state.toggleFavorite)
+  const activeCore = useApp((state) => state.status?.active_core ?? null)
+  const proxyGroups = useApp((state) => state.proxyGroups)
+  const refreshProxyGroups = useApp((state) => state.refreshProxyGroups)
+  const selectGroupProxy = useApp((state) => state.selectGroupProxy)
   const [query, setQuery] = useState('')
   const [protocol, setProtocol] = useState<Protocol | 'all'>('all')
   const [onlyFavorites, setOnlyFavorites] = useState(false)
+  const [hideTimeout, setHideTimeout] = useState(false)
+  const [selectedGroup, setSelectedGroup] = useState<string>('PROXY')
   const [sortBy, setSortBy] = useState<SortMode>('name')
   const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode)
+
+  useEffect(() => {
+    if (activeCore && activeCore !== 'xray') {
+      void refreshProxyGroups()
+    }
+  }, [activeCore, refreshProxyGroups])
 
   const changeViewMode = (next: ViewMode) => {
     setViewMode(next)
@@ -95,6 +107,10 @@ export function Proxies() {
     const filtered = nodes.filter((node) => {
       if (protocol !== 'all' && node.protocol !== protocol) return false
       if (onlyFavorites && !favoriteSet.has(node.id)) return false
+      if (hideTimeout) {
+        const sample = latency[node.id]
+        if (sample && sample.latency_ms === null) return false
+      }
       if (
         needle !== '' &&
         !node.name.toLowerCase().includes(needle) &&
@@ -123,10 +139,24 @@ export function Proxies() {
       return NAME_COLLATOR.compare(a.name, b.name)
     })
     return filtered
-  }, [nodes, protocol, deferredQuery, onlyFavorites, favoriteSet, sortBy, latency])
+  }, [nodes, protocol, deferredQuery, onlyFavorites, hideTimeout, favoriteSet, sortBy, latency])
 
   const filteredActive =
-    query.trim() !== '' || protocol !== 'all' || onlyFavorites
+    query.trim() !== '' || protocol !== 'all' || onlyFavorites || hideTimeout
+  const visibleGroups = useMemo(
+    () => proxyGroups.filter((group) => group.name !== 'GLOBAL'),
+    [proxyGroups],
+  )
+  const activeGroupObj = useMemo(() => {
+    if (visibleGroups.length === 0) return null
+    return (
+      visibleGroups.find((group) => group.name === selectedGroup) ??
+      visibleGroups.find((group) => group.name === 'PROXY') ??
+      visibleGroups[0]
+    )
+  }, [visibleGroups, selectedGroup])
+  const nodesByName = useMemo(() => new Map(nodes.map((node) => [node.name, node])), [nodes])
+  const showCustomGroup = Boolean(activeGroupObj && activeGroupObj.name !== 'PROXY')
 
   return (
     <div>
@@ -236,6 +266,11 @@ export function Proxies() {
           onClick={() => setOnlyFavorites((value) => !value)}
           label={`收藏 ${favorites.length}`}
         />
+        <FilterChip
+          active={hideTimeout}
+          onClick={() => setHideTimeout((value) => !value)}
+          label="隐藏超时"
+        />
         <div className="flex items-center gap-1 rounded-lg border border-line bg-panel p-1">
           <button
             type="button"
@@ -260,7 +295,93 @@ export function Proxies() {
         </div>
       </div>
 
-      {visible.length === 0 ? (
+      {visibleGroups.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-1.5 rounded-xl border border-line bg-panel p-1.5">
+          {visibleGroups.map((group) => {
+            const active = activeGroupObj?.name === group.name
+            const label =
+              group.name === 'PROXY' ? '手动选择' : group.name === 'AUTO' ? '自动选择' : group.name
+            return (
+              <button
+                key={group.name}
+                type="button"
+                onClick={() => setSelectedGroup(group.name)}
+                className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-[12.5px] transition-colors ${
+                  active
+                    ? 'bg-accent-soft font-medium text-accent'
+                    : 'text-muted hover:bg-panel-hover hover:text-fg'
+                }`}
+              >
+                <span>{label}</span>
+                {group.now && (
+                  <span className="max-w-[140px] truncate text-[11px] opacity-75">
+                    · {group.now}
+                  </span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {showCustomGroup && activeGroupObj ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {activeGroupObj.all
+            .filter((member) => {
+              const needle = deferredQuery.trim().toLowerCase()
+              if (needle !== '' && !member.toLowerCase().includes(needle)) return false
+              const matchedNode = nodesByName.get(member)
+              if (hideTimeout && matchedNode) {
+                const sample = latency[matchedNode.id]
+                if (sample && sample.latency_ms === null) return false
+              }
+              return true
+            })
+            .map((member) => {
+              const matchedNode = nodesByName.get(member)
+              const sample = matchedNode ? latency[matchedNode.id] : undefined
+              const isSelected = activeGroupObj.now === member
+              const selectable = activeGroupObj.group_type.toLowerCase() !== 'urltest'
+              return (
+                <button
+                  key={`${activeGroupObj.name}-${member}`}
+                  type="button"
+                  disabled={!selectable}
+                  onClick={() => {
+                    if (selectable && !isSelected) {
+                      void selectGroupProxy(activeGroupObj.name, member)
+                    }
+                  }}
+                  className={`flex flex-col justify-between rounded-xl border p-3.5 text-left transition-colors ${
+                    isSelected
+                      ? 'border-accent/50 bg-accent-soft'
+                      : 'border-line bg-panel hover:bg-panel-hover'
+                  } ${!selectable ? 'cursor-default' : ''}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-[13.5px] font-medium text-fg">{member}</span>
+                    {isSelected && (
+                      <Check size={14} strokeWidth={2.6} className="shrink-0 text-accent" />
+                    )}
+                  </div>
+                  <div className="mt-2.5 flex items-center justify-between text-[11.5px] text-muted">
+                    {matchedNode ? (
+                      <>
+                        <Badge tone="neutral">{PROTOCOL_LABEL[matchedNode.protocol]}</Badge>
+                        <LatencyCell sample={sample} />
+                      </>
+                    ) : (
+                      <>
+                        <Badge tone="neutral">{activeGroupObj.group_type}</Badge>
+                        <span className="text-faint">策略成员</span>
+                      </>
+                    )}
+                  </div>
+                </button>
+              )
+            })}
+        </div>
+      ) : visible.length === 0 ? (
         <Card className="p-0">
           <Empty>
             {nodes.length > 0 ? (
@@ -519,25 +640,4 @@ function LatencyCell({ sample }: { sample?: LatencySample }) {
   const ms = sample.latency_ms
   const tone = ms < 200 ? 'text-success' : ms < 500 ? 'text-warn' : 'text-danger'
   return <span className={tone}>{ms} ms</span>
-}
-
-function FilterChip({
-  active,
-  onClick,
-  label,
-}: {
-  active: boolean
-  onClick: () => void
-  label: string
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className={`rounded-md px-2 py-1 text-[12px] transition-colors ${
-        active ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg'
-      }`}
-    >
-      {label}
-    </button>
-  )
 }

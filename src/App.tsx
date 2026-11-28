@@ -23,6 +23,7 @@ import { Dashboard } from './pages/Dashboard'
 import { Logs } from './pages/Logs'
 import { Profiles } from './pages/Profiles'
 import { Proxies } from './pages/Proxies'
+import { Rules } from './pages/Rules'
 import { Settings } from './pages/Settings'
 import { isTauri } from './services/api'
 import { useApp, type Page } from './store/app'
@@ -31,6 +32,7 @@ import type { LatencySample, TrafficSample } from './types'
 const SHORTCUT_PAGES: Page[] = [
   'dashboard',
   'proxies',
+  'rules',
   'connections',
   'profiles',
   'logs',
@@ -215,6 +217,7 @@ export function App() {
           <div className="flex-1 overflow-y-auto px-7 py-6">
             {page === 'dashboard' && <Dashboard />}
             {page === 'proxies' && <Proxies />}
+            {page === 'rules' && <Rules />}
             {page === 'connections' && <Connections />}
             {page === 'profiles' && <Profiles />}
             {page === 'settings' && <Settings />}

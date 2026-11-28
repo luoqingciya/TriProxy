@@ -145,6 +145,7 @@ pub fn builtin_split_rules() -> Vec<CustomRule> {
             kind: RuleKind::IpCidr,
             value: (*cidr).to_string(),
             target: RuleTarget::Direct,
+            group: None,
         });
     }
     for suffix in LOCAL_SUFFIXES {
@@ -152,6 +153,7 @@ pub fn builtin_split_rules() -> Vec<CustomRule> {
             kind: RuleKind::DomainSuffix,
             value: (*suffix).to_string(),
             target: RuleTarget::Direct,
+            group: None,
         });
     }
     for suffix in DIRECT_CN_SUFFIXES {
@@ -159,6 +161,7 @@ pub fn builtin_split_rules() -> Vec<CustomRule> {
             kind: RuleKind::DomainSuffix,
             value: (*suffix).to_string(),
             target: RuleTarget::Direct,
+            group: None,
         });
     }
     for suffix in PROXY_GLOBAL_SUFFIXES {
@@ -166,6 +169,7 @@ pub fn builtin_split_rules() -> Vec<CustomRule> {
             kind: RuleKind::DomainSuffix,
             value: (*suffix).to_string(),
             target: RuleTarget::Proxy,
+            group: None,
         });
     }
 

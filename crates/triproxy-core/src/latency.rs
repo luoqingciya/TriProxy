@@ -80,6 +80,164 @@ impl LatencySample {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboundIpInfo {
+    pub ip: Option<String>,
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub isp: Option<String>,
+    pub via_proxy: bool,
+    pub error: Option<String>,
+}
+
+/// Probe the current outbound IP and geo metadata, routing through the running
+/// local HTTP proxy port when available.
+pub async fn check_outbound_ip(proxy_port: Option<u16>) -> OutboundIpInfo {
+    let via_proxy = proxy_port.is_some();
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .user_agent("TriProxy/1.0");
+    if let Some(port) = proxy_port {
+        match reqwest::Proxy::all(format!("http://127.0.0.1:{port}")) {
+            Ok(proxy) => {
+                builder = builder.proxy(proxy);
+            }
+            Err(err) => {
+                return OutboundIpInfo {
+                    ip: None,
+                    country: None,
+                    city: None,
+                    isp: None,
+                    via_proxy,
+                    error: Some(format!("代理地址无效：{err}")),
+                };
+            }
+        }
+    }
+
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(err) => {
+            return OutboundIpInfo {
+                ip: None,
+                country: None,
+                city: None,
+                isp: None,
+                via_proxy,
+                error: Some(format!("创建 HTTP 客户端失败：{err}")),
+            };
+        }
+    };
+
+    if let Ok(resp) = client
+        .get("http://ip-api.com/json/?lang=zh-CN")
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if json["status"].as_str() == Some("success") {
+                    if let Some(ip) = json["query"].as_str().filter(|s| !s.is_empty()) {
+                        return OutboundIpInfo {
+                            ip: Some(ip.to_string()),
+                            country: json["country"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(ToOwned::to_owned),
+                            city: json["city"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(ToOwned::to_owned),
+                            isp: json["isp"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(ToOwned::to_owned),
+                            via_proxy,
+                            error: None,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(resp) = client.get("https://ipinfo.io/json").send().await {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(ip) = json["ip"].as_str().filter(|s| !s.is_empty()) {
+                    return OutboundIpInfo {
+                        ip: Some(ip.to_string()),
+                        country: json["country"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned),
+                        city: json["city"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned),
+                        isp: json["org"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .map(ToOwned::to_owned),
+                        via_proxy,
+                        error: None,
+                    };
+                }
+            }
+        }
+    }
+
+    match client.get("https://api.ipify.org?format=json").send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
+            Ok(json) => {
+                if let Some(ip) = json["ip"].as_str().filter(|s| !s.is_empty()) {
+                    OutboundIpInfo {
+                        ip: Some(ip.to_string()),
+                        country: None,
+                        city: None,
+                        isp: None,
+                        via_proxy,
+                        error: None,
+                    }
+                } else {
+                    OutboundIpInfo {
+                        ip: None,
+                        country: None,
+                        city: None,
+                        isp: None,
+                        via_proxy,
+                        error: Some("IP 检测接口未返回有效 IP".to_string()),
+                    }
+                }
+            }
+            Err(err) => OutboundIpInfo {
+                ip: None,
+                country: None,
+                city: None,
+                isp: None,
+                via_proxy,
+                error: Some(format!("解析 IP 检测响应失败：{err}")),
+            },
+        },
+        Ok(resp) => OutboundIpInfo {
+            ip: None,
+            country: None,
+            city: None,
+            isp: None,
+            via_proxy,
+            error: Some(format!("IP 检测请求返回状态 {}", resp.status())),
+        },
+        Err(err) => OutboundIpInfo {
+            ip: None,
+            country: None,
+            city: None,
+            isp: None,
+            via_proxy,
+            error: Some(format!("IP 检测失败：{err}")),
+        },
+    }
+}
+
 /// Measure the TCP handshake time to one endpoint.
 pub async fn tcp_latency(server: &str, port: u16, timeout: Duration) -> Result<u64> {
     let deadline = Instant::now() + timeout;

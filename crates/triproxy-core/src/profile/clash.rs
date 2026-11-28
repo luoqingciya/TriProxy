@@ -48,6 +48,8 @@ struct ClashConfig {
 #[derive(Debug, Deserialize, Default)]
 struct ClashGroup {
     name: String,
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
     #[serde(default)]
     proxies: Vec<String>,
 }
@@ -68,6 +70,7 @@ struct ClashRuleProvider {
 #[derive(Debug, Clone)]
 pub struct ClashParsed {
     pub nodes: Vec<Node>,
+    pub groups: Vec<super::ProxyGroup>,
     pub rules: Vec<CustomRule>,
     pub rule_sets: Vec<RuleSet>,
     pub default_target: Option<RuleTarget>,
@@ -203,6 +206,7 @@ pub fn parse_full(text: &str) -> ClashParsed {
             ));
             return ClashParsed {
                 nodes: Vec::new(),
+                groups: Vec::new(),
                 rules: Vec::new(),
                 rule_sets: Vec::new(),
                 default_target: None,
@@ -219,6 +223,7 @@ pub fn parse_full(text: &str) -> ClashParsed {
         ));
         return ClashParsed {
             nodes: Vec::new(),
+            groups: Vec::new(),
             rules: Vec::new(),
             rule_sets: Vec::new(),
             default_target: None,
@@ -238,17 +243,39 @@ pub fn parse_full(text: &str) -> ClashParsed {
         }
     }
 
-    let group_map: HashMap<String, Vec<String>> = config
-        .proxy_groups
-        .into_iter()
-        .map(|group| (group.name.trim().to_string(), group.proxies))
-        .collect();
+    let mut groups: Vec<super::ProxyGroup> = Vec::with_capacity(config.proxy_groups.len());
+    let mut group_map: HashMap<String, Vec<String>> = HashMap::new();
+    for group in config.proxy_groups {
+        let name = group.name.trim().to_string();
+        if name.is_empty() || group.proxies.is_empty() {
+            continue;
+        }
+        let kind = match group
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("url-test") => super::GroupKind::UrlTest,
+            Some("fallback") => super::GroupKind::Fallback,
+            Some("load-balance") => super::GroupKind::LoadBalance,
+            _ => super::GroupKind::Select,
+        };
+        group_map.insert(name.clone(), group.proxies.clone());
+        groups.push(super::ProxyGroup {
+            name,
+            kind,
+            members: group.proxies,
+        });
+    }
 
     let (rules, rule_sets, default_target) =
         parse_clash_rules(&config.rules, &config.rule_providers, &group_map);
 
     ClashParsed {
         nodes,
+        groups,
         rules,
         rule_sets,
         default_target,
@@ -339,7 +366,13 @@ fn parse_clash_rules(
             continue;
         }
 
-        let target = resolve_target(fields[2], groups, 0);
+        let raw_target = fields[2].trim();
+        let target = resolve_target(raw_target, groups, 0);
+        let group = (!matches!(
+            raw_target.to_ascii_uppercase().as_str(),
+            "DIRECT" | "REJECT" | "REJECT-DROP" | "PROXY"
+        ) && groups.contains_key(raw_target))
+        .then(|| raw_target.to_string());
         let value = fields[1];
         if value.is_empty() {
             continue;
@@ -347,9 +380,13 @@ fn parse_clash_rules(
 
         if kind_upper == "RULE-SET" {
             if let Some(provider) = providers.get(value) {
-                if let Some(set) =
-                    build_clash_rule_set(value, provider, target, &mut seen_provider_names)
-                {
+                if let Some(set) = build_clash_rule_set(
+                    value,
+                    provider,
+                    target,
+                    group.clone(),
+                    &mut seen_provider_names,
+                ) {
                     rule_sets.push(set);
                 }
             }
@@ -382,6 +419,7 @@ fn parse_clash_rules(
             kind,
             value: value.to_string(),
             target,
+            group,
         });
     }
 
@@ -392,6 +430,7 @@ fn build_clash_rule_set(
     provider_key: &str,
     provider: &ClashRuleProvider,
     target: RuleTarget,
+    group: Option<String>,
     seen_names: &mut HashSet<String>,
 ) -> Option<RuleSet> {
     if provider
@@ -467,6 +506,7 @@ fn build_clash_rule_set(
         target,
         behavior,
         format,
+        group,
     })
 }
 
