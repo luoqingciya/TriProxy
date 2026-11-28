@@ -4,26 +4,26 @@
   Part of TriProxy. See LICENSE and ADDITIONAL-TERMS.md.
 -->
 
-## 本次更新（v0.2.10）
+## 本次更新（v0.2.11）
 
-**这一版是一次围绕稳定性、安全性、性能与前后端一致性的全面优化。**
+**这一版围绕离线零阻塞冷启动、Linux Root 提权与 TUN 全局接管、订阅策略组与 FlClash 交互对齐以及前端性能进行了全面升级。**
 
-### 控制器与连接体验
+### TUN 全局路由、离线分流与内核兼容
 
-- **控制器字段对齐与鉴权**：修复 Mihomo / sing-box 控制器快照及连接字段在 `camelCase` 与 `snake_case` 上的解析差异；自动生成并校验 Bearer `api_secret`，控制器请求跳过系统代理，设置页新增 `api_port` 配置
-- **流量流与轮询优化**：桌面端改为后台常驻订阅流量流并复用缓存的控制器客户端；页面不可见（`document.hidden`）时暂停后台轮询，降低空闲资源开销
+- **修复 TUN 全局转发与国内冷启动阻塞**：为 `sing-box` 补全 `route.auto_detect_interface` 与首条 `sniff` 规则，为 `mihomo` 在所有模式下保留 `GLOBAL` 组并补全 `sniffer`、`listen: 0.0.0.0:1053` 与 `tcp://any:53`；TUN 开启时默认升级 `DnsMode::Off` 为 `FakeIp`
+- **内置分流规则 100% 离线生效**：裸配置无订阅规则时内置丰富国内直连后缀与常见海外代理规则，不再在首次启动时自动拉取 GitHub 远程规则集，彻底消除国内直连超时阻塞；仅当显式配置 `GEOSITE` / 远程规则集时才生成远程声明（并启用 `experimental.cache_file`），同时移除 `sing-box 1.14` 弃用字段 `download_detour` 与 `independent_cache`
+- **高级 TUN 与热切换**：新增 `TUN 协议栈`（`mixed` / `gvisor` / `system`）、`严格路由 (strict-route)` 与 `IPv6 支持` 开关，并在支持控制器的核心启用 `PATCH /configs` 即时热切换代理模式
+- **订阅策略组优先**：完整解析 Clash 订阅 `proxy-groups` 及规则/规则集引用的目标策略组，无订阅规则时自动回退至软件内置分流规则
 
-### 路由、DNS 与内核生命周期
+### Linux Root 启动与权限无感集成
 
-- **DNS 直连分流与规则集镜像**：补齐国内域名直连 DNS 分流规则（Mihomo `nameserver-policy`；sing-box 在 `fakeip` 前让 `geosite-cn`/`cn` 走 `local-dns`），并为 sing-box 规则集补齐下载镜像支持
-- **端口与配置一致性**：修复 Xray 监听端口为 `65535` 时的 HTTP 端口冲突并统一 `http_proxy_port` 计算；`start`/`switch` 完整保留已保存的 `tun`、`system_proxy`、`api_port`、`api_secret`、`rule_set_mirror` 配置，同核心切换走重载路径
-- **代理与进程健壮性**：补齐 macOS / GNOME 系统代理绕过域名格式化与写入失败回滚；核心日志管道改为有界通道 + `BufWriter` 并支持运行时轮转；进程探测增加 PID 复用与 Linux 僵尸进程防护，核心下载更新先校验可用性再替换
+- **启动自动提权**：Linux 图形界面启动时自动通过 `pkexec` 弹窗提权以 `root` 运行（取消授权可优雅回退普通用户），并自动放行本地 X11/XWayland 访问；虚拟网卡统一固定命名为 `triproxy`
+- **保留原用户数据与桌面代理**：以 `root` 身份运行时继续读写原桌面用户的配置目录，并通过 `runuser` 注入原用户桌面会话操作 `gsettings` 系统代理
 
-### 安全、存储与桌面端细节
+### 对齐 FlClash 的体验与性能提升
 
-- **原子写入与路径校验**：配置与设置保存统一使用临时文件原子替换（`write_atomic`），profile ID 全路径校验防止路径穿越
-- **桌面端与 CLI 改进**：支持冷启动传入的 `triproxy://` 深链接并校验 `http://`/`https://` 来源；资料页支持直接导入 URL 订阅；同步 I/O 与系统平台调用移入 `spawn_blocking` 避免阻塞界面，通知与错误横幅改为分层堆叠；CLI 拆分为模块化子命令，延迟测速并发化并改用批量内存读取
-- **文档修正**：更正 Fedora RPM 依赖说明与实际卸载包名（`tri-proxy`）
+- **规则页与节点分组**：新增「规则」页面支持查看规则来源、规则集、策略组及搜索筛选；「节点」页支持策略组标签切换、紧凑列表/网格视图与「隐藏超时」过滤
+- **托盘、仪表盘与交互效率**：托盘菜单新增「规则 / 全局 / 直连」模式切换、系统代理与 TUN 开关；仪表盘新增「出口 IP 检测」、Root 权限标识与累计流量统计；支持自定义测速 URL（`probe_url`）、侧边栏快速连接、设置页即改即保存、`Ctrl/⌘+1..7` 快捷键以及长列表虚拟滚动（并支持预发布版本号的 RPM 打包）
 
 ### v0.2.0 起的功能
 
