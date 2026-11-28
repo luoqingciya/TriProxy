@@ -258,8 +258,8 @@ impl ConfigCompiler for SingBoxCompiler {
                 }
             }
         } else {
-            // Built-in split rules work immediately offline, backed up
-            // by remote SagerNet `.srs` rule-sets for full geo coverage.
+            // Built-in split rules stay 100% offline so cold-starting a bare
+            // profile never blocks on remote GitHub downloads.
             let builtin = super::builtin_rules::builtin_split_rules();
             push_batched_rules(
                 &mut rules,
@@ -268,23 +268,6 @@ impl ConfigCompiler for SingBoxCompiler {
                 mirror.as_deref(),
                 &mut required_geo_sets,
             );
-            if seen_tags.insert("geosite-cn".to_string()) {
-                let url = apply_mirror(
-                    "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
-                    mirror.as_deref(),
-                );
-                declared.push(remote_srs_declaration("geosite-cn", &url));
-            }
-            if seen_tags.insert("geoip-cn".to_string()) {
-                let url = apply_mirror(
-                    "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
-                    mirror.as_deref(),
-                );
-                declared.push(remote_srs_declaration("geoip-cn", &url));
-            }
-            rules
-                .push(json!({ "rule_set": "geosite-cn", "action": "route", "outbound": "direct" }));
-            rules.push(json!({ "rule_set": "geoip-cn", "action": "route", "outbound": "direct" }));
             PROXY_GROUP
         };
 
@@ -328,6 +311,13 @@ impl ConfigCompiler for SingBoxCompiler {
             clash_api["secret"] = json!(secret);
         }
 
+        let mut experimental = json!({
+            "clash_api": clash_api
+        });
+        if !declared.is_empty() {
+            experimental["cache_file"] = json!({ "enabled": true });
+        }
+
         let mut document = json!({
             "log": {
                 "level": options.log_level,
@@ -336,9 +326,7 @@ impl ConfigCompiler for SingBoxCompiler {
             "inbounds": inbounds,
             "outbounds": outbounds,
             "route": route,
-            "experimental": {
-                "clash_api": clash_api
-            }
+            "experimental": experimental
         });
 
         if dns_mode != DnsMode::Off {
@@ -402,9 +390,6 @@ fn remote_srs_declaration(tag: &str, url: &str) -> Value {
         "type": "remote",
         "format": "binary",
         "url": url,
-        // Fetched directly: routing the download through the proxy would
-        // deadlock, since the rule-set decides what goes through it.
-        "download_detour": "direct",
     })
 }
 
@@ -626,7 +611,6 @@ fn dns_object(mode: DnsMode, rules_mode: RuleMode, has_geosite_cn: bool, ipv6: b
 
     let mut dns = serde_json::Map::new();
     dns.insert("final".to_string(), json!("proxy-dns"));
-    dns.insert("independent_cache".to_string(), json!(true));
     dns.insert(
         "strategy".to_string(),
         json!(if ipv6 { "prefer_ipv4" } else { "ipv4_only" }),
@@ -652,7 +636,10 @@ fn dns_object(mode: DnsMode, rules_mode: RuleMode, has_geosite_cn: bool, ipv6: b
     if has_geosite_cn {
         dns_rules.push(json!({ "rule_set": "geosite-cn", "server": "local-dns" }));
     } else if rules_mode != RuleMode::Direct {
-        dns_rules.push(json!({ "domain_suffix": ["cn"], "server": "local-dns" }));
+        dns_rules.push(json!({
+            "domain_suffix": super::builtin_rules::builtin_cn_suffixes(),
+            "server": "local-dns"
+        }));
     }
 
     if mode == DnsMode::FakeIp {
@@ -1006,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn split_mode_adds_remote_rule_sets_and_direct_rules() {
+    fn split_mode_uses_offline_direct_rules_without_remote_downloads() {
         let node = node_with(
             Credentials::Trojan {
                 password: "pw".to_string(),
@@ -1020,15 +1007,17 @@ mod tests {
         let compiled = SingBoxCompiler
             .compile(&Profile::new("p", vec![node]), &options)
             .unwrap();
+        assert!(!compiled.text.contains("raw.githubusercontent.com"));
+        assert!(!compiled.text.contains("independent_cache"));
+        assert!(!compiled.text.contains("download_detour"));
         let document: Value = serde_json::from_str(&compiled.text).unwrap();
 
-        let rule_sets = document["route"]["rule_set"].as_array().unwrap();
-        assert_eq!(rule_sets.len(), 2);
-        // Fetched directly: routing them through the proxy would deadlock.
-        assert_eq!(rule_sets[0]["download_detour"], "direct");
-
+        assert!(document["route"].get("rule_set").is_none());
         let rules = document["route"]["rules"].as_array().unwrap();
-        assert!(rules.iter().any(|r| r["rule_set"] == "geosite-cn"));
+        assert!(rules.iter().any(|r| r["domain_suffix"]
+            .as_array()
+            .is_some_and(|arr| arr.contains(&json!("qq.com")))
+            && r["outbound"] == "direct"));
         assert!(rules.iter().any(|r| r["ip_cidr"].is_array()));
     }
 
@@ -1158,6 +1147,12 @@ mod tests {
             api_secret: Some("tok123".to_string()),
             rules: RuleMode::Split,
             dns: DnsMode::Split,
+            custom_rules: vec![CustomRule {
+                kind: RuleKind::GeoSite,
+                value: "cn".to_string(),
+                target: RuleTarget::Direct,
+                group: None,
+            }],
             rule_set_mirror: Some("https://ghfast.top".to_string()),
             ..Default::default()
         };
@@ -1181,6 +1176,11 @@ mod tests {
             1
         );
         assert_eq!(document["experimental"]["clash_api"]["secret"], "tok123");
+        assert_eq!(document["experimental"]["cache_file"]["enabled"], true);
+        assert!(document["dns"].get("independent_cache").is_none());
+        assert!(document["route"]["rule_set"][0]
+            .get("download_detour")
+            .is_none());
         assert!(document["dns"]["rules"]
             .as_array()
             .unwrap()

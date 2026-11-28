@@ -89,6 +89,44 @@ const DIRECT_CN_SUFFIXES: &[&str] = &[
     "youku.com",
     "mgtv.com",
     "steamcontent.com",
+    "ele.me",
+    "amap.com",
+    "autonavi.com",
+    "didiglobal.com",
+    "kuaishou.com",
+    "douyu.com",
+    "huya.com",
+    "juejin.cn",
+    "cnblogs.com",
+    "oschina.net",
+    "edu.cn",
+    "gov.cn",
+    "10086.cn",
+    "10010.com",
+    "189.cn",
+    "cmbchina.com",
+    "icbc.com.cn",
+    "ccb.com",
+    "boc.cn",
+    "abchina.com",
+    "sina.com",
+    "sohu.com",
+    "ifeng.com",
+    "kugou.com",
+    "ximalaya.com",
+    "qunar.com",
+    "lenovo.com",
+    "oppo.com",
+    "vivo.com",
+    "dji.com",
+    "deepseek.com",
+    "moonshot.cn",
+    "kimi.ai",
+    "zhipuai.cn",
+    "aliyuncs.com",
+    "myqcloud.com",
+    "baidubce.com",
+    "volcengine.com",
 ];
 
 const PROXY_GLOBAL_SUFFIXES: &[&str] = &[
@@ -129,9 +167,13 @@ const PROXY_GLOBAL_SUFFIXES: &[&str] = &[
     "whatsapp.com",
 ];
 
-/// Return the built-in split ruleset (LAN direct, CN domains direct, common
-/// overseas/AI/dev services proxied). Core-native geo rules (`geosite-cn` and
-/// `geoip-cn`) are appended by each compiler after this list.
+/// Common Chinese domain suffixes routed direct when no subscription rule-set is active.
+pub fn builtin_cn_suffixes() -> &'static [&'static str] {
+    DIRECT_CN_SUFFIXES
+}
+
+/// Return the built-in offline split ruleset (LAN direct, CN domains direct,
+/// common overseas/AI/dev services proxied).
 pub fn builtin_split_rules() -> Vec<CustomRule> {
     let mut rules = Vec::with_capacity(
         LAN_CIDRS.len()

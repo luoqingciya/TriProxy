@@ -684,7 +684,7 @@ mod tests {
             .text
             .find("DOMAIN-SUFFIX,corp.internal,DIRECT")
             .unwrap();
-        let preset_at = mihomo.text.find("GEOSITE,cn,DIRECT").unwrap();
+        let preset_at = mihomo.text.find("DOMAIN-SUFFIX,qq.com,DIRECT").unwrap();
         assert!(
             custom_at < preset_at,
             "custom rule must come first:\n{}",
@@ -700,7 +700,11 @@ mod tests {
             .unwrap();
         let preset_pos = rules
             .iter()
-            .position(|r| r["rule_set"] == "geosite-cn")
+            .position(|r| {
+                r["domain_suffix"]
+                    .as_array()
+                    .is_some_and(|arr| arr.contains(&serde_json::json!("qq.com")))
+            })
             .unwrap();
         assert!(
             custom_pos < preset_pos,
@@ -838,7 +842,7 @@ mod tests {
             .iter()
             .map(|entry| entry["tag"].as_str().unwrap())
             .collect();
-        assert_eq!(tags, vec!["us", "geosite-cn", "geoip-cn"], "{tags:?}");
+        assert_eq!(tags, vec!["us"], "{tags:?}");
 
         // Xray has no rule-set concept at all; the entry must not leak into it.
         let xray = compile(CoreKind::Xray, &profile, &options).unwrap();

@@ -559,40 +559,6 @@ pub fn build_effective_rules(
                 .iter()
                 .map(|rule| rule_entry(rule, "builtin")),
         );
-        profile_rules.push(EffectiveRuleEntry {
-            kind: "GEOSITE".to_string(),
-            value: "cn".to_string(),
-            target: "DIRECT".to_string(),
-            group: None,
-            source: "builtin".to_string(),
-        });
-        profile_rules.push(EffectiveRuleEntry {
-            kind: "GEOIP".to_string(),
-            value: "CN".to_string(),
-            target: "DIRECT".to_string(),
-            group: None,
-            source: "builtin".to_string(),
-        });
-        rule_sets.push(EffectiveRuleSetEntry {
-            name: "geosite-cn".to_string(),
-            format: "sing-box".to_string(),
-            behavior: "domain".to_string(),
-            url: "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs"
-                .to_string(),
-            target: "DIRECT".to_string(),
-            group: None,
-            source: "builtin".to_string(),
-        });
-        rule_sets.push(EffectiveRuleSetEntry {
-            name: "geoip-cn".to_string(),
-            format: "sing-box".to_string(),
-            behavior: "ipcidr".to_string(),
-            url: "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs"
-                .to_string(),
-            target: "DIRECT".to_string(),
-            group: None,
-            source: "builtin".to_string(),
-        });
     }
 
     let groups = profile
@@ -754,10 +720,7 @@ mod tests {
         assert_eq!(builtin_view.source, "builtin");
         assert_eq!(builtin_view.custom_rules.len(), 1);
         assert!(!builtin_view.profile_rules.is_empty());
-        assert!(builtin_view
-            .rule_sets
-            .iter()
-            .any(|set| set.source == "builtin" && set.name == "geosite-cn"));
+        assert!(builtin_view.rule_sets.is_empty());
 
         let mut with_sub = bare;
         with_sub.rules.push(CustomRule {
